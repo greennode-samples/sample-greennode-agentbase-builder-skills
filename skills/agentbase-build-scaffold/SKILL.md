@@ -77,7 +77,7 @@ See the directory tree and module responsibilities in `/agentbase-build` → `re
 - `assets/backend/tests/{conftest,test_agent,test_isolation}.py` — `fake_llm` fixture (patches `get_llm` in every module listed in `LLM_MODULES`; add new LLM-calling modules there); conftest overrides env so tests don't depend on `.env`; per-user isolation tests.
 - `assets/backend/.python-version` — `3.13`.
 - `assets/backend/Dockerfile` — `python:3.13-slim` + uv, non-root, port 8080.
-- `assets/root/*` — Makefile, README, .gitignore, `.agentbase-state.json`.
+- `assets/root/*` — Makefile, README, .gitignore, `.agentbase-state.json`, `ci.yml` → `.github/workflows/ci.yml` (lint + test, eval gate, manual deploy; checked with actionlint) and `agent.yaml.tpl` → `deploy/agent.yaml.tpl` (manifest for `grn agentbase deploy up`, rendered in CI). Existing files are never overwritten — see `/agentbase-build-deploy` *CI/CD*.
 
 ## After scaffolding — customize for your domain
 

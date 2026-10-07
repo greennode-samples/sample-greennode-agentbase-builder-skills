@@ -11,3 +11,5 @@
 **/__pycache__/
 **/node_modules/
 src/frontend/.expo/
+# Rendered AgentBase manifest (contains secrets) — only deploy/agent.yaml.tpl is committed
+deploy/agent.yaml

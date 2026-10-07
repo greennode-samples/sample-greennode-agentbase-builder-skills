@@ -68,6 +68,9 @@ fi
 [[ -f "$TARGET/README.md" ]] || cp "$ROOT_TPL/README.md" "$TARGET/README.md"
 [[ -f "$TARGET/.gitignore" ]] || cp "$ROOT_TPL/gitignore" "$TARGET/.gitignore"
 [[ -f "$TARGET/.agentbase-state.json" ]] || cp "$ROOT_TPL/agentbase-state.json" "$TARGET/.agentbase-state.json"
+mkdir -p "$TARGET/.github/workflows" "$TARGET/deploy"
+[[ -f "$TARGET/.github/workflows/ci.yml" ]] || cp "$ROOT_TPL/ci.yml" "$TARGET/.github/workflows/ci.yml"
+[[ -f "$TARGET/deploy/agent.yaml.tpl" ]] || cp "$ROOT_TPL/agent.yaml.tpl" "$TARGET/deploy/agent.yaml.tpl"
 
 if [[ $WITH_FE -eq 1 ]]; then
   bash "$SKILLS_DIR/agentbase-build-frontend/scripts/setup_frontend.sh" "$NAME" "$TARGET/src/frontend" \
@@ -76,7 +79,7 @@ fi
 
 # Thay placeholder
 find "$TARGET" -type f \( -name '*.py' -o -name '*.md' -o -name '*.toml' -o -name '*.json' \
-  -o -name '*.ts' -o -name '*.tsx' -o -name '*.example' -o -name 'Makefile' -o -name 'Makefile.agentbase' -o -name 'Dockerfile' \) \
+  -o -name '*.ts' -o -name '*.tsx' -o -name '*.example' -o -name 'Makefile' -o -name 'Makefile.agentbase' -o -name 'Dockerfile' -o -name '*.yml' -o -name '*.tpl' \) \
   -not -path '*/node_modules/*' -not -path '*/.venv/*' -print0 |
   while IFS= read -r -d '' f; do
     sed -i.bak "s/__PROJECT_NAME__/$NAME/g" "$f" && rm -f "$f.bak"

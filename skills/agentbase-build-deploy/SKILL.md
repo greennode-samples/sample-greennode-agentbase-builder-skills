@@ -71,18 +71,67 @@ Push CR → create runtime → ACTIVE in ~40s; version update ~30s. Checks used:
 - A2A: `InMemoryTaskStore` is not shared across replicas ⇒ use `DatabaseTaskStore` when `max_replicas > 1`.
 - In-process caches (MCP tool list, negative cache, JWKS) are per-replica — acceptable.
 
-## CI/CD & permissions
+## Alternative: GreenNode CLI (`grn agentbase deploy`)
 
-- CI uses a **dedicated service account** (IAM) with only CR push + runtime update permissions for the project, never a personal SA. Secrets live in the CI secret store.
-- Standard pipeline: `make lint test` → `make eval MIN=…` → build amd64 → push CR → `runtime.sh update --env-file` (env file from the secret store) → smoke test `/health` + 1 keyed request → check traces.
+[`grn`](https://docs.greennode.ai/ai-stack/agent-base/manage-agentbase-with-the-greennode-cli) composes identity + (memory) + runtime under one **name** from a manifest:
+- `grn agentbase deploy generate` prints a template.
+- `deploy up --file agent.yaml` is idempotent: it creates what's missing and waits for `ACTIVE`.
+- `deploy status <name>` shows the state across services.
+- `deploy destroy <name>` deletes the runtime and memory; `--purge` also deletes the identity and cannot be undone.
+
+The scaffold ships `deploy/agent.yaml.tpl`, which the CI renders.
+
+- **Install from GitHub Releases with a pinned version.** Asset names carry the version (`grn-linux-amd64-v1.13.0`), and the docs' `releases/latest/download/grn-linux-amd64` link returns 404. Verify the asset against `SHA256SUMS`.
+- **Auth:**
+  - CI: a service account via `GRN_ACCESS_KEY_ID` / `GRN_SECRET_ACCESS_KEY` (machine mode).
+  - People: `grn login` (PKCE).
+  - One profile per environment (`grn configure --profile staging`). `grn agentbase context current` shows which environment is active.
+- **Manifest rules for this standard** (the docs' sample manifest differs; ours follows the other official pages):
+  - `name` = agent / identity name (3–50 chars, `^[a-zA-Z0-9_-]+$`). This is the identity that must hold your providers.
+  - `runtime.command: ["python", "main.py"]` (Dockerfile CMD); `runtime.env` = the full `.env.<env>` incl. `APP_ENV`.
+  - Autoscaling thresholds must be within **25–75 %** (the docs' sample uses 80); replicas 1–10.
+  - Memory: create it once with `/agentbase-memory` and pass `MEMORY_ID`/`MEMORY_STRATEGY_ID`. The template omits the `memory:` block. If you do use it, `namespaceTemplate` must be `/strategies/{memoryStrategyId}/actors/{actorId}` (the sample's `/strategies/USER_PREFERENCE/…` would not match `long_term.py`), and `eventExpiryDuration` is documented in days 1–365 on the Memory page vs `3600` in the CLI sample — check with `grn agentbase memory --help` before relying on it.
+- **Failure behavior:**
+  - `deploy up` does **not** roll back a partial failure; re-run it, or `destroy`.
+  - `-o json` prints secrets in clear text, so never use it in CI logs.
+- Not yet run end-to-end from this skill: verify the manifest once with `deploy up` on a dev environment.
+
+## CI/CD (`.github/workflows/ci.yml`, from the scaffold)
+
+| Job | When | Does |
+|---|---|---|
+| `test` | every push / PR | `uv sync --frozen`, ruff check + format check, pytest |
+| `eval` | push to main / manual | `run_eval --concurrency 1` gate (MaaS 10 RPM); skipped with a notice until `EVAL_LLM_API_KEY` exists |
+| `deploy` | manual (`workflow_dispatch`, input `deploy_env`) | pinned `grn` + SHA256 check → build `linux/amd64` → push to vCR → render manifest with `envsubst` from Environment secrets → `deploy up` → `deploy status` → `/health` smoke test → delete the rendered file |
+
+- One **GitHub Environment** per `dev` / `staging` / `prod`, with its own secrets and vars (listed at the top of `ci.yml`). Require reviewers on `prod`.
+- **Credentials:**
+  - CI uses a **dedicated service account**, never a person's.
+  - The documented policies are `AgentBaseFullAccess`, `vcrFullAccess` and `AiPlatformFullAccess`; narrower ones are not documented. See `/agentbase-build` `references/iam-permissions.md`.
+  - Image pull/push uses a vCR robot account.
+- **Not run on GitHub from this skill yet:** `ci.yml` and the template are validated as YAML only. Run the workflow once on a dev Environment and fix variables before relying on it.
+
+## Operate the runtime
+
+([manage-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/manage-runtime))
+
+- **Versions:**
+  - Every update creates an immutable **Version**.
+  - The **DEFAULT** endpoint follows the latest version; the old one serves until the rollout completes.
+  - Extra endpoints can be **pinned** to a version, e.g. `canary`.
+- **Rollback:**
+  - Point DEFAULT to an older version: `PATCH …/endpoints/{id}?version=N`, or via `/agentbase-deploy`.
+  - Compare Langfuse traces by `release` (= `AGENT_VERSION`) to confirm recovery.
+  - Check whether DEFAULT moves again on the next deploy before relying on the pin.
+- **Stop / Start:** saves compute. A `STOPPED` runtime answers every request with an error until it's `ACTIVE` again (`STARTING` → `ACTIVE`).
+- **Update via API:** the PATCH body must contain **every field except `imageAuth`**; a partial body is not accepted.
+- **Reset service account** (`…/reset-service-account`): regenerates `GREENNODE_CLIENT_ID/SECRET` and **restarts** the runtime. Use it when the SA was revoked or rotated. Policy principals (`iam:<sub>`) may change, so re-check them in the agent log.
+- **Delete:** irreversible (versions, endpoints, logs). An identity that still has runtimes can't be deleted.
+- **Autoscaling:** replicas 1–10, CPU/RAM thresholds 25–75 %. Remember `MEMORY_MAX_CONCURRENCY ≈ 10 / max replicas` (above).
 
 ## Cleanup after testing
 
-Runtimes are billed continuously. Delete test runtimes, memory, API keys, connectors with `/agentbase-teardown` (or each platform skill); revoke the agent's API keys (remove hashes from `AUTH_API_KEY_SHA256`).
-
-## Rollback
-
-Use `/agentbase-deploy`'s endpoint/version controls to point DEFAULT back to the previous version; compare traces by `release` to confirm recovery.
+Runtimes are billed continuously (a `STOPPED` runtime keeps its config without compute). Delete test runtimes, memory, API keys, connectors with `/agentbase-teardown` (or each platform skill; with the CLI `grn agentbase deploy destroy <name>`); revoke the agent's API keys (remove hashes from `AUTH_API_KEY_SHA256`) and revoke the **Orphaned** service account the deleted agent leaves behind (IAM).
 
 ## Official docs
 

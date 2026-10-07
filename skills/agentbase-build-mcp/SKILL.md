@@ -90,6 +90,20 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 6. **Naming & HITL** — tool name in the agent = `<server>_<tool>` (e.g. `tavily_tavily_search`); policy action = `<connector>__<tool>` (e.g. `tavily__tavily_search`). Side-effect tools (GitHub create issue, Slack post, M365 send mail…) ⇒ add to `HITL_TOOLS` using the agent-side name (`github_create_issue`).
 7. **Verify** — `make dev`, trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
 
+## Managing connectors after they're connected
+
+Console *AgentBase → MCP Connectors* ([browse-connector-catalog](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors/browse-connector-catalog), [manage-connected-connectors](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors/manage-connected-connectors)):
+
+- **Catalog** tab: search or filter, then *Connect*; *Add Custom Connector* for your own MCP server (`/agentbase-build-mcp-server`).
+- **Connected** tab: name, tool count, gateway, auth method and **Endpoint**. Copy that Endpoint into `mcp_servers.json` exactly as shown.
+- Detail page, *Tools & Permissions*: the tools the connector exposes. Click **Sync tools** after the MCP server adds, renames or removes tools; the agent picks up the change after its 5-min tool-list cache (or a restart).
+- **After any tool change**, update in the same change set:
+  - `allow_tools` in `mcp_servers.json`;
+  - `HITL_TOOLS` (the agent-side name `<server>_<tool>`; unmatched patterns log a WARNING);
+  - the Policy Group actions `<connector>__<tool>`.
+- **Edit** to change auth or settings. **Delete cannot be undone**: first check which agents use it (their `mcp_servers.json`) and remove its policy actions.
+- **Roles:** viewing is open to Members. Edit and delete need **Admin/Editor**; the role matrix lists *Tools & Integrations* create/edit/delete as Root/Admin (see `/agentbase-build` `references/iam-permissions.md`).
+
 ## Runtime behavior (asset `app/tools/mcp.py`)
 
 - **Policy-deny guard**: the gateway returns MCP error `Request denied by policy.`; the adapter raises `ToolException` → LangChain turns it into text ⇒ the LLM assumes a transient error and **retries many times** (observed: 3 times). `_guard_policy()` converts it to `POLICY_DENIED: …` (telling the LLM not to retry) + trace event `mcp.policy_denied` (WARNING). With the guard: 1 call. Additionally, once a connector has been denied, **every other tool of that connector is short-circuited for the current turn** without sending a request to the gateway (`reset_policy_denials()` per request; the event has `short_circuit=true`). Reason: a reasoning model was observed trying 8 denied tools in turn, taking 84s.

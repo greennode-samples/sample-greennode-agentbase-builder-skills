@@ -127,6 +127,7 @@ For an existing project: compare against the standard structure + run `reference
 - `references/security.md` — attack surface, prompt injection, personal data.
 - `references/platform-coverage.md` — per-feature AgentBase ↔ skill mapping, platform bugs encountered, open items.
 - `references/private-networking.md` — Public vs Private Runtime / MCP Gateway (VPC Peering), reaching internal systems and on-prem MCP servers over VPN.
+- `references/iam-permissions.md` — who needs which permissions: team roles, developer / CI / runtime / gateway service accounts, API keys, secret rotation.
 
 ## Official docs
 
@@ -136,5 +137,6 @@ For an existing project: compare against the standard structure + run `reference
 - [faq](https://docs.greennode.ai/ai-stack/agent-base/faq) — troubleshooting and resource teardown order
 - [runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference) — runtime contract: port 8080, `/health`, injected env vars, headers
 - [private-networking](https://docs.greennode.ai/ai-stack/agent-base/private-networking) — Public vs Private Runtime / MCP Gateway
+- [roles-and-permissions](https://docs.greennode.ai/ai-stack/agent-base/team-permissions/roles-and-permissions) — team roles and permission matrix
 
 Tip for coding agents: append `.md` to any docs URL for clean Markdown, and use https://docs.greennode.ai/llms.txt as the index of every page. When a skill and the docs disagree, trust the docs for platform behavior and flag the difference to the user.

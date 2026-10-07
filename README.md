@@ -42,6 +42,8 @@ Each skill **owns** its piece of code in `assets/backend/` (at the exact target 
 ```
 <project>/
 ├── Makefile  README.md  .agentbase-state.json
+├── .github/workflows/ci.yml   # lint + test, eval gate, manual deploy (grn agentbase deploy up)
+├── deploy/agent.yaml.tpl      # AgentBase manifest, rendered in CI from secrets
 └── src/
     ├── backend/   # uv · LangGraph · greennode-agentbase · Langfuse v4 · MCP · JWT · HITL · evals
     └── frontend/  # (optional) Expo React Native
