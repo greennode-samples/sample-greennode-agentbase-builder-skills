@@ -62,6 +62,21 @@ LLM_FALLBACK_MODELS='["qwen/qwen3.8-flash"]'   # shared for tiers without their 
 - Verified on MaaS: nonexistent primary model (404) → automatically switched to `qwen/qwen3.8-flash` and answered normally.
 - Cross-provider fallback (OpenAI, internal vLLM): needs per-model `base_url`/key, extend `_chat()`; keys stored in Identity.
 
+## Rate limits & budget (Protect & Govern)
+
+Two layers, both answer **429**:
+
+| Layer | Scope | Configure |
+|---|---|---|
+| MaaS account limit | **10 requests/min, 14,400/day per account**, shared by all models and keys ([available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models)) | More only via whitelist request to GreenNode |
+| **Rate Limit** (Protect & Govern) | Requests and/or tokens per period, enforced **independently per API key and per model** it's attached to; rejected as soon as either threshold is hit | Console *Protect & Govern → Rate Limit* (Root/Admin) — [rate-limit](https://docs.greennode.ai/ai-stack/agent-base/protect-govern/rate-limit) |
+
+Standard:
+- **One LLM API key per agent per environment** (`/agentbase-llm`), so a rate limit and usage can be attached to exactly that agent; a separate key for eval/CI.
+- Attach a Rate Limit to each agent key (requests/day **and** tokens/day) sized from the expected traffic × calls per turn (router + agent + tool rounds + judge). This caps runaway loops and cost.
+- Budget: track spend in [Usage & Budget](https://docs.greennode.ai/ai-stack/usage-budget); per-trace cost is in Langfuse.
+- On 429 the app retries with backoff on the fallback models (account-wide limits are shared, so switching model doesn't help); a turn that still fails returns a clear error. Lower `MAX_TOOL_ROUNDS`, disable adaptive routing / reflection, or raise the limit.
+
 ## 5. Choosing models per tier (the user decides)
 
 1. `/agentbase-llm`: list ENABLED models, **let the user choose**, don't choose for them.
@@ -122,3 +137,4 @@ The docs say LLM calls on Runtime may go through the Sidecar LLM Proxy `localhos
 - [maas-api](https://docs.greennode.ai/ai-stack/model-as-a-service/maas-api) — MaaS API
 - [pricing](https://docs.greennode.ai/ai-stack/model-as-a-service/pricing) — pricing per model
 - [rate-limit](https://docs.greennode.ai/ai-stack/agent-base/protect-govern/rate-limit) — Protect & Govern request/token limits (429)
+- [usage-budget](https://docs.greennode.ai/ai-stack/usage-budget) — usage and spend tracking

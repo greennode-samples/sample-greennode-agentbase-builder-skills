@@ -45,7 +45,13 @@ Standard Dockerfile: `python:3.13-slim` + uv, `uv sync --frozen --no-dev`, non-r
 
 ## Step 4 — Push & create/update the runtime
 
-Call **`/agentbase-deploy`** with: image + tag, env file `src/backend/.env.<env>`, user-chosen flavor/autoscaling, network mode (PUBLIC; VPC if MCP server/Langfuse are internal). Save `runtime_id` and endpoint to `.agentbase-state.json`.
+Call **`/agentbase-deploy`** with: image + tag, env file `src/backend/.env.<env>`, user-chosen flavor/autoscaling, and:
+
+- **Agent identity** — a Runtime is always bound to an identity, and staging/prod may share one. Use the identity that holds this agent's providers (`/agentbase-build-identity`); otherwise `@agent_api_key` / `@user_access_token` return 404 or "can't retrieve credential". The Runtime injects it as `GREENNODE_AGENT_IDENTITY`.
+  - With per-user credentials, `IDENTITY_CALLBACK_URL` in `.env.<env>` must be this environment's page and must be listed in the identity's `allowedReturnUrls`.
+- **Network mode** — Public by default. Private (VPC, Subnet, Route CIDRs; needs VPC Peering) only when agent code must reach an internal API or a self-hosted service; internal MCP servers go through a Private MCP Gateway instead — see `/agentbase-build` `references/private-networking.md`.
+
+Save `runtime_id`, endpoint, identity name and network mode to `.agentbase-state.json`.
 
 ## Run for real (2026-10, runtime `test-agent`, flavor `runtime-s2-general-2x4`)
 
@@ -86,3 +92,5 @@ Use `/agentbase-deploy`'s endpoint/version controls to point DEFAULT back to the
 - [container-registry](https://docs.greennode.ai/ai-stack/agent-base/container-registry) — vCR / AgentBase Container Registry
 - [logs-and-metrics](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/logs-and-metrics) — logs and metrics after deploy
 - [manage-agentbase-with-the-greennode-cli](https://docs.greennode.ai/ai-stack/agent-base/manage-agentbase-with-the-greennode-cli) — `grn agentbase …` CLI incl. `deploy up`
+- [private-networking](https://docs.greennode.ai/ai-stack/agent-base/private-networking) — Private Runtime (VPC Peering, VPC/Subnet/Route CIDRs)
+- [access-control](https://docs.greennode.ai/ai-stack/agent-base/access-control) — the identity a runtime is bound to

@@ -74,7 +74,9 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
 7. **Create a Custom Connector** on the MCP Gateway (Console → MCP Connectors → *Add Custom Connector*, or a target via `/agentbase-gateway`):
    - MCP URL = `https://<runtime endpoint>/mcp`.
    - Outbound auth per the table above; **Header key `Authorization`, prefix `Bearer `**.
-   - OAuth: create an OAuth2 provider in Identity (`/agentbase-identity`; Managed if available, otherwise Custom with your own OAuth App at the IdP), declare scopes; 3LO needs the Return URL in `allowedReturnUrls`.
+   - OAuth / API key: the connector's secret is a provider in **Access Control** — provider types and rules in `/agentbase-build-identity`, created with `/agentbase-identity` (Managed if available, otherwise Custom with your own OAuth App at the IdP); declare scopes; 3LO needs the Return URL in `allowedReturnUrls`.
+   - The server only **receives** the token the Gateway attaches — it never calls Identity for it. If the server itself must call another service with a stored secret, follow the same SDK pattern as the agent (`/agentbase-build-identity`; its `app/identity.py` depends on the agent's `app.config`/`app.observability`, so adapt it — it is not part of this template); when deployed on a Runtime it has its **own** identity (every Runtime is bound to one).
+   - Server in your VPC or data center ⇒ **Private MCP Gateway** (VPC Peering, Route CIDRs; VPN for on-prem) — see `/agentbase-build` `references/private-networking.md` and the sample [sample-onprem-mcp-vpn](https://github.com/greennode-samples/sample-onprem-mcp-vpn).
 8. **Policy Group** — grant `actions: ["<connector>__<tool>", ...]` to the agent's principal (`/agentbase-build-mcp`).
 9. **Verify**: `curl <endpoint>/health` 200 · `POST /mcp` without token ⇒ 401 · agent calls the tool via the gateway successfully · 2 different users can't see each other's data.
 

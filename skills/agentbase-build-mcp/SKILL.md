@@ -38,9 +38,10 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 
 ## MCP connection procedure (Coding Agent follows this order; every mutating step needs user confirmation)
 
-1. **Upstream credential** — `/agentbase-identity`: create an API key / OAuth2 provider (Secret Provider). Catalog connectors can use GreenNode's **Managed** secret; Custom requires creating your own OAuth App and declaring the provider. Never let the user paste secrets into chat.
+1. **Upstream credential** — Secret Providers live in **Access Control** (`/agentbase-build-identity` explains the provider types; create them with `/agentbase-identity`): create an API key / OAuth2 provider (Secret Provider). Catalog connectors can use GreenNode's **Managed** secret; Custom requires creating your own OAuth App and declaring the provider. Never let the user paste secrets into chat.
 2. **Gateway** — `/agentbase-gateway create` or reuse an existing gateway (`GET /gateway/api/v1/gateways`):
    - `inboundAuth`: **IAM** (agent calls with the runtime's IAM — recommended default) | **JWT** (forwards end-user identity; Policy uses `jwt:<sub>`, `principal.<claim>`) | NONE (lab only).
+   - Network: **Public**, or **Private** (VPC, Subnet, Route CIDRs, Flavor, Replicas; needs VPC Peering) when the MCP servers live in your VPC or data center — `/agentbase-build` `references/private-networking.md`.
 3. **Connector** — Console *AgentBase → MCP Connectors → Catalog → Connect* (or *Add Custom Connector*): pick the gateway and auth mode:
 
    | Auth mode | Credential | Note |
@@ -126,3 +127,4 @@ Governance details & per-agent policy design examples: `references/governance.md
 - [connect-a-connector](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors/connect-a-connector) — outbound auth: OAuth 2LO/3LO, API Key, Inbound forward, No auth; Managed vs Custom secret
 - [policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups) — principal/action formats, conditions, first-match evaluation
 - [manage-policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups/manage-policy-groups) — limits, attach/detach behavior
+- [private-networking](https://docs.greennode.ai/ai-stack/agent-base/private-networking) — Private MCP Gateway for MCP servers in your VPC / data center

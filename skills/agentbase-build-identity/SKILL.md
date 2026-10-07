@@ -28,6 +28,16 @@ Secrets live in the platform vault — never in .env, code, the image, traces, o
 | The **end user's** own API key | Delegated API Key | `@user_api_key("user-openai")` |
 | Tools behind the MCP Gateway | Connector outbound auth — no agent code | `/agentbase-build-mcp` |
 
+## Where Identity connects
+
+| Component | Link to Identity | Skill |
+|---|---|---|
+| **Agent Runtime** | Every runtime is created **bound to an identity** (an identity must exist first; staging/prod may share it); the runtime injects `GREENNODE_AGENT_IDENTITY` + its service account. Pick the identity that holds the providers. An identity with runtimes cannot be deleted | `/agentbase-build-deploy` → `/agentbase-deploy` |
+| **Agent code** (local tools) | `app/identity.py` fetches credentials from that identity's providers | this skill |
+| **MCP Gateway connectors** | The connector's outbound OAuth / API key uses a **Secret Provider from Access Control** (Managed or Custom) — no agent code | `/agentbase-build-mcp` |
+| **Your own MCP server** | Receives the token the Gateway attaches (it doesn't call Identity). If deployed on a Runtime it has its own identity; to call further services with stored secrets it follows the same SDK pattern (adapt `app/identity.py`) | `/agentbase-build-mcp-server` |
+| **Frontend** | Shows the `AUTHORIZATION_REQUIRED` consent link; the page at `IDENTITY_CALLBACK_URL` is where users land after consent | `/agentbase-build-frontend` |
+
 ## Workflow (every mutating platform step needs user confirmation)
 
 1. **Identity** — one per agent, via `/agentbase-identity`. Name 3–50 chars `^[a-zA-Z0-9_-]+$`, unique in the org. Runtimes (staging/prod) share it.

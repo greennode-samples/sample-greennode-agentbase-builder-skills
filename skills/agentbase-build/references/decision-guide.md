@@ -83,6 +83,7 @@ Details and measurements: `/agentbase-build-llm`.
 | Internal document lookup (RAG), POC / ≤ a few dozen files | Local `search_knowledge`: drop `.md/.txt` into `app/knowledge/` (auto-registered when files exist) |
 | Prod RAG: many documents, semantic search, frequent updates | MCP server with a vector store, **keep the tool name `search_knowledge`** and the `[Source: …]` format |
 | POC while the internal system has no API yet | Local mock adapter, **use the final tool name** (keeps `HITL_TOOLS`/eval), blocked in prod via a setting |
+| The system is only reachable inside your VPC or data center | MCP server + **Private MCP Gateway** (VPC Peering; VPN Site-to-Site for on-prem) — `references/private-networking.md`. Private Runtime only if agent code itself must call the internal API |
 
 ## 5. A2A — `A2A_ENABLED` (default **off**)
 
