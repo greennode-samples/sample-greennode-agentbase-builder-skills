@@ -54,13 +54,16 @@ The coding agent fills in this template **before writing code**, presents it to 
 | HITL (which tools, threshold?) | | |
 | Build MCP server | | |
 | A2A server / client | | |
+| Outbound credentials (provider type per tool; per-user consent?) | | |
+| Private network (Runtime / MCP Gateway) | | |
 | Frontend | | |
 | MAX_TOOL_ROUNDS | | |
 
 ## 10. Non-functional
 - Sensitive data to mask in traces: ...
-- Network: Runtime PUBLIC / VPC (internal MCP server?)
-- Expected load / autoscaling: ...
+- Network: Runtime Public / Private; MCP Gateway Public / Private (internal or on-prem MCP server? VPC Peering ready?)
+- Expected load / autoscaling: ... (replicas 1–10; MaaS 10 requests/min per account ⇒ whitelist needed?)
+- Cost guardrails: LLM key per agent per env, Rate Limit (requests/tokens per day), budget owner
 ```
 
 ## Requirement → component map
@@ -78,7 +81,10 @@ The coding agent fills in this template **before writing code**, presents it to 
 | "must not die when a model fails" | Per-tier fallback model | llm |
 | "send email/create ticket/transfer money/delete" | Side-effect tool ⇒ `HITL_TOOLS` | hitl + mcp |
 | "only department A staff may use tool B" | Gateway Policy Group (`/agentbase-policy`) + inbound JWT | mcp + auth |
-| "use the user's Google/Slack account" | Identity OAuth2 3LO (`@requires_access_token` USER_FEDERATION) | auth |
+| "use the user's Google/Slack account" | Identity OAuth2 3LO — `user_access_token` (consent link, non-blocking) | identity |
+| "call service X with our API key", "each user brings their own key" | Identity Static API Key (`agent_api_key`) / Delegated API Key (`user_api_key`) | identity |
+| "the data must stay in our network / data center" | Private MCP Gateway (VPC Peering; VPN for on-prem) + MCP server | mcp-server + mcp (`references/private-networking.md`) |
+| "cap cost / usage per agent" | One LLM API key per agent per env + Protect & Govern Rate Limit, Usage & Budget | llm |
 | "mobile app", "chat interface" | Expo React Native | frontend |
 | "answers must be accurate", "must not make things up" | Eval dataset + correctness judge, consider the self-eval loop | eval |
 | "track cost/latency", "debug wrong answers" | Langfuse tracing + dashboard | tracing |

@@ -31,9 +31,16 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] Side-effect tools are in `HITL_TOOLS` (or the user confirmed in writing that it is not needed).
 - Prod MCP goes through the MCP Gateway, inbound `IAM` or `JWT`; secrets live in Identity (Secret Provider).
 - [B] The Gateway has a **Policy Group** attached (none attached ⇒ every tools/call returns 403); there is an ALLOW policy for the agent's principal `iam:<sub>` (taken from the startup log) with the exact action `<connector>__<tool>`.
-- [B] `mcp_servers.json` points to **each connector's connectUrl** (`<gateway endpoint>/<connector>`), not the gateway root.
+- [B] `mcp_servers.json` points to **each connector's connectUrl** (`<gateway endpoint>/<connector>`), not the gateway root, and every entry declares `auth` explicitly.
+- [B] `HITL_TOOLS` patterns all match a tool (`tools.collect.output.hitl_unmatched` is empty).
+- MCP servers in a VPC / data center go through a **Private** MCP Gateway (`references/private-networking.md`); they still authenticate every call.
 - The main flow produces no `mcp.policy_denied` in traces.
 - No duplicate tool names; a failing MCP server does not crash the agent (trace shows `mcp.list_tools` WARNING).
+
+## Outbound credentials (if tools call external services) — `/agentbase-build-identity`
+- [B] Keys/tokens come from Access Control via `app/identity.py` helpers on an **inner** function; no credential in `.env`, code, tool parameters or traces.
+- [B] Per-user credentials (3LO / delegated): `IDENTITY_CALLBACK_URL` is set per environment and listed in the identity's `allowedReturnUrls`; the tool returns the consent link (`AUTHORIZATION_REQUIRED`) instead of blocking.
+- [B] `make check-creds` shows `OK  Agent identity` locally; the runtime is bound to the identity that holds the providers.
 
 ## Auth
 - [B] `AUTH_MODE=jwt` outside local; issuer/audience configured; expired/wrong-audience token test ⇒ 401.
@@ -71,3 +78,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - The deploy env file does not contain `GREENNODE_CLIENT_ID/SECRET/AGENT_IDENTITY/ENDPOINT_URL`.
 - [B] The deploy env file sets `APP_ENV` (dev/staging/prod) — `local` is refused on the Runtime.
 - After deploy: health OK, 1 real request has a trace in Langfuse, clean logs (`/agentbase-monitor`).
+- [B] The runtime's identity, network mode (Public/Private) and endpoint are recorded in `.agentbase-state.json`.
+- The agent's LLM API key is dedicated to this agent + environment and has a Protect & Govern **Rate Limit** (requests and tokens per day).
+- CI deploys with a dedicated service account (never a person's credentials); secrets live in the CI secret store; the rendered manifest is not committed (`references/iam-permissions.md`).
+- Teardown also revokes the deleted agent's **Orphaned** service account and its API keys.

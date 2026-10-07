@@ -8,17 +8,17 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 | Runtime Insight (logs, metrics, traces passthrough) | `/agentbase-monitor` (`runtime.sh logs/traces`) | `agentbase-build-tracing` (Langfuse for LLM level) | ✅ logs · 📄 traces backend params not documented yet |
 | OpenClaw / Marketplace | `/agentbase-deploy` Part 3 | `agentbase-build` (when to use it instead of building) | ⛔ use the platform skill directly |
 | Container Registry | `/agentbase-deploy` (`cr.sh`) | `-deploy` (amd64 image, no secrets in the image) | ✅ |
-| Access Control / Identity (API key, OAuth2, delegated) | `/agentbase-identity` | `agentbase-build-auth` (outbound decorators), `-mcp-server` (OAuth) | 📄 decorators not run for real yet |
+| Access Control / Identity (API key, OAuth2, delegated) | `/agentbase-identity` | `agentbase-build-identity` (`app/identity.py`: M2M + per-user, non-blocking 3LO), `-mcp-server` (connector OAuth) | 🧪 fake Identity API against SDK 1.0.3 source · ⏳ live 3LO round-trip |
 | MCP Gateway | `/agentbase-gateway` | `agentbase-build-mcp` | ✅ real calls through the gateway, IAM inbound |
 | MCP Connectors (catalog + custom) | — (API `GET /gateway/api/v1/mcp-connectors` not yet in the platform skill) | `agentbase-build-mcp`, `-mcp-server` (custom connector) | ✅ API read + real connector calls |
 | Policy Groups | `/agentbase-policy` | `agentbase-build-mcp` (principal `iam:<sub>`, action, deny guard) | ✅ real ALLOW/DENY · ⏳ policy not yet granted to the runtime principal |
 | Memory (events, records, strategies) | `/agentbase-memory` | `agentbase-build-memory`, `-hitl` | ✅ short/long-term, isolation, HITL on real memory |
 | AI Platform LLM (MaaS, API key, models) | `/agentbase-llm` | `agentbase-build-llm` (tiers, flows, fallback, routing) | ✅ 10 models, real fallback, prompt cache |
-| Protect & Govern — Rate limit | console / `/agentbase-llm models rate-limit` | `-llm` (429 ⇒ fallback) | 📄 |
+| Protect & Govern — Rate limit | console | `-llm` (Rate Limit per API key / per model, MaaS 10 RPM account limit, one key per agent per env) | 📄 docs |
 | Sidecar LLM Proxy (`localhost:18080`) | — | `-llm` (needs verification) | 📄 not verified |
-| Private Networking (VPC mode) | `/agentbase-deploy` (vserver.sh) | `-deploy`, `-mcp` (PRIVATE gateway) | 📄 |
-| Team & Permissions / Service Accounts | console / `/agentbase` | `-deploy` (dedicated SA for CI, least privilege) | 📄 |
-| GreenNode CLI / GreenNode MCP | docs | — (alternative to scripts when needed) | ⛔ |
+| Private Networking (VPC Peering) | `/agentbase-deploy`, `/agentbase-gateway` | `agentbase-build` `references/private-networking.md`, `-deploy`, `-mcp`, `-mcp-server`; sample `greennode-samples/sample-onprem-mcp-vpn` | 📄 docs + sample |
+| Team & Permissions / Service Accounts | console / `/agentbase` | `agentbase-build` `references/iam-permissions.md`, `-deploy` (CI SA, reset-service-account, orphaned SAs) | 📄 docs |
+| GreenNode CLI (`grn`) / GreenNode MCP | docs | `-deploy` (`grn agentbase deploy up`, pinned install, manifest rules), scaffold `ci.yml` + `deploy/agent.yaml.tpl` | 🧪 actionlint + YAML render · ⏳ not run against a live account |
 | Teardown | `/agentbase-teardown` | `-deploy` (cleanup after tests) | 📄 |
 | (off-platform) Langfuse | — | `agentbase-build-tracing`, `-eval` | ✅ self-hosted server v4.49: trace tree, cost, cache, reasoning, TTFT, prompt version, scores v3, dataset + experiment |
 | (off-platform) A2A | — (the platform has no A2A gateway) | `agentbase-build-a2a` | ✅ card, auth, isolation on runtime |

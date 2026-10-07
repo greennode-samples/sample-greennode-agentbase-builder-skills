@@ -128,7 +128,7 @@ Console *AgentBase → MCP Connectors* ([browse-connector-catalog](https://docs.
   `config["configurable"]["actor_id"]` = authenticated user; `config["configurable"]["user_claims"]` = only the claims in `AUTH_FORWARD_CLAIMS` (e.g. `["email","department"]`). Sample: `whoami` in `local_tools.py`.
 - RAG POC: drop `.md/.txt` into `app/knowledge/` (`KNOWLEDGE_DIR`) ⇒ `search_knowledge` registers itself, keyword search, cites `[Source: file — heading]`, span `knowledge.search`. Prod ⇒ MCP server + vector store, keep the tool name.
 - POC mocks for systems without an API yet: use the final tool name, block in prod via a setting.
-- External service secrets: `@requires_api_key` / `@requires_access_token` (Identity), never in prod `.env`.
+- External service secrets: the `app/identity.py` helpers on an inner function (`/agentbase-build-identity`), never in prod `.env`, never a parameter of the `@tool`.
 - Wrap important I/O with `tracing.step("<domain>.<action>")`; side-effect ⇒ `HITL_TOOLS`; add unit tests.
 
 Governance details & per-agent policy design examples: `references/governance.md`.

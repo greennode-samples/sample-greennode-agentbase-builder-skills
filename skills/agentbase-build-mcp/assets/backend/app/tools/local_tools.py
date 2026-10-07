@@ -11,8 +11,9 @@ Rules:
   injects it, the LLM doesn't see it) then read:
       user_id = config["configurable"]["actor_id"]           # = authenticated user
       claims  = config["configurable"].get("user_claims", {})  # only claims in AUTH_FORWARD_CLAIMS
-- External service secrets: store in AgentBase Identity (/agentbase-identity) and inject with
-  @requires_api_key / @requires_access_token, never in the prod .env.
+- External service secrets: store them in AgentBase Identity and inject with the helpers in app/identity.py
+  (agent_api_key / agent_access_token / user_access_token / user_api_key — /agentbase-build-identity), never
+  in the prod .env and never as a parameter of the @tool itself.
 """
 
 from __future__ import annotations
@@ -98,11 +99,12 @@ def whoami(config: RunnableConfig) -> str:
     return f"user_id={conf.get('actor_id')} claims={sorted(claims)}"
 
 
-# Example tool calling an external service with an API key stored in AgentBase Identity:
+# Example tool calling an external service with an API key stored in AgentBase Identity
+# (decorate the INNER function so the key never appears in the tool schema — /agentbase-build-identity):
 #
-# from greennode_agentbase import requires_api_key
+# from app.identity import agent_api_key
 #
-# @requires_api_key(provider_name="weather-api-key", auth_flow="M2M")
+# @agent_api_key("weather-api-key")
 # async def _fetch_weather(city: str, *, api_key: str) -> dict: ...
 #
 # @tool
