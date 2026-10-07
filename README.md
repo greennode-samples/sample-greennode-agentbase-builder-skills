@@ -25,7 +25,9 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 ## Repo structure
 
 ```
-.claude-plugin/              plugin.json, marketplace.json
+.claude-plugin/              plugin.json, marketplace.json      (Claude Code plugin)
+.codex-plugin/               plugin.json                        (Codex plugin)
+.agents/plugins/             marketplace.json                   (Codex marketplace)
 skills/
   agentbase-build/           SKILL.md + references/ (architecture, spec, api-contract, checklist)
   agentbase-build-<x>/       SKILL.md + references/ + assets/backend/... (verified sample code)
@@ -51,21 +53,92 @@ cd my-agent && make test && make dev && make invoke MSG="hello"
 
 ## Installation
 
-**Claude Code (plugin):**
+The skills follow the open [Agent Skills](https://agentskills.io) format (`skills/<name>/SKILL.md`), so any coding agent that reads `SKILL.md` can use them. Pick the method for your agent:
+
+| Coding agent | Recommended method |
+|---|---|
+| **Claude Code** | Plugin marketplace (below) |
+| **Codex CLI** | Plugin marketplace (below) |
+| **Cursor, Gemini CLI, GitHub Copilot, OpenCode, Windsurf, Cline, Kiro, …** | [`npx skills`](#any-agent--skills-cli) or [`gh skill`](#any-agent--github-cli) |
+| Anything else | [Manual copy](#manual) |
+
+> Install the platform skill set [`vngcloud/greennode-agentbase-skills`](https://github.com/vngcloud/greennode-agentbase-skills) alongside it, using the same method. The `agentbase-build-*` skills call those skills (`/agentbase-deploy`, `/agentbase-gateway`, `/agentbase-identity`…) for platform operations.
+
+### Claude Code
 
 ```bash
 claude plugin marketplace add greennode-samples/sample-greennode-agentbase-builder-skills
+claude plugin install agentbase-build@agentbase-build
 ```
 
-Then in Claude Code: `/plugin install agentbase-build@agentbase-build`.
+You can also run the same steps inside a Claude Code session: `/plugin marketplace add greennode-samples/sample-greennode-agentbase-builder-skills`, then `/plugin install agentbase-build@agentbase-build`. Restart the session after installing.
 
-**Codex CLI:** `codex plugin marketplace add greennode-samples/sample-greennode-agentbase-builder-skills` then `codex plugin add agentbase-build@agentbase-build`.
+Update: `claude plugin marketplace update agentbase-build && claude plugin update agentbase-build@agentbase-build`.
 
-**Manual:** copy or symlink each directory in `skills/` into `~/.claude/skills/` (or the project's `.claude/skills/`). Installing the platform skill set `greennode-agentbase-skills` alongside is recommended.
+### Codex CLI
+
+```bash
+codex plugin marketplace add greennode-samples/sample-greennode-agentbase-builder-skills
+codex plugin add agentbase-build@agentbase-build
+```
+
+Update: `codex plugin marketplace upgrade`. Remove: `codex plugin remove agentbase-build`.
+
+### Any agent — skills CLI
+
+[`skills`](https://github.com/vercel-labs/skills) detects the agents you have installed and links the skills into each agent's folder.
+
+```bash
+npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --list                       # show the 13 skills
+npx skills add greennode-samples/sample-greennode-agentbase-builder-skills                              # interactive: choose skills + agents (project scope)
+npx skills add greennode-samples/sample-greennode-agentbase-builder-skills -g -a cursor -a gemini-cli -y   # all skills, user scope, specific agents
+npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --skill agentbase-build-mcp-server -a github-copilot   # a single skill
+npx skills update                               # pull new versions
+```
+
+Agent IDs: `claude-code`, `codex`, `cursor`, `gemini-cli`, `github-copilot`, `opencode`, `windsurf`, `cline`, `kiro-cli`, …
+
+### Any agent — GitHub CLI
+
+Requires a GitHub CLI version that includes `gh skill` (check with `gh skill --help`).
+
+```bash
+gh skill install greennode-samples/sample-greennode-agentbase-builder-skills --all --agent cursor               # project scope (default)
+gh skill install greennode-samples/sample-greennode-agentbase-builder-skills --all --agent codex --scope user   # user scope
+gh skill install greennode-samples/sample-greennode-agentbase-builder-skills agentbase-build-mcp-server         # a single skill
+```
+
+### Manual
+
+Copy or symlink each directory in `skills/` into your agent's skills folder:
+
+| Agent | Project | User (global) |
+|---|---|---|
+| Claude Code | `.claude/skills/` | `~/.claude/skills/` |
+| Codex | `.agents/skills/` | `~/.codex/skills/` |
+| Cursor | `.agents/skills/` | `~/.cursor/skills/` |
+| Gemini CLI | `.agents/skills/` | `~/.gemini/skills/` |
+| GitHub Copilot | `.agents/skills/` | `~/.copilot/skills/` |
+| OpenCode | `.agents/skills/` | `~/.config/opencode/skills/` |
+| Windsurf | `.windsurf/skills/` | `~/.codeium/windsurf/skills/` |
+| Kiro | `.kiro/skills/` | `~/.kiro/skills/` |
+
+```bash
+git clone https://github.com/greennode-samples/sample-greennode-agentbase-builder-skills.git
+mkdir -p ~/.claude/skills && cp -R sample-greennode-agentbase-builder-skills/skills/* ~/.claude/skills/   # adjust the target folder for your agent
+```
+
+### Using the skills
+
+Agents load a skill automatically when your request matches its description. You can also name the skill explicitly, for example `/agentbase-build` in Claude Code (plugin skills may appear namespaced, like `/agentbase-build:agentbase-build`). Example prompts:
+
+- *"Use agentbase-build to build an HR assistant agent that answers leave-policy questions and creates leave requests."* The orchestrator walks through all 9 steps and calls the other skills.
+- *"Use agentbase-build-mcp-server to write an MCP server exposing our orders API, with OAuth 3LO."*
+- *"Use agentbase-build-mcp to connect my agent to the GitHub connector through the MCP Gateway."*
 
 ## Verified
 
-- **Offline**: a freshly scaffolded project passes 62 tests (agent, per-user isolation, streaming, compression, JWT/api_key, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard, A2A e2e); MCP server template passes 7 e2e tests; Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
+- **Offline**: a freshly scaffolded project passes 62 tests (agent, per-user isolation, streaming, compression, JWT/api_key, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard, A2A e2e); MCP server template passes 21 e2e tests (auth, per-user isolation, tools, local quickstart); Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
 - **Real GreenNode** (runtime `test-agent`, v1→v6): api_key auth (401), short/long-term memory on AgentBase Memory, per-user isolation (memory, HITL, feedback, A2A tasks), HITL on real memory, MCP Connector via Gateway + Policy (ALLOW/DENY), A2A Agent Card + task isolation, real model tiers + fallback on MaaS (10 models), prompt cache.
 - **Self-hosted Langfuse v4.49**: full trace tree, cost/cache/reasoning/TTFT, prompt versions, scores, dataset + experiment. Traces were used to find and fix a 55s → 11s slowdown (parallel MCP + negative cache, skipping reflection for simple questions, Memory timeouts).
 - Per-feature details, platform bugs encountered and open items: `skills/agentbase-build/references/platform-coverage.md`.
