@@ -48,3 +48,28 @@
 
 - `LANGFUSE_SAMPLE_RATE=1.0` for dev/staging; high-load prod can use 0.2–0.5. Feedback can still be attached to sampled traces.
 - Large input/output (tools returning big JSON): trim inside the tool before returning, or mask in `_mask`.
+
+## Masking (what leaves the process)
+
+`app/observability/tracing.py` — tests `tests/test_tracing_mask.py` (rules) and `tests/test_tracing_export.py` (what an in-memory OTel exporter actually receives).
+
+| Channel | Masked by |
+|---|---|
+| observation input / output / metadata | `Langfuse(mask=_mask)` — the SDK calls it with RAW objects (its media pass `model_dump()`s pydantic models unless `LANGFUSE_MEDIA_UPLOAD_ENABLED=false`, never dataclasses); `_mask` converts dataclasses and pydantic models (LangChain messages) like the SDK serializer (`asdict`/`model_dump`) before masking |
+| `status_message` (exception text) | NOT passed through `mask` by the SDK ⇒ `step`/`_Step.set`/`trace_request` mask it; `langchain_callbacks()` returns `_MaskingCallbackHandler` (LLM/tool/chain errors and `ToolMessage(status="error")`); `Langfuse(mask_otel_spans=_mask_otel_spans)` re-masks the `langfuse.observation.status_message` attribute on every exported span |
+| OTel span status description / `exception` event | Same text as status_message: masked at the source by the helpers and the CallbackHandler subclass; exceptions are re-raised **outside** the span context manager so OpenTelemetry never records an `exception` event (message + stacktrace). `mask_otel_spans` can only patch attributes, not status/events |
+| score comments | `score_trace` / `record_feedback` mask them |
+| trace `user_id` | `trace_user_id` hashes email-shaped ids |
+| trace metadata (`trace_request(metadata=…)`, propagated to every span) | **not masked** — keep it to config values (models, backend, request id) |
+
+**Secret keys** (dict keys, and the first item of a 2-item list/tuple such as `["X-API-Key", "k9…"]`): name normalized (camelCase → snake, `-`/space → `_`), split on `_`; secret if a part is `authorization, token, secret, password, passwd, pwd, passphrase, cookie, credential(s), otp, pin, cvv, cvc, signature, sig` or the name contains `api_key, apikey, private_key, secret_key, access_key`. Not secret if the LAST part is `usage, type, use, count, limit, expires, expiry, ttl, details` (`token_usage`, `token_type`, `input_token_details`, `output_token_details` stay readable); a part must equal the word, so `max_tokens`, `tokenizer`, `spinner`, `pinned`, `shipping` are not secret.
+
+**Secrets inside text** (every string, including exception text): the same key rule applied to `key=value`, `key: value`, `"key": "value"`, `'key': 'value'`, `\"key\": \"value\"` (JSON inside JSON) and URL query parameters — `https://x/mcp?tavilyApiKey=***&sig=***`, `X-Amz-Signature=***`, `{"access_token": "***"}` (JSON stays parseable); `scheme://user:***@host`; `Bearer ***`/`Basic ***`; JWT ⇒ `***JWT***`; `sk-…`/`vn-…`/`rk-…` ⇒ `***KEY***`.
+
+**PII** (`TRACE_MASK_PII=true`): email; VN mobile `0`/`+84`/`(+84)` + `3|5|7|8|9` + 8 digits with optional space/dot/dash separators (`0.123456789` is a decimal, kept); Luhn-valid 15–19-digit cards; CCCD-shaped 12 digits (`0` + province 00–96 + century/gender digit 0–3 + 8 digits); any 9- or 12-digit number within 30 characters after `CMND/CCCD/CMT/chứng minh/căn cước/định danh` (12 after `ID`) — "Số CMND của tôi là: 123456789" ⇒ `***ID***`. Bare 9-digit numbers (amounts) and non-CCCD-shaped 12-digit codes (order ids) stay readable.
+
+**Known limits / tradeoffs** (extend `_mask_text` per project):
+- Unquoted values end at whitespace, `& , ; ) ] } < >`, a quote or a backslash — a password containing one of these is only partly masked; a trailing `.` is swallowed (`OTP: ***`).
+- Structured values inside text (`"credentials": {...}`) are masked through their inner keys only; generic names (`key`, `pass`, `code`, Vietnamese `mật khẩu`) and landline numbers are not masked.
+- Over-masking is accepted for secret words: `Pin: 5000 mAh` (battery) ⇒ `Pin: *** mAh` and a product-spec key `pin` ⇒ `***` — for agents that never handle PINs, drop `pin` from `_SECRET_PARTS`. A 12-digit code that happens to be CCCD-shaped is masked.
+- Spans created outside `tracing.step` / `trace_request` / `langchain_callbacks()` (another OTel instrumentation) only get the `mask_otel_spans` attribute patch — their OTel status description and exception events are exported as-is.

@@ -13,15 +13,18 @@ agentbase-build-llm.
 2) Task → tier: LLM_TASK_TIERS overrides DEFAULT_TASK_TIERS. Code only calls get_llm("<task>").
 
 3) Fallback: LLM_TIER_FALLBACKS {"large": [...], ...} or LLM_FALLBACK_MODELS (shared). Fall back only on
-   INFRA/MODEL errors (connection lost, timeout, 429, 5xx, model removed/not permitted); NOT on request errors.
+   INFRA/MODEL errors (connection lost, timeout, 429, 5xx, model removed/not permitted, provider error inside a
+   streamed response); NOT on request errors (400, 401, 422...).
    Langfuse: failed (ERROR) generation of the primary model → generation of the fallback model.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 import openai
 from langchain_core.language_models import BaseChatModel
@@ -47,6 +50,33 @@ DEFAULT_TASK_TIERS: dict[str, Tier] = {
     "eval_judge": "reasoning",  # offline grading — accuracy first
 }
 
+
+class ProviderStreamError(openai.APIError):
+    """The provider failed INSIDE a 200 streaming response: vLLM-style `data: {"error": {...}}` SSE chunk (engine
+    overloaded/crashed mid-answer). The openai SDK raises that as a BARE `openai.APIError` (no HTTP status) — an
+    infrastructure failure, but the fallback matches exception CLASSES and APIError is also the base of the request
+    errors (BadRequestError, AuthenticationError...) ⇒ `_FallbackEligible` re-raises exactly-APIError as this
+    subclass, and only this subclass is in FALLBACK_ERRORS."""
+
+
+def _provider_stream_error(e: openai.APIError) -> ProviderStreamError:
+    err = ProviderStreamError(e.message, e.request, body=e.body)
+    err.__cause__ = e
+    return err
+
+
+@contextmanager
+def _stream_errors_fall_back() -> Iterator[None]:
+    try:
+        yield
+    except openai.APIError as e:
+        if (
+            type(e) is not openai.APIError
+        ):  # 4xx subclasses, context overflow, validation… ⇒ unchanged
+            raise
+        raise _provider_stream_error(e) from e
+
+
 # Errors worth retrying on another model. langchain_openai errors (OpenAIRateLimitError, ...) inherit from these.
 FALLBACK_ERRORS: tuple[type[BaseException], ...] = (
     openai.APIConnectionError,  # includes APITimeoutError
@@ -54,7 +84,43 @@ FALLBACK_ERRORS: tuple[type[BaseException], ...] = (
     openai.InternalServerError,
     openai.NotFoundError,  # model removed / wrong path
     openai.PermissionDeniedError,  # model not enabled for this key
+    ProviderStreamError,  # SSE error chunk mid-stream (see _FallbackEligible)
 )
+
+
+class _FallbackEligible(RunnableBinding):
+    """Binding around each model in the chain: a bare `openai.APIError` → `ProviderStreamError` (fallback-eligible).
+    Every other exception passes through unchanged."""
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        with _stream_errors_fall_back():
+            return super().invoke(input, config, **kwargs)
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        with _stream_errors_fall_back():
+            return await super().ainvoke(input, config, **kwargs)
+
+    def stream(self, input: Any, config: Any = None, **kwargs: Any) -> Iterator[Any]:
+        with _stream_errors_fall_back():
+            yield from super().stream(input, config, **kwargs)
+
+    async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> AsyncIterator[Any]:
+        with _stream_errors_fall_back():
+            async for chunk in super().astream(input, config, **kwargs):
+                yield chunk
+
+    # batch(return_exceptions=True) — used by RunnableWithFallbacks.batch — returns errors in place of outputs
+    def batch(self, inputs: list, config: Any = None, **kwargs: Any) -> list:
+        with _stream_errors_fall_back():
+            return [_bare_to_provider(o) for o in super().batch(inputs, config, **kwargs)]
+
+    async def abatch(self, inputs: list, config: Any = None, **kwargs: Any) -> list:
+        with _stream_errors_fall_back():
+            return [_bare_to_provider(o) for o in await super().abatch(inputs, config, **kwargs)]
+
+
+def _bare_to_provider(o: Any) -> Any:
+    return _provider_stream_error(o) if type(o) is openai.APIError else o
 
 
 def tier_for(task: str) -> Tier:
@@ -92,7 +158,7 @@ def _chat(model: str, tier: Tier, role: str) -> ChatOpenAI:
         api_key=s.llm_api_key,
         temperature=s.llm_temperature if tier != "small" else 0,
         max_tokens=s.llm_max_tokens,
-        timeout=s.llm_timeout_s * (2 if tier == "reasoning" else 1),  # reasoning models run longer
+        timeout=_timeout_s(tier),  # reasoning models run longer
         # With fallbacks the PRIMARY doesn't retry (switch fast); fallbacks keep retries so a 429 still gets the
         # SDK's backoff — the MaaS rate limit is per account, shared by every model in the chain.
         max_retries=0 if role == "primary" and fallbacks_for(tier) else s.llm_max_retries,
@@ -103,23 +169,60 @@ def _chat(model: str, tier: Tier, role: str) -> ChatOpenAI:
     )
 
 
+def _timeout_s(tier: Tier) -> float:
+    """Per-attempt timeout. httpx timeout = per read ⇒ when streaming it is an INACTIVITY timeout (time to first
+    token / between chunks), not a cap on the whole answer."""
+    return get_settings().llm_timeout_s * (2 if tier == "reasoning" else 1)
+
+
+# openai SDK retry sleep (openai/_constants.py, checked by a test): 0.5 s × 2^n, capped at 8 s; jitter only
+# shortens it. A server `Retry-After` (SDK honours up to 120 s) REPLACES it — that is not budgeted here.
+SDK_INITIAL_RETRY_DELAY_S = 0.5
+SDK_MAX_RETRY_DELAY_S = 8.0
+
+
+def retry_sleep_s(retries: int) -> float:
+    """Upper bound of the SDK's exponential backoff across `retries` retries of ONE model (0.5 + 1 + 2 + 4 + 8 + 8…)."""
+    return sum(
+        min(SDK_INITIAL_RETRY_DELAY_S * 2**n, SDK_MAX_RETRY_DELAY_S) for n in range(max(retries, 0))
+    )
+
+
+def _budget(tier: Tier) -> tuple[int, float, float]:
+    """(attempts, per-attempt timeout, total retry sleep) of ONE call through the tier's chain. With fallbacks the
+    primary makes 1 attempt (max_retries=0) and each fallback 1 + LLM_MAX_RETRIES; without, the primary retries."""
+    n_fallbacks, retries = len(fallbacks_for(tier)), get_settings().llm_max_retries
+    retrying_models = n_fallbacks or 1
+    attempts = (1 if n_fallbacks else 0) + retrying_models * (1 + retries)
+    return attempts, _timeout_s(tier), retrying_models * retry_sleep_s(retries)
+
+
+def worst_case_s(tier: Tier) -> float:
+    """Every attempt of every model in the chain hangs until its timeout, + the SDK's retry sleeps."""
+    attempts, per_attempt, sleep = _budget(tier)
+    return attempts * per_attempt + sleep
+
+
 @lru_cache(maxsize=8)
 def _warn_if_over_budget(tier: Tier) -> None:
-    """Worst case = every model in the chain times out once. If that exceeds REQUEST_TIMEOUT_S the request is
-    cancelled before the last fallback can answer — the fallback chain is then partly useless."""
+    """If the worst case exceeds REQUEST_TIMEOUT_S the request is cancelled before the last model in the chain can
+    answer — the end of the fallback chain is then useless. Logged once per tier (first get_llm of that tier)."""
     s = get_settings()
-    per_attempt = s.llm_timeout_s * (2 if tier == "reasoning" else 1)
-    n_fallbacks = len(fallbacks_for(tier))
-    # primary: 1 attempt when fallbacks exist; each fallback: 1 + retries
-    attempts = 1 + n_fallbacks * (1 + s.llm_max_retries) if n_fallbacks else 1 + s.llm_max_retries
-    if per_attempt * attempts > s.request_timeout_s:
+    attempts, per_attempt, sleep = _budget(tier)
+    worst = attempts * per_attempt + sleep
+    if worst > s.request_timeout_s:
         log.warning(
-            "LLM tier %s: worst case %d × %.0fs > REQUEST_TIMEOUT_S=%.0fs — lower LLM_TIMEOUT_S or raise "
-            "REQUEST_TIMEOUT_S so the last model in the chain can still answer",
+            "LLM tier %s: worst case %d attempts × %.0fs + %.1fs retry backoff = %.1fs > REQUEST_TIMEOUT_S=%.0fs "
+            "(%d fallback(s), LLM_MAX_RETRIES=%d) — lower LLM_TIMEOUT_S / LLM_MAX_RETRIES / the number of "
+            "fallbacks, or raise REQUEST_TIMEOUT_S (recommended values: skill agentbase-build-llm §4)",
             tier,
             attempts,
             per_attempt,
+            sleep,
+            worst,
             s.request_timeout_s,
+            len(fallbacks_for(tier)),
+            s.llm_max_retries,
         )
 
 
@@ -148,7 +251,8 @@ def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnabl
         display = model if role == "primary" else f"{model} (fallback)"
         # RunnableWithFallbacks passes the chain's run_name down to child models (overriding with_config) ⇒ use
         # config_factories (applied LAST) so the generation always carries the model name on Langfuse.
-        return RunnableBinding(bound=r, config_factories=[lambda _cfg: {"run_name": display}])
+        # _FallbackEligible: provider errors inside a streamed response fall back too (see ProviderStreamError).
+        return _FallbackEligible(bound=r, config_factories=[lambda _cfg: {"run_name": display}])
 
     primary = _gen(primary_model, "primary")
     backups = [_gen(m, "fallback") for m in fallbacks_for(tier)]

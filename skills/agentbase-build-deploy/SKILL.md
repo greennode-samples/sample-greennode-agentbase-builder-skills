@@ -31,14 +31,14 @@ Create `src/backend/.env.<env>` (not committed) from `.env.example`. To review p
 | `LANGFUSE_*` | dev project/env | prod project, `LANGFUSE_SAMPLE_RATE` per load |
 | `MCP_GATEWAY_URL`, `HITL_TOOLS` | per environment | |
 
-**Do not** include `GREENNODE_CLIENT_ID`, `GREENNODE_CLIENT_SECRET`, `GREENNODE_AGENT_IDENTITY`, `GREENNODE_ENDPOINT_URL` (the runtime injects them). Remind the user to review the env file themselves; **do not** print the contents of secret-bearing files into chat.
+**Do not** include `GREENNODE_CLIENT_ID`, `GREENNODE_CLIENT_SECRET`, `GREENNODE_AGENT_IDENTITY` (the runtime injects them) or `GREENNODE_ENDPOINT_URL` (platform-reserved; set `A2A_PUBLIC_URL`). Remind the user to review the env file themselves; **do not** print the contents of secret-bearing files into chat.
 
 ## Step 3 — Build the image
 
 ```bash
 make docker-build IMAGE=<registry>/<repo>/<project> TAG=<AGENT_VERSION>
 make docker-run IMAGE=... TAG=...   # local smoke test: curl :8080/health
-make docker-run IMAGE=... TAG=... ENV_FILE=src/backend/.env.prod   # boots with the DEPLOY config: catches a missing APP_ENV / AUTH_* before the Runtime does
+make docker-run IMAGE=... TAG=... ENV_FILE=src/backend/.env.prod   # boots with the DEPLOY config and GREENNODE_AGENT_IDENTITY set (like the Runtime): a missing APP_ENV / AUTH_* fails here, not on the platform
 ```
 
 Standard Dockerfile: `python:3.13-slim` + uv, `uv sync --frozen --no-dev`, non-root, `EXPOSE 8080`, build with `--platform linux/amd64` (mandatory when building on ARM Macs).
@@ -51,7 +51,13 @@ Call **`/agentbase-deploy`** with: image + tag, env file `src/backend/.env.<env>
   - With per-user credentials, `IDENTITY_CALLBACK_URL` in `.env.<env>` must be this environment's page and must be listed in the identity's `allowedReturnUrls`.
 - **Network mode** — Public by default. Private (VPC, Subnet, Route CIDRs; needs VPC Peering) only when agent code must reach an internal API or a self-hosted service; internal MCP servers go through a Private MCP Gateway instead — see `/agentbase-build` `references/private-networking.md`.
 
-Save `runtime_id`, endpoint, identity name and network mode to `.agentbase-state.json`.
+- **Security Settings** ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)):
+  - **Inbound Auth type** — `JWT` (same IdP as `AUTH_*`; lets the app call directly), `IAM Permissions` (server callers / BFF only), or `No authorization` (public — the agent still verifies tokens itself). Prefer JWT or IAM for production.
+  - **IP Access Control** — allowed source CIDRs for server-to-server callers with fixed egress (BFF, other agents).
+  - With Runtime JWT on `Authorization`, keep the agent's `AUTH_TOKEN_HEADER=Authorization` (same token); with Runtime IAM, the BFF sends the IAM token in `Authorization` and the user JWT in `AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token` (`/agentbase-build-auth`).
+  - The `grn` deploy manifest has **no** security or network fields: a runtime created by CI is Public with the default inbound setting — set Security Settings / Private network in the Console or API after the first create, and verify after each `runtime update` that they are still in place.
+
+Save `runtime_id`, endpoint, identity name, network mode and inbound auth type to `.agentbase-state.json`.
 
 ## Run for real (2026-10, runtime `test-agent`, flavor `runtime-s2-general-2x4`)
 
@@ -75,11 +81,11 @@ Push CR → create runtime → ACTIVE in ~40s; version update ~30s. Checks used:
 
 [`grn`](https://docs.greennode.ai/ai-stack/agent-base/manage-agentbase-with-the-greennode-cli) composes identity + (memory) + runtime under one **name** from a manifest:
 - `grn agentbase deploy generate` prints a template.
-- `deploy up --file agent.yaml` is idempotent: it creates what's missing and waits for `ACTIVE`.
+- `deploy up --file agent.yaml` is idempotent: it creates what's missing and waits for `ACTIVE`. **It never updates an existing runtime** ("converging, not re-applying" — grn source): a new image or env would silently not ship. Update with `grn agentbase runtime update <id> --file <spec>` (FULL-spec replacement: new version, DEFAULT endpoint rolls forward; `imageAuth` must be explicit — `auto` is create-only) then `grn agentbase runtime wait <id>`.
 - `deploy status <name>` shows the state across services.
 - `deploy destroy <name>` deletes the runtime and memory; `--purge` also deletes the identity and cannot be undone.
 
-The scaffold ships `deploy/agent.yaml.tpl`, which the CI renders.
+The scaffold ships `deploy/agent.yaml.tpl` (rendered by CI) and `deploy/render_runtime_spec.py`, which derives the `runtime update` spec from the rendered manifest (one source of truth; pull credentials from the vCR robot account). Both rendered files contain secrets — temp dir only, never committed (`.gitignore` covers `deploy/agent.yaml`, `deploy/runtime.yaml`).
 
 - **Install from GitHub Releases with a pinned version.** Asset names carry the version (`grn-linux-amd64-v1.13.0`), and the docs' `releases/latest/download/grn-linux-amd64` link returns 404. Verify the asset against `SHA256SUMS`.
 - **Auth:**
@@ -101,15 +107,18 @@ The scaffold ships `deploy/agent.yaml.tpl`, which the CI renders.
 | Job | When | Does |
 |---|---|---|
 | `test` | every push / PR | `uv sync --frozen`, ruff check + format check, pytest |
-| `eval` | push to main / manual | `run_eval --concurrency 1` gate (MaaS 10 RPM); skipped with a notice until `EVAL_LLM_API_KEY` exists |
-| `deploy` | manual (`workflow_dispatch`, input `deploy_env`) | pinned `grn` + SHA256 check → build `linux/amd64` → push to vCR → render manifest with `envsubst` from Environment secrets → `deploy up` → `deploy status` → `/health` smoke test → delete the rendered file |
+| `eval` | push to main / manual | `run_eval --concurrency 1` gate (MaaS 10 RPM) with **repo-level** `EVAL_LLM_API_KEY` + `EVAL_LLM_MODEL`; without them the gate is skipped with a notice |
+| `deploy` | manual (`workflow_dispatch`, `deploy_env` = dev / staging / prod) | refuses staging/prod if the eval gate didn't run → pinned `grn` + SHA256 check → build `linux/amd64` → push to vCR → render manifest + runtime spec from Environment secrets → **first run** `deploy up` (identity + runtime), **later runs** `runtime update` + `runtime wait` → `deploy status` → `/health` smoke test → delete the rendered files |
 
-- One **GitHub Environment** per `dev` / `staging` / `prod`, with its own secrets and vars (listed at the top of `ci.yml`). Require reviewers on `prod`.
+- **Variables:** environment-scoped secrets/vars are only visible to jobs that declare `environment:` — so eval values are repo-level and deploy values per GitHub Environment (`dev` / `staging` / `prod`, listed at the top of `ci.yml`). Require reviewers on `prod`.
+- **Concurrency:** superseded push/PR runs are cancelled; a manual run has its own workflow group (never cancelled by a push or another dispatch), and deploys to one environment are serialized by the job group `deploy-<env>` (`cancel-in-progress: false`) — note GitHub keeps only the newest *pending* run per group, so a third queued deploy replaces a waiting second one. An interrupted `deploy up` is not rolled back.
+- **Shell:** steps run with `bash -eo pipefail` (`defaults.run.shell: bash`), so a failing `grn … runtime list` fails the deploy instead of falling through to `deploy up` (which would succeed without shipping).
 - **Credentials:**
   - CI uses a **dedicated service account**, never a person's.
   - The documented policies are `AgentBaseFullAccess`, `vcrFullAccess` and `AiPlatformFullAccess`; narrower ones are not documented. See `/agentbase-build` `references/iam-permissions.md`.
   - Image pull/push uses a vCR robot account.
-- **Not run on GitHub from this skill yet:** `ci.yml` and the template are validated as YAML only. Run the workflow once on a dev Environment and fix variables before relying on it.
+- **What the smoke test proves:** `/health` only shows the runtime answers — not which version. Confirm the new version via `deploy status` / Langfuse traces `release` (= `AGENT_VERSION`).
+- **Not run on GitHub from this skill yet:** checked with actionlint and by rendering the templates; the `grn` flags and JSON fields come from grn v1.13.0 docs and source. Run the workflow once on a dev Environment before relying on it.
 
 ## Operate the runtime
 

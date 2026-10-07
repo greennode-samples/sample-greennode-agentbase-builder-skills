@@ -29,6 +29,11 @@ import { MessageBubble, type UiMessage } from '../components/MessageBubble';
 import { env } from '../config/env';
 
 type Body = ReturnType<typeof chatBody>;
+// ok: done/interrupt received · conflict: 409 — the backend has no such pending approval (already handled / expired)
+// failed: network, 5xx, dropped stream… · stale: "New" replaced the conversation while the request was in flight
+type Outcome = 'ok' | 'conflict' | 'failed' | 'stale';
+
+const APPROVAL_GONE = 'ℹ️ This approval request was already handled or has expired — you can keep chatting.';
 
 export function ChatScreen() {
   const { userId, getAccessToken, signOut } = useAuth();
@@ -39,6 +44,9 @@ export function ChatScreen() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const listRef = useRef<FlatList<UiMessage>>(null);
+  // Bumped by "New": callbacks of a request from the previous conversation are ignored (no late interrupt card)
+  const conversation = useRef(0);
+  const inflight = useRef<AbortController | null>(null);
 
   const patch = (id: string, fn: (m: UiMessage) => UiMessage) =>
     setMessages((ms) => ms.map((m) => (m.id === id ? fn(m) : m)));
@@ -60,45 +68,63 @@ export function ChatScreen() {
 
   // Run one turn (chat or resume), streaming or not
   const run = useCallback(
-    async (body: Body | ReturnType<typeof resumeBody>): Promise<boolean> => {
+    async (body: Body | ReturnType<typeof resumeBody>): Promise<Outcome> => {
+      const gen = conversation.current;
+      const live = () => gen === conversation.current;
+      const abort = new AbortController();
+      inflight.current = abort;
       setBusy(true);
-      let ok = true;
+      let outcome: Outcome = 'ok';
       const replyId = Crypto.randomUUID();
       setMessages((ms) => [...ms, { id: replyId, role: 'assistant', text: '', pending: true, tools: [] }]);
+      const fail = (status: number | undefined, message: string) => {
+        outcome = status === 409 ? 'conflict' : 'failed';
+        if (status === 401) void signOut();
+        const text = status === 409 && body.type === 'resume' ? APPROVAL_GONE : `⚠️ ${message}`;
+        patch(replyId, (m) => ({ ...m, text, pending: false }));
+      };
       try {
         const ctx = { sessionId, userId, accessToken: await getAccessToken() };
+        if (!live()) return 'stale';
         if (!env.streaming) {
-          finish(replyId, await invoke(body, ctx));
-          return true;
+          const r = await invoke(body, ctx, abort.signal);
+          if (!live()) return 'stale';
+          finish(replyId, r);
+          return 'ok';
         }
         let ended = false; // done / interrupt / error received
-        await invokeStream(body, ctx, (e) => {
-          switch (e.event) {
-            case 'token':
-              patch(replyId, (m) => ({ ...m, text: m.text + e.data }));
-              break;
-            case 'reset': // self-eval requested a new answer
-              patch(replyId, (m) => ({ ...m, text: '' }));
-              break;
-            case 'tool_start':
-              patch(replyId, (m) => ({ ...m, tools: [...(m.tools ?? []), e.name] }));
-              break;
-            case 'interrupt':
-            case 'done':
-              ended = true;
-              finish(replyId, e as unknown as ChatResult);
-              break;
-            case 'error':
-              ended = true;
-              ok = false;
-              if (e.status === 401) void signOut();
-              patch(replyId, (m) => ({ ...m, text: `⚠️ ${e.message}`, pending: false }));
-              break;
-          }
-        });
+        await invokeStream(
+          body,
+          ctx,
+          (e) => {
+            if (!live()) return;
+            switch (e.event) {
+              case 'token':
+                patch(replyId, (m) => ({ ...m, text: m.text + e.data }));
+                break;
+              case 'reset': // self-eval requested a new answer
+                patch(replyId, (m) => ({ ...m, text: '' }));
+                break;
+              case 'tool_start':
+                patch(replyId, (m) => ({ ...m, tools: [...(m.tools ?? []), e.name] }));
+                break;
+              case 'interrupt':
+              case 'done':
+                ended = true;
+                finish(replyId, e as unknown as ChatResult);
+                break;
+              case 'error': // in-stream errors carry the HTTP-like status (409, 504…)
+                ended = true;
+                fail(e.status, e.message);
+                break;
+            }
+          },
+          abort.signal,
+        );
+        if (!live()) return 'stale';
         if (!ended) {
           // Stream closed without a final event (network drop, proxy timeout) — never leave the bubble pending
-          ok = false;
+          outcome = 'failed';
           patch(replyId, (m) => ({
             ...m,
             text: `${m.text}\n⚠️ Connection closed before the answer completed.`,
@@ -106,14 +132,13 @@ export function ChatScreen() {
           }));
         }
       } catch (err) {
-        ok = false;
-        if (err instanceof AgentError && err.status === 401) await signOut();
-        const msg = err instanceof Error ? err.message : String(err);
-        patch(replyId, (m) => ({ ...m, text: `⚠️ ${msg}`, pending: false }));
+        if (!live()) return 'stale'; // aborted by "New"
+        fail(err instanceof AgentError ? err.status : undefined, err instanceof Error ? err.message : String(err));
       } finally {
-        setBusy(false);
+        if (inflight.current === abort) inflight.current = null;
+        if (live()) setBusy(false);
       }
-      return ok;
+      return outcome;
     },
     [sessionId, userId, getAccessToken, signOut],
   );
@@ -130,8 +155,11 @@ export function ChatScreen() {
     async (decisions: Decision[]) => {
       const current = pending;
       setPending(null);
-      const ok = await run(resumeBody(decisions, current?.id));
-      if (!ok) setPending(current); // resume failed (network/5xx) ⇒ keep the approval card, backend is still waiting
+      const outcome = await run(resumeBody(decisions, current?.id));
+      // Network / 5xx / dropped stream ⇒ the backend most likely still waits: show the card again to retry.
+      // 409 ⇒ it does NOT (handled by a request whose answer we lost, double submit, expired): drop the card —
+      // re-showing it would 409 forever and lock the composer.
+      if (outcome === 'failed') setPending(current);
     },
     [run, pending],
   );
@@ -140,13 +168,21 @@ export function ChatScreen() {
     async (m: UiMessage, score: -1 | 1) => {
       if (!m.traceId || !m.feedbackToken) return;
       patch(m.id, (x) => ({ ...x, feedback: score }));
-      const ctx = { sessionId, userId, accessToken: await getAccessToken() };
-      sendFeedback(m.traceId, m.feedbackToken, score, ctx).catch(() => undefined);
+      try {
+        const ctx = { sessionId, userId, accessToken: await getAccessToken() };
+        await sendFeedback(m.traceId, m.feedbackToken, score, ctx);
+      } catch {
+        // best effort (offline, token refresh failed…)
+      }
     },
     [sessionId, userId, getAccessToken],
   );
 
   const newSession = () => {
+    conversation.current += 1; // late events of the old conversation are dropped
+    inflight.current?.abort();
+    inflight.current = null;
+    setBusy(false);
     setSessionId(Crypto.randomUUID());
     setMessages([]);
     setPending(null);

@@ -5,7 +5,7 @@ description: "Standard for BUILDING an MCP server (Python, uv, FastMCP streamabl
 
 # Build an MCP Server with Authentication / OAuth
 
-Verified template (`assets/mcp_server/`, 21 e2e tests: real uvicorn server + real MCP client, incl. the local quickstart below). Runs locally out of the box (`MCP_AUTH_MODE=none`).
+Verified template (`assets/mcp_server/`, 33 e2e tests: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
 
 | File | Role |
 |---|---|
@@ -29,13 +29,15 @@ Two independent protection layers: **Gateway** (who may call which tool — Poli
 
 | Connector outbound auth | Server receives | `MCP_AUTH_MODE` | End-user identity? |
 |---|---|---|---|
-| **API Key 2LO** | `Authorization: Bearer <key>` | `api_key` (SHA-256 compare) | ❌ — shared tools only |
+| **API Key 2LO** | `Authorization: Bearer <key>` | `api_key` (SHA-256 compare; scopes granted = `MCP_API_KEY_SCOPES`) | ❌ — shared tools only |
 | **OAuth 2LO** (client credentials) | Client's Bearer access token | `jwt` | ❌ (subject = client) |
 | **OAuth 3LO** (user consent) | **User's** Bearer access token | `jwt` | ✅ `sub` |
-| **Inbound forward** | JWT the agent/user sent to the Gateway | `jwt` (same IdP as gateway inbound JWT) | ✅ |
-| No authorization (local dev) | — | `none` (default; Settings blocks it outside `MCP_APP_ENV=local`) | ✅ fixed `MCP_DEV_USER` |
+| **Inbound forward** ⚠️ | The agent's own inbound credential, as sent to the Gateway | `jwt` (same IdP as gateway inbound JWT) — **JWT inbound only**, never IAM | ✅ |
+| No authorization (local dev) | — | `none`: only with `MCP_APP_ENV=local` (refused by default and in the image), binds 127.0.0.1, logs a warning | ✅ fixed `MCP_DEV_USER` |
 
-Rule: tools reading/writing **user-private data** must call `current_user()` (from `AccessToken.subject`); 2LO has no user ⇒ the tool refuses (tested). **Never** accept `user_id` as a tool argument.
+Rule: tools reading/writing **user-private data** must call `current_user()` (from `AccessToken.subject`); 2LO has no user ⇒ the tool refuses even when the API key is granted the scope (tested). **Never** accept `user_id` as a tool argument.
+
+⚠️ **Inbound forward hands your MCP server the agent's credential.** With gateway inbound **IAM** that is the runtime service account's platform token (AgentBaseFullAccess): whoever controls or compromises the MCP server can call the AgentBase platform with the agent's full permissions ⇒ **never use Inbound forward with IAM inbound**. With **JWT** inbound, use it only towards MCP servers you own that validate the same IdP (`jwt`, `MCP_AUDIENCE` checked); for anything else use OAuth 2LO/3LO or API Key. Details: `references/oauth.md` §3.
 
 ## Workflow
 
@@ -43,7 +45,7 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    ```bash
    cp -R <skill-dir>/assets/mcp_server <dest> && cd <dest>
    sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml settings.py .env.example Makefile   # Linux: sed -i
-   make setup && make test      # uv sync + .env from .env.example · 21 passed
+   make setup && make test      # uv sync + .env from .env.example · 33 passed
    ```
 2. **Write tools** in `server.py` — **read `references/tool-design.md` first**; copy the closest sample, then delete the samples you don't need (and their tests):
    - Shared data from an internal system ⇒ copy `get_product` + `backend.py` (`MCP_BACKEND_URL`, timeout, error mapping).
@@ -52,13 +54,14 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    - Tests: add a block per tool in `tests/test_tools.py` (happy · invalid input · missing scope · isolation · upstream failures) ⇒ `make test` green before moving on.
 3. **Run & try locally** (no IdP, no gateway needed):
    ```bash
-   make dev                                   # .env: MCP_APP_ENV=local, MCP_AUTH_MODE=none → http://localhost:8080/mcp
+   make dev                                   # .env: MCP_APP_ENV=local, MCP_AUTH_MODE=none → http://localhost:8080/mcp (127.0.0.1 only)
    curl -s localhost:8080/health              # {"status":"ok"}
    make tools                                 # list tools
    make call TOOL=add_note ARGS='{"text":"hi"}'   # prints structured output; exit 1 if isError
    ```
-   - `none` mode: `current_user()` = `MCP_DEV_USER`, `require_scope()` always passes ⇒ restart with another `MCP_DEV_USER` to see per-user isolation by hand. Scopes, 401 and real isolation are covered by `uv run pytest` (JWT mode with a test-signed token) — add a test per new tool.
-   - Test a real auth mode locally: set `MCP_AUTH_MODE=api_key` + hash in `.env`, then `make call TOOL=… TOKEN=<raw key>`.
+   - `none` mode: `current_user()` = `MCP_DEV_USER`, `require_scope()` always passes, the server logs `authentication is DISABLED` and listens on 127.0.0.1 only ⇒ restart with another `MCP_DEV_USER` to see per-user isolation by hand. Scopes, 401 and real isolation are covered by `uv run pytest` (JWT mode with a test-signed token) — add a test per new tool.
+   - Test a real auth mode locally: set `MCP_AUTH_MODE=api_key` + hash in `.env` (+ `MCP_API_KEY_SCOPES` for the tools the key may call), then `make call TOOL=… TOKEN=<raw key>`. With auth on, the server listens on 0.0.0.0.
+   - Docker locally: `make docker-build docker-run` (publishes on 127.0.0.1:8080 and sets `MCP_HOST=0.0.0.0` inside the container so `none` stays usable for local tests).
    - Internal system locally: point `MCP_BACKEND_URL` at a dev/mock instance (+ `MCP_BACKEND_TOKEN`); empty ⇒ those tools answer "not configured".
    - Interactive UI (optional): `make inspector` → Streamable HTTP, URL `http://localhost:8080/mcp`.
 4. **Connect a local agent** (optional, agent built with `/agentbase-build-mcp`) — call the server directly, bypassing the gateway, in the agent's `mcp_servers.json`:
@@ -66,14 +69,14 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    "notes": {"transport": "streamable_http", "url": "http://localhost:8080/mcp", "auth": "none", "envs": ["local"]}
    ```
    For `api_key` mode add `"headers": {"Authorization": "Bearer ${NOTES_MCP_KEY}"}` (`${…}` is expanded from the agent's env). Tool names in the agent = `<server>_<tool>` (e.g. `notes_add_note`). Policy Group does not apply without the gateway.
-5. **Configure auth** (`.env.example` → deploy env file):
-   - `api_key`: generate a key, env holds only `MCP_API_KEY_SHA256=["<sha256>"]`; **store the raw key in AgentBase Identity** (API key provider via `/agentbase-identity`) for the connector to use — not in the repo.
-   - `jwt`: `MCP_ISSUER`, `MCP_JWKS_URL`, `MCP_AUDIENCE` (API identifier registered at the IdP, ideally = `MCP_RESOURCE_URL`), `MCP_REQUIRED_SCOPES` if every request needs a scope.
+5. **Configure auth** (`.env.example` → deploy env file; it **must** set `MCP_AUTH_MODE=api_key|jwt` and must **not** set `MCP_APP_ENV=local` (the image defaults to `prod`) — a missing or incomplete env makes the server refuse to start, never serve unauthenticated; leave `MCP_HOST` empty):
+   - `api_key`: generate a key, env holds only `MCP_API_KEY_SHA256=["<sha256>"]`; **store the raw key in AgentBase Identity** (API key provider via `/agentbase-identity`) for the connector to use — not in the repo. The key carries no scopes: `MCP_API_KEY_SCOPES` lists the scopes it is granted (e.g. `["catalog.read"]` for `get_product`; only shared-data tools — per-user tools refuse API keys anyway).
+   - `jwt`: `MCP_ISSUER`, `MCP_JWKS_URL`, `MCP_AUDIENCE` — all **required** (startup error otherwise); `aud` is always verified, so tokens minted for another API or without `aud` get 401. `MCP_AUDIENCE` = API identifier registered at the IdP, ideally = `MCP_RESOURCE_URL`. `MCP_REQUIRED_SCOPES` if every request needs a scope.
    - `MCP_RESOURCE_URL` = `<runtime endpoint>/mcp` — appears in `WWW-Authenticate` and `/.well-known/oauth-protected-resource` so OAuth clients can discover the authorization server.
-6. **Deploy to Runtime** — `/agentbase-build-deploy` (Docker linux/amd64, port 8080, `/health`). Suggested runtime name `<name>-mcp`.
+6. **Deploy to Runtime** — `/agentbase-build-deploy` (Docker linux/amd64, port 8080, `/health`; the image sets `MCP_APP_ENV=prod`). Suggested runtime name `<name>-mcp`.
 7. **Create a Custom Connector** on the MCP Gateway (Console → MCP Connectors → *Add Custom Connector*, or a target via `/agentbase-gateway`):
    - MCP URL = `https://<runtime endpoint>/mcp`.
-   - Outbound auth per the table above; **Header key `Authorization`, prefix `Bearer `**.
+   - Outbound auth per the table above; **Header key `Authorization`, prefix `Bearer `**. Inbound forward only with gateway inbound JWT (see the warning above).
    - OAuth / API key: the connector's secret is a provider in **Access Control** — provider types and rules in `/agentbase-build-identity`, created with `/agentbase-identity` (Managed if available, otherwise Custom with your own OAuth App at the IdP); declare scopes; 3LO needs the Return URL in `allowedReturnUrls`.
    - The server only **receives** the token the Gateway attaches — it never calls Identity for it. If the server itself must call another service with a stored secret, follow the same SDK pattern as the agent (`/agentbase-build-identity`; its `app/identity.py` depends on the agent's `app.config`/`app.observability`, so adapt it — it is not part of this template); when deployed on a Runtime it has its **own** identity (every Runtime is bound to one).
    - Server in your VPC or data center ⇒ **Private MCP Gateway** (VPC Peering, Route CIDRs; VPN for on-prem) — see `/agentbase-build` `references/private-networking.md` and the sample [sample-onprem-mcp-vpn](https://github.com/greennode-samples/sample-onprem-mcp-vpn).
@@ -90,12 +93,14 @@ Read `references/oauth.md` — 2LO / 3LO / inbound forward flows, registering th
 - Don't log tokens (`AccessToken.token`); log `subject`, `client_id`, tool, latency.
 - Rate limit / payload size at the internal system or reverse proxy if tools are resource-heavy.
 - Business errors return clear messages (the LLM reads them); permission errors ⇒ `Forbidden` (MCP `isError`), without leaking internal details.
-- `MCP_AUTH_MODE=none` local only.
+- `MCP_AUTH_MODE=none` local only: needs explicit `MCP_APP_ENV=local` (default and image are `prod`), binds 127.0.0.1, logs a warning.
+- JWT: `aud` always checked (`MCP_AUDIENCE` required); the signing key's own alg is enforced (PyJWK, not raw key) and any verifier error is a 401, never a 500; no per-`kid` key cache, so a key the IdP removes stops working within 1h; the JWKS fetch runs in a thread (`asyncio.to_thread`), so a slow IdP never stalls the event loop. API keys get only `MCP_REQUIRED_SCOPES` + `MCP_API_KEY_SCOPES`.
+- Idempotent writes must be atomic (`INSERT … ON CONFLICT DO NOTHING` + read back in one transaction) and return the stored row — see `references/tool-design.md` §2.
 
 ## Tests (included in the template)
 
-- `tests/test_auth.py`: public health · 401 + `WWW-Authenticate resource_metadata` · wrong key · API key has no user identity · missing scope · invalid JWT (wrong audience / issuer / expired) · protected resource metadata · settings defaults (`local`/`none`, refused elsewhere) · **local quickstart** (`.env.example` + `python server.py` + `scripts/call_tool.py` as a real process).
-- `tests/test_tools.py`: per-user isolation · idempotent write · pagination · can't delete another user's note · internal system OK / 404 / timeout / 500 without leaking details (fake backend via `httpx.MockTransport`) · input validation · scope · annotations & output schema.
+- `tests/test_auth.py`: public health · 401 + `WWW-Authenticate resource_metadata` · wrong key · API key has no user identity (even with the notes scopes granted) · missing scope · invalid JWT (wrong / missing audience, wrong issuer, expired) · `MCP_AUDIENCE` required + verifier never skips `aud` · alg/key-type mismatch (ES256 header on an RSA kid) ⇒ 401 not 500 · EC key from JWKS accepted · key removed from the JWKS ⇒ 401 once the 1h JWK-set cache expires · slow JWKS fetch doesn't block other requests · protected resource metadata · fail closed (no env ⇒ `none` refused; Dockerfile env refuses `none`) · `none` binds 127.0.0.1 and warns · **local quickstart** (`.env.example` + `python server.py` + `scripts/call_tool.py` as a real process).
+- `tests/test_tools.py`: per-user isolation · idempotent write (replay returns the stored note) · 8 concurrent retries ⇒ one note, no SQL error · pagination · can't delete another user's note · internal system OK / 404 / timeout / 500 without leaking details (fake backend via `httpx.MockTransport`) · `get_product` with an API key (`MCP_API_KEY_SCOPES`) · input validation · scope · annotations & output schema.
 - Tests run in a temp dir (own SQLite file, no developer `.env`). Fixtures are documented at the top of `tests/conftest.py`.
 
 ## Official docs

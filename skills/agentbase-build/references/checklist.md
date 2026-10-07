@@ -43,7 +43,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] `make check-creds` shows `OK  Agent identity` locally; the runtime is bound to the identity that holds the providers.
 
 ## Auth
-- [B] `AUTH_MODE=jwt` outside local; issuer/audience configured; expired/wrong-audience token test ⇒ 401.
+- [B] Outside local: `AUTH_MODE=jwt` (issuer/audience or client allowlist configured; expired/wrong-audience token ⇒ 401), or `api_key` for trusted server callers only (BFF, jobs, A2A) with the reason written in the spec.
 - [B] Spoofed `X-GreenNode-AgentBase-User-Id` header ⇒ 403.
 
 ## Tracing (Langfuse v4)
@@ -75,7 +75,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - All SSE events handled (`token`, `reset`, `interrupt`, `done`, `error`).
 
 ## Deploy
-- The deploy env file does not contain `GREENNODE_CLIENT_ID/SECRET/AGENT_IDENTITY/ENDPOINT_URL`.
+- The deploy env file does not contain `GREENNODE_CLIENT_ID/SECRET/AGENT_IDENTITY` (injected) or `GREENNODE_ENDPOINT_URL` (reserved).
 - [B] The deploy env file sets `APP_ENV` (dev/staging/prod) — `local` is refused on the Runtime.
 - After deploy: health OK, 1 real request has a trace in Langfuse, clean logs (`/agentbase-monitor`).
 - [B] The runtime's identity, network mode (Public/Private) and endpoint are recorded in `.agentbase-state.json`.

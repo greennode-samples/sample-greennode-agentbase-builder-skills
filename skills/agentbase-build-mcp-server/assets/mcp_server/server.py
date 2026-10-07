@@ -2,6 +2,7 @@
 
 Runtime contract: 0.0.0.0:8080, GET /health 200 (no auth). MCP endpoint: POST /mcp (streamable HTTP,
 stateless ⇒ scale to many replicas without sticky sessions). Connector URL = <runtime endpoint>/mcp.
+MCP_AUTH_MODE=none (local dev) binds 127.0.0.1 instead and is refused outside MCP_APP_ENV=local.
 """
 
 from __future__ import annotations
@@ -29,12 +30,20 @@ logging.basicConfig(level="INFO")
 log = logging.getLogger(settings.server_name)
 
 verifier = build_verifier(settings)
+if verifier is None:
+    log.warning(
+        "MCP_AUTH_MODE=none: authentication is DISABLED, every caller is MCP_DEV_USER=%r. "
+        "Local development only (listening on %s:%d). Deploy with MCP_AUTH_MODE=api_key|jwt.",
+        settings.dev_user,
+        settings.host,
+        settings.port,
+    )
 store = NotesStore(settings.db_path)
 backend = Backend(settings.backend_url, settings.backend_timeout_s, settings.backend_token)
 mcp = FastMCP(
     settings.server_name,
     instructions="Short description of what this MCP server does — the LLM reads this.",
-    host="0.0.0.0",
+    host=settings.host,  # 0.0.0.0 with auth; 127.0.0.1 when MCP_AUTH_MODE=none (settings.py)
     port=settings.port,
     streamable_http_path="/mcp",
     stateless_http=True,
@@ -88,7 +97,8 @@ async def server_time() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-# --- shared data from an internal system (no user identity needed; works with API Key 2LO)
+# --- shared data from an internal system (no user identity needed). Works with API Key 2LO when
+# MCP_API_KEY_SCOPES grants `catalog.read` (an API key carries no scopes of its own).
 class Product(BaseModel):
     sku: str
     name: str
@@ -134,12 +144,13 @@ async def add_note(
         Field(max_length=64, description="Optional. Same key ⇒ same note, no duplicate on retry"),
     ] = None,
 ) -> Note:
-    """Save a note for the CURRENT USER. Requires scope `notes.write`."""
+    """Save a note for the CURRENT USER. Retrying with the same `idempotency_key` returns the note
+    saved the first time (no duplicate). Requires scope `notes.write`."""
     require_scope("notes.write")
     user = current_user()
-    note_id = await store.add(user, text, idempotency_key)
-    log.info("note added user=%s id=%d", user, note_id)
-    return Note(id=note_id, text=text, created_at=datetime.now(UTC).isoformat(timespec="seconds"))
+    row = await store.add(user, text, idempotency_key)
+    log.info("note added user=%s id=%d", user, row.id)
+    return Note(id=row.id, text=row.text, created_at=row.created_at)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))

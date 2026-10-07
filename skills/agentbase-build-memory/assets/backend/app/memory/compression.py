@@ -3,7 +3,10 @@
 Two-tier strategy:
 1. Rolling summary (node `compress`, stored in state): when total tokens > CONTEXT_MAX_TOKENS, summarize
    the old messages (except the last CONTEXT_KEEP_LAST) into `state.summary`, then remove them from the
-   checkpoint with RemoveMessage. Smaller checkpoint => faster AgentBase Memory reads/writes.
+   checkpoint with RemoveMessage. Keeps the prompt and each NEW checkpoint small. It does NOT make AgentBase
+   Memory reads cheap: the bridge loads EVERY event of the session each turn (old events stay until
+   eventExpiryDuration), so reads grow with the session's length — rotate long sessions (skill
+   agentbase-build-memory, "Long sessions").
 2. Hard trim (`fit_to_budget`, not persisted): right before calling the LLM, trim if still over
    CONTEXT_HARD_LIMIT_TOKENS (e.g. a huge tool output within the same turn).
 

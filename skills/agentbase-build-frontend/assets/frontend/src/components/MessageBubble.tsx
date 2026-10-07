@@ -16,8 +16,9 @@ type Props = { message: UiMessage; onFeedback?: (m: UiMessage, score: -1 | 1) =>
 
 // Only https links are tappable (e.g. the AUTHORIZATION_REQUIRED consent link from AgentBase Identity) —
 // never javascript:/custom schemes coming from model output.
-// ...and never swallow trailing punctuation / markdown from the model ("…open https://x.test/a." → no ".")
-const URL_RE = /(https:\/\/[^\s<>"')\]]*[^\s<>"')\].,;:!?*_])/g;
+// ...and never swallow trailing punctuation / markdown from the model ("…open https://x.test/a." → no "."),
+// nor the backticks of inline code (`https://x.test/c?a=1` would open …a=1%60).
+const URL_RE = /(https:\/\/[^\s<>"'`)\]]*[^\s<>"'`)\].,;:!?*_])/g;
 
 function Linkified({ text, style }: { text: string; style: object }) {
   const parts = text.split(URL_RE);

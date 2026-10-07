@@ -1,6 +1,7 @@
 """Connect external tools via MCP.
 
-Connection standard (declared in mcp_servers.json, supports ${ENV_VAR}):
+Connection standard (declared in mcp_servers.json; ${ENV_VAR} is expanded inside string values only,
+an unset/empty variable makes that server a config error — skipped with an error log):
   - Prod: agent -> AgentBase MCP Gateway (MCP Connector) -> MCP server. The gateway handles inbound auth,
     outbound credentials (Identity providerName) and Policy Group. Create with /agentbase-gateway.
   - Local: may connect directly to an MCP server (streamable_http or stdio) via "envs": ["local"].
@@ -10,6 +11,7 @@ agent's platform credential to any URL that forgot it):
   - "iam"      : the agent's IAM Bearer token (gateway inboundAuth.mode = IAM). Token auto-refreshes.
                  Only for the AgentBase MCP Gateway (*.agentbase-gateway.aiplatform.vngcloud.vn).
   - "user_jwt" : forwards the end-user's JWT (gateway inboundAuth.mode = JWT) => per-request.
+                 Also meant for the gateway; other hosts log a warning (every user's JWT is sent there).
   - "none"     : no auth from the agent; a static key for a self-built MCP server goes in
                  "headers": {"Authorization": "Bearer ${MY_KEY}"} (only allowed with "none").
 """
@@ -21,12 +23,13 @@ import base64
 import json
 import logging
 import os
+import re
 import time
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Iterator
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 import httpx
 from langchain_core.tools import BaseTool
@@ -138,28 +141,73 @@ def mcp_config_error(cfg: dict[str, Any]) -> str | None:
     return None
 
 
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env(value: Any, missing: set[str]) -> Any:
+    """Expand `${VAR}` inside string leaves of the ALREADY-PARSED JSON (never over the raw text: a `"` in a
+    value would break the whole file and a crafted value could inject keys such as "auth"). Substituted
+    values are not re-expanded. Unset or empty variables are collected in `missing` (caller skips the server
+    instead of sending a literal `${VAR}` or an empty credential)."""
+    if isinstance(value, str):
+
+        def sub(m: re.Match[str]) -> str:
+            if not (v := os.environ.get(m.group(1))):
+                missing.add(m.group(1))
+                return m.group(0)
+            return v
+
+        return _ENV_REF.sub(sub, value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v, missing) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v, missing) for v in value]
+    return value
+
+
+# What each auth mode sends — meant for the AgentBase MCP Gateway only; any other host logs this warning.
+_NON_GATEWAY_WARNING = {
+    "iam": "the agent's IAM token (platform credential) is sent there. Use auth=none (+ headers) for "
+    "other servers",
+    "user_jwt": "every end user's JWT is forwarded there. Keep it only for your own MCP server that "
+    "validates the same IdP; otherwise use auth=none (+ headers)",
+}
+
+
 def load_mcp_config(settings: Settings) -> dict[str, dict[str, Any]]:
     path = Path(settings.mcp_config_file)
     if not path.exists():
         return {}
-    raw = json.loads(os.path.expandvars(path.read_text(encoding="utf-8")))
+    raw = json.loads(path.read_text(encoding="utf-8"))
     servers = {}
-    for name, cfg in (raw.get("servers") or {}).items():
-        envs = cfg.get("envs")
+    for name, entry in (raw.get("servers") or {}).items():
+        envs = entry.get("envs")
         if envs and settings.app_env not in envs:
             continue
-        if cfg.get("enabled", True) is False:
+        if entry.get("enabled", True) is False:
+            continue
+        missing: set[str] = set()
+        cfg = _expand_env(entry, missing)
+        if missing:
+            log.error(
+                "MCP server %r skipped — environment variable(s) %s unset or empty (referenced as ${VAR} "
+                "in mcp_servers.json)",
+                name,
+                ", ".join(sorted(missing)),
+            )
             continue
         if err := mcp_config_error(cfg):
             log.error("MCP server %r skipped — invalid mcp_servers.json entry: %s", name, err)
             continue
-        host = urlparse(cfg.get("url", "")).hostname or ""
-        if cfg.get("auth") == "iam" and not host.endswith(_GATEWAY_HOST_SUFFIX):
+        host = urlsplit(cfg.get("url", "")).hostname or ""
+        warning = _NON_GATEWAY_WARNING.get(cfg.get("auth"))
+        if warning and not host.endswith(_GATEWAY_HOST_SUFFIX):
             log.warning(
-                "MCP server %r uses auth=iam but %r is not an AgentBase MCP Gateway — the agent's IAM token "
-                "is sent there. Use auth=none (+ headers) for other servers.",
+                "MCP server %r uses auth=%s but %r is not an AgentBase MCP Gateway — %s.",
                 name,
+                cfg["auth"],
                 host,
+                warning,
             )
         servers[name] = cfg
     return servers
@@ -205,6 +253,29 @@ def reset_policy_denials() -> None:
 POLICY_DENIED_MARKERS = ("denied by policy", "no policy allows this request")
 
 
+def _leaf_errors(e: BaseException) -> Iterator[BaseException]:
+    """The real errors behind (nested) ExceptionGroups — the MCP client raises HTTP errors from inside
+    anyio TaskGroups, so `str(e)` is only "unhandled errors in a TaskGroup (1 sub-exception)"."""
+    if isinstance(e, BaseExceptionGroup):
+        for sub in e.exceptions:
+            yield from _leaf_errors(sub)
+    else:
+        yield e
+
+
+def _http_status(e: BaseException) -> int | None:
+    return getattr(getattr(e, "response", None), "status_code", None)
+
+
+def _is_policy_denied(e: BaseException) -> bool:
+    """Gateway deny = HTTP 403 on tools/call (the body "No policy allows this request" never reaches the
+    exception) or an MCP error whose text carries a deny marker."""
+    for x in (e, *_leaf_errors(e)):
+        if _http_status(x) == 403 or any(m in str(x).lower() for m in POLICY_DENIED_MARKERS):
+            return True
+    return False
+
+
 def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -214,9 +285,10 @@ def _content_text(content: Any) -> str:
 
 
 def _guard_policy(tool: BaseTool, server: str) -> BaseTool:
-    """The gateway returns a policy deny as MCP error "Request denied by policy." — the adapter raises
-    ToolException, LangChain turns it into plain text => the LLM thinks it is transient and retries many
-    times. Turn it into a clear message + trace event `mcp.policy_denied` (WARNING) on Langfuse.
+    """The gateway returns a policy deny as HTTP 403 ("No policy allows this request" — the adapter raises
+    ExceptionGroup[httpx.HTTPStatusError]) or as MCP error "Request denied by policy." (ToolException, which
+    LangChain turns into plain text) => the LLM thinks it is transient and retries many times. Turn both into
+    a clear message + trace event `mcp.policy_denied` (WARNING) on Langfuse.
     """
     if getattr(tool, "_policy_guarded", False) or tool.coroutine is None:
         return tool
@@ -238,20 +310,17 @@ def _guard_policy(tool: BaseTool, server: str) -> BaseTool:
         )
         return (msg, None) if tool.response_format == "content_and_artifact" else msg
 
-    def _is_denied(text: str) -> bool:
-        return any(m in text.lower() for m in POLICY_DENIED_MARKERS)
-
     async def guarded(*args: Any, **kwargs: Any) -> Any:
         if server in (_DENIED_SERVERS.get() or ()):
             return _denied(short_circuit=True)  # no redundant request to the gateway
         try:
             result = await original(*args, **kwargs)
-        except Exception as e:  # adapter raises ToolException when MCP returns isError
-            if _is_denied(str(e)):
+        except Exception as e:  # ToolException (MCP isError) or ExceptionGroup[HTTP 403]
+            if _is_policy_denied(e):
                 return _denied()
             raise
         # Do NOT scan successful result content: a web page/document containing "denied by policy" would
-        # lock the whole connector (prompt-injection attack). The gateway returns denies via the error path (ToolException).
+        # lock the whole connector (prompt-injection attack). The gateway returns denies via the error path (ToolException / HTTP 403).
         return result
 
     tool.coroutine = guarded
@@ -270,15 +339,33 @@ _failed: dict[
 
 
 def _is_auth_error(e: BaseException) -> bool:
-    if isinstance(e, PermissionError):
-        return True
-    for x in getattr(e, "exceptions", None) or [e]:
-        resp = getattr(x, "response", None)
-        if getattr(resp, "status_code", None) in (401, 403):
+    for x in (e, *_leaf_errors(e)):
+        if isinstance(x, PermissionError) or _http_status(x) in (401, 403):
             return True
         if any(code in str(x) for code in ("401", "403", "Unauthorized", "Forbidden")):
             return True
     return False
+
+
+# Query-string values and URL userinfo are often credentials (`?tavilyApiKey=…`, `https://u:p@host`).
+_QUERY_VALUE = re.compile(r"([?&][^=&#\s'\"]+=)[^&#\s'\"]+")
+_USERINFO = re.compile(r"(//)[^/@\s'\"]+@")
+
+
+def _safe_url(url: str | None) -> str | None:
+    """scheme://host[:port]/path — no query string, fragment or userinfo (traces must not carry secrets)."""
+    if not url:
+        return url
+    p = urlsplit(url)
+    return f"{p.scheme}://{p.netloc.rpartition('@')[2]}{p.path}"
+
+
+def _error_summary(e: BaseException) -> str:
+    """`Type: message` of the real (leaf) error, first line, query values/userinfo masked, ≤ 300 chars."""
+    leaf = next(_leaf_errors(e), e)
+    text = (str(leaf).strip().splitlines() or [""])[0]
+    text = _USERINFO.sub(r"\1***@", _QUERY_VALUE.sub(r"\1***", text))
+    return f"{type(leaf).__name__}: {text[:300]}"
 
 
 async def _load_server(
@@ -293,7 +380,7 @@ async def _load_server(
     span_input = {
         "server": name,
         "transport": cfg.get("transport", "streamable_http"),
-        "url": cfg.get("url"),
+        "url": _safe_url(cfg.get("url")),
         "auth": auth,
         "cached": hit,
         "skipped_recent_failure": skip,
@@ -316,7 +403,7 @@ async def _load_server(
                     client.get_tools(server_name=name), timeout=settings.mcp_list_timeout_s
                 )
             except Exception as e:  # noqa: BLE001 — one failing MCP server must not crash the agent
-                msg = f"{type(e).__name__}: {str(e)[:300]}"
+                msg = _error_summary(e)
                 log.warning("MCP server '%s' unavailable, skipping: %s", name, msg)
                 # Negative cache ONLY for shared servers + infra errors. A per-user server (user_jwt) or
                 # one user's permission/401 error must not make the server disappear for every user.

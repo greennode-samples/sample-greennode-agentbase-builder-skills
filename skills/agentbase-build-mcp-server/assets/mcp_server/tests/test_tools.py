@@ -5,8 +5,12 @@ upstream failures (if it calls an internal system) · annotations.
 
 from __future__ import annotations
 
+import asyncio
+import sys
+import time
+
 import httpx
-from conftest import JWT_ENV, call, list_tools, make_token, text
+from conftest import API_KEY, API_KEY_ENV, JWT_ENV, call, list_tools, make_token, session, text
 
 
 # ----------------------------------------------------------------------------- notes (per-user, DB)
@@ -21,10 +25,52 @@ async def test_notes_per_user_isolation(jwt_server):
 
 async def test_add_note_is_idempotent_with_key(local_server):
     args = {"text": "pay rent", "idempotency_key": "k-1"}
-    first = await call(local_server, None, "add_note", args)
-    retry = await call(local_server, None, "add_note", args)
-    assert first.structuredContent["id"] == retry.structuredContent["id"]
+    first = (await call(local_server, None, "add_note", args)).structuredContent
+    retry = (await call(local_server, None, "add_note", args)).structuredContent
+    assert retry == first
+    # Replay with other text ⇒ the note that was stored, not the new text
+    other = await call(local_server, None, "add_note", {**args, "text": "pay rent twice"})
+    assert other.structuredContent == first
+    page = (await call(local_server, None, "list_notes")).structuredContent
+    assert page["total"] == 1 and page["items"][0] == first
+
+
+def _slow_inserts(monkeypatch, store, delay: float = 0.2) -> None:
+    """Simulate DB latency: every INSERT waits before running ⇒ concurrent retries really overlap."""
+    connect = store._connect
+
+    def _connect():
+        conn = connect()
+        conn.set_trace_callback(
+            lambda sql: time.sleep(delay) if sql.lstrip().upper().startswith("INSERT") else None
+        )
+        return conn
+
+    monkeypatch.setattr(store, "_connect", _connect)
+
+
+async def test_add_note_concurrent_retries_make_one_note(local_server, monkeypatch):
+    _slow_inserts(monkeypatch, sys.modules["server"].store)
+    args = {"text": "pay rent", "idempotency_key": "k-race"}
+    results = await session(
+        local_server,
+        None,
+        lambda s: asyncio.gather(*(s.call_tool("add_note", args) for _ in range(8))),
+    )
+    errors = [text(r) for r in results if r.isError]
+    assert not errors, errors  # e.g. no "UNIQUE constraint failed" (SQL leaked to the LLM)
+    assert len({r.structuredContent["id"] for r in results}) == 1
     assert (await call(local_server, None, "list_notes")).structuredContent["total"] == 1
+
+
+async def test_store_add_is_atomic_under_concurrency(tmp_path, monkeypatch):
+    from store import NotesStore
+
+    store = NotesStore(str(tmp_path / "race.db"))
+    _slow_inserts(monkeypatch, store)
+    rows = await asyncio.gather(*(store.add("alice", f"t{i}", "k-1") for i in range(8)))
+    assert len(set(rows)) == 1  # same id, text and created_at for every caller
+    assert (await store.list("alice", 50, 0))[1] == 1
 
 
 async def test_add_note_validates_input(local_server):
@@ -90,6 +136,16 @@ async def test_get_product_validation_and_scope(start_server):
         base, make_token("alice", scope="notes.read"), "get_product", {"sku": "SKU-1001"}
     )
     assert no_scope.isError and "catalog.read" in text(no_scope)
+
+
+async def test_get_product_with_api_key(start_server):
+    """API Key 2LO carries no scopes: the server grants MCP_API_KEY_SCOPES (catalog.read here)."""
+    base = start_server(API_KEY_ENV, backend=_catalog)
+    res = await call(base, API_KEY, "get_product", {"sku": "SKU-1001"})
+    assert not res.isError and res.structuredContent["name"] == "Lamp", text(res)
+    no_scope = start_server({**API_KEY_ENV, "MCP_API_KEY_SCOPES": "[]"}, backend=_catalog)
+    res = await call(no_scope, API_KEY, "get_product", {"sku": "SKU-1001"})
+    assert res.isError and "catalog.read" in text(res)
 
 
 async def test_get_product_not_configured_locally(local_server):

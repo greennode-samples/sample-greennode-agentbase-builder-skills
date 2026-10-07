@@ -5,9 +5,12 @@ Routes (same container :8080, next to /invocations):
   POST /a2a                           JSON-RPC: SendMessage, GetTask, ListTasks, CancelTask...
 
 Authentication & per-user isolation (same as /invocations):
-  - Every /a2a request goes through `authenticate()` (AUTH_MODE jwt | api_key) ⇒ 401 if invalid.
+  - Every /a2a request goes through `authenticate()` (AUTH_MODE jwt | api_key) ⇒ same HTTP status as
+    /invocations (401 invalid credentials, 403 User-Id ≠ token subject, 400 missing User-Id, 503 IdP down).
   - The authenticated user is attached to `request.user` ⇒ the a2a-sdk task store keys tasks by owner =
     user_id ⇒ user B cannot GetTask/ListTasks user A's tasks.
+  - The verified Principal (claims + token) rides on `request.auth` and is passed to run_chat/run_resume ⇒
+    tools see the same AUTH_FORWARD_CLAIMS / user token as on /invocations (RBAC, user_jwt).
   - A2A `contextId` ⇒ session_id `a2a-<contextId>`; memory is keyed by (session, user) like every other flow.
   - HITL: graph pauses ⇒ task `INPUT_REQUIRED` + description of the tool awaiting approval; the caller sends
     the next message on the same contextId with "approve" or "reject: <reason>" to continue.
@@ -42,7 +45,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Mount
 
 from app.a2a.decisions import parse_decision
-from app.auth.inbound import authenticate_async, validate_session_id
+from app.auth.inbound import Principal, authenticate_async, validate_session_id
 from app.config import Settings, get_settings
 
 log = logging.getLogger(__name__)
@@ -51,6 +54,23 @@ RPC_PATH = "/a2a"
 
 
 # --------------------------------------------------------------------------- auth
+class PrincipalCredentials(AuthCredentials):
+    """`request.auth` for /a2a: carries the verified Principal. a2a-sdk copies `request.auth` into
+    `ServerCallContext.state["auth"]` ⇒ the executor reads it there (request.user only holds the name)."""
+
+    def __init__(self, principal: Principal):
+        super().__init__(["authenticated"])
+        self.principal = principal
+
+
+class A2AAuthError(AuthenticationError):
+    """Keeps the status of the inbound-auth error (401 / 403 / 400 / 503) instead of a blanket 401."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class AgentBaseAuthBackend(AuthenticationBackend):
     """Reuses the agent's inbound auth for A2A (same headers as /invocations)."""
 
@@ -64,12 +84,22 @@ class AgentBaseAuthBackend(AuthenticationBackend):
         try:
             principal = await authenticate_async(ctx, get_settings())
         except GreenNodeRequestError as e:
-            raise AuthenticationError(e.message) from e
-        return AuthCredentials(["authenticated"]), SimpleUser(principal.user_id)
+            raise A2AAuthError(e.message, e.status_code or 401) from e
+        # SimpleUser.display_name = user_id = the a2a-sdk task owner
+        return PrincipalCredentials(principal), SimpleUser(principal.user_id)
 
 
 def _auth_error(_conn: HTTPConnection, exc: Exception) -> JSONResponse:
-    return JSONResponse({"error": str(exc)}, status_code=401)
+    return JSONResponse({"error": str(exc)}, status_code=getattr(exc, "status_code", 401))
+
+
+def _verified_principal(context: RequestContext) -> Principal:
+    """The Principal AgentBaseAuthBackend verified for this request — fail closed if it is missing."""
+    call = context.call_context
+    principal = getattr((call.state or {}).get("auth") if call else None, "principal", None)
+    if not isinstance(principal, Principal) or principal.user_id != call.user.user_name:
+        raise GreenNodeRequestError("Unauthenticated A2A request", status_code=401)
+    return principal
 
 
 # --------------------------------------------------------------------------- executor
@@ -83,7 +113,6 @@ class AgentBaseExecutor(AgentExecutor):
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         from app import service  # avoid a circular import at app init
 
-        user_id = context.call_context.user.user_name
         session_id = f"a2a-{context.context_id}"
         if (
             context.current_task is None
@@ -99,6 +128,13 @@ class AgentBaseExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         text = _text_of(context.message)
         await updater.start_work()
+        try:
+            principal = _verified_principal(context)
+        except GreenNodeRequestError as e:
+            await updater.failed(updater.new_agent_message([pb.Part(text=e.message)]))
+            return
+        user_id = principal.user_id
+        resuming = False
         try:
             validate_session_id(
                 session_id
@@ -119,22 +155,42 @@ class AgentBaseExecutor(AgentExecutor):
                     }
                     for tc in pending
                 ]
-                result = await service.run_resume(decisions, user_id=user_id, session_id=session_id)
-            else:
-                result = await service.run_chat(text, user_id=user_id, session_id=session_id)
-        except GreenNodeRequestError as e:
-            if e.status_code == 409:  # approval pending but the caller sent something else
-                await updater.requires_input(
-                    updater.new_agent_message(
-                        [
-                            pb.Part(
-                                text=(
-                                    "An action is awaiting confirmation — reply 'approve' or 'reject: <reason>'."
-                                )
-                            )
-                        ]
-                    )
+                resuming = True
+                result = await service.run_resume(
+                    decisions, user_id=user_id, session_id=session_id, principal=principal
                 )
+            else:
+                result = await service.run_chat(
+                    text, user_id=user_id, session_id=session_id, principal=principal
+                )
+        except GreenNodeRequestError as e:
+            if e.status_code == 409:
+                # 409 = "approval pending but the caller chatted" OR "nothing pending any more" (a concurrent
+                # request already applied the decision) ⇒ ask the checkpoint which one instead of guessing.
+                still_pending = await service.pending_tool_calls(
+                    user_id=user_id, session_id=session_id
+                )
+                if still_pending:
+                    calls = ", ".join(f"{t['name']}({t['args']})" for t in still_pending)
+                    await updater.requires_input(
+                        updater.new_agent_message(
+                            [
+                                pb.Part(
+                                    text=f"An action is awaiting confirmation: {calls}. "
+                                    "Reply 'approve' or 'reject: <reason>'."
+                                )
+                            ]
+                        )
+                    )
+                else:
+                    gone = (
+                        "Nothing is awaiting confirmation any more — this decision was already handled "
+                        "(e.g. by a concurrent request). Send a new message."
+                        if resuming
+                        else "The conversation changed while this message was processed (concurrent "
+                        "request) — send it again."
+                    )
+                    await updater.failed(updater.new_agent_message([pb.Part(text=gone)]))
                 return
             await updater.failed(updater.new_agent_message([pb.Part(text=e.message)]))
             return

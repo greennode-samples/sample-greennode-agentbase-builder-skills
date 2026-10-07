@@ -18,7 +18,8 @@ AgentBase agent on GreenNode AgentBase — standardized by the `agentbase-build`
 
 ```bash
 make setup
-cp src/backend/.env.example src/backend/.env   # fill in LLM_API_KEY, LLM_MODEL
+# the scaffold already created src/backend/.env — edit it (LLM_API_KEY, LLM_MODEL), never re-copy over it
+# IAM: copy src/backend/.greennode.json.example to .greennode.json and fill it in; then: make check-creds
 make test
 make dev
 make invoke MSG="hello"

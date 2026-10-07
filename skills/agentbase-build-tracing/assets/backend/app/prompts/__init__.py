@@ -2,8 +2,9 @@
 
 - LANGFUSE_PROMPT_NAME empty => use prompts/system.md.
 - Name set => fetch the prompt by label (LANGFUSE_PROMPT_LABEL, default "production"),
-  SDK caches by TTL; connection lost => local file fallback. The prompt client is attached to the generation
-  so Langfuse reports latency/cost/score per prompt version.
+  SDK caches by TTL (LANGFUSE_PROMPT_CACHE_TTL seconds, default 300; empty/invalid => 300);
+  connection lost => local file fallback. The prompt client is attached to the `llm.<task>` chain of the agent
+  node (graph/builder.py) so Langfuse reports latency/cost/score per prompt version.
 """
 
 from __future__ import annotations
@@ -17,6 +18,18 @@ from app.observability.tracing import get_client
 
 log = logging.getLogger(__name__)
 _LOCAL = (Path(__file__).parent / "system.md").read_text(encoding="utf-8")
+_DEFAULT_CACHE_TTL_S = 300
+
+
+def _cache_ttl_seconds() -> int:
+    raw = (os.getenv("LANGFUSE_PROMPT_CACHE_TTL") or "").strip()
+    try:
+        return int(raw) if raw else _DEFAULT_CACHE_TTL_S
+    except ValueError:  # a typo here must not silently switch the agent to the local prompt
+        log.warning(
+            "LANGFUSE_PROMPT_CACHE_TTL=%r is not an integer — using %ss", raw, _DEFAULT_CACHE_TTL_S
+        )
+        return _DEFAULT_CACHE_TTL_S
 
 
 def get_system_prompt() -> tuple[str, Any | None]:
@@ -32,7 +45,7 @@ def get_system_prompt() -> tuple[str, Any | None]:
             label=label,
             type="text",
             fallback=_LOCAL,
-            cache_ttl_seconds=int(os.getenv("LANGFUSE_PROMPT_CACHE_TTL", "300")),
+            cache_ttl_seconds=_cache_ttl_seconds(),
         )
         return prompt.compile(), (None if getattr(prompt, "is_fallback", False) else prompt)
     except Exception:  # noqa: BLE001

@@ -63,11 +63,12 @@ function headers({ sessionId, userId, accessToken }: Ctx): Record<string, string
   return h;
 }
 
-async function post(body: unknown, ctx: Ctx, accept = 'application/json') {
+async function post(body: unknown, ctx: Ctx, accept = 'application/json', signal?: AbortSignal) {
   const res = await expoFetch(`${env.agentUrl}/invocations`, {
     method: 'POST',
     headers: { ...headers(ctx), Accept: accept },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
@@ -91,39 +92,82 @@ export const resumeBody = (decisions: Decision[], interruptId?: string | null): 
   interrupt_id: interruptId ?? null,
 });
 
-export async function invoke(body: Body, ctx: Ctx): Promise<ChatResult> {
-  const res = await post({ ...body, stream: false }, ctx);
+// `signal` (AbortController): cancel the request, e.g. when the user starts a new conversation mid-turn.
+export async function invoke(body: Body, ctx: Ctx, signal?: AbortSignal): Promise<ChatResult> {
+  const res = await post({ ...body, stream: false }, ctx, 'application/json', signal);
   return (await res.json()) as ChatResult;
+}
+
+/**
+ * Incremental SSE parser (WHATWG event-stream framing): LF, CRLF or CR line endings (a CRLF split across two
+ * chunks included), an event ends at a blank line, several `data:` lines are joined with "\n", `:` comment /
+ * keep-alive lines and other fields are ignored. `end()` flushes a last event that lacks the closing blank line
+ * (some proxies strip it) — otherwise the final `done`/`interrupt` would be lost.
+ */
+export function createSseParser(onData: (data: string) => void) {
+  let buffer = '';
+  let data: string[] = [];
+  const dispatch = () => {
+    if (data.length) onData(data.join('\n'));
+    data = [];
+  };
+  const line = (l: string) => {
+    if (l === '') return dispatch();
+    if (l.startsWith(':')) return;
+    const colon = l.indexOf(':');
+    const field = colon < 0 ? l : l.slice(0, colon);
+    const value = colon < 0 ? '' : l.slice(colon + 1).replace(/^ /, '');
+    if (field === 'data') data.push(value);
+  };
+  return {
+    push(chunk: string) {
+      buffer += chunk;
+      const held = buffer.endsWith('\r'); // maybe the first half of a CRLF: decide when the next chunk arrives
+      const lines = (held ? buffer.slice(0, -1) : buffer).split(/\r\n|\r|\n/);
+      buffer = lines.pop()! + (held ? '\r' : '');
+      lines.forEach(line);
+    },
+    end() {
+      if (buffer) line(buffer.replace(/\r$/, ''));
+      buffer = '';
+      dispatch();
+    },
+  };
 }
 
 export async function invokeStream(
   body: Body,
   ctx: Ctx,
   onEvent: (e: StreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const res = await post({ ...body, stream: true }, ctx, 'text/event-stream');
+  const res = await post({ ...body, stream: true }, ctx, 'text/event-stream', signal);
   const reader = res.body?.getReader();
   if (!reader) throw new AgentError(0, 'Streaming not supported on this platform');
+  const parser = createSseParser((data) => {
+    let event: StreamEvent;
+    try {
+      event = JSON.parse(data) as StreamEvent;
+    } catch {
+      // Truncated/garbled frame: skip it (the caller notices a missing final event) instead of killing the stream
+      if (__DEV__) console.warn('[agent] unparsable SSE frame skipped:', data.slice(0, 200));
+      return;
+    }
+    onEvent(event);
+  });
   const decoder = new TextDecoder();
-  let buffer = '';
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf('\n\n')) >= 0) {
-      const frame = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      for (const line of frame.split('\n')) {
-        if (line.startsWith('data:')) onEvent(JSON.parse(line.slice(5).trim()) as StreamEvent);
-      }
-    }
+    parser.push(decoder.decode(value, { stream: true }));
   }
+  parser.push(decoder.decode()); // flush a trailing partial UTF-8 sequence
+  parser.end();
 }
 
 export async function sendFeedback(
   traceId: string,
-  feedbackToken: string,
+  feedbackToken: string, // from the same response — the backend answers 403 without it
   score: -1 | 0 | 1,
   ctx: Ctx,
   comment?: string,

@@ -10,13 +10,22 @@ RunnableConfig (set by the handler from the authenticated user) so the LLM can't
 
 Standard namespace: /strategies/{MEMORY_STRATEGY_ID}/actors/{user_id}
 (must match the namespaceTemplate used when creating the memory with /agentbase-memory).
+ONE strategy per agent: recall searches only that strategy's namespace (records of a second strategy on the same
+memory store are never recalled unless you also search its namespace).
+
+Memory API calls retry 429/5xx with exponential backoff (MEMORY_MAX_RETRIES, MEMORY_RETRY_BACKOFF_S) like the
+bridge does for checkpoints — the platform's 10-concurrent-requests limit answers 429 on bursts.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
+from greennode_agentbase.exceptions import GreenNodeRequestError
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
@@ -24,6 +33,35 @@ from app.config import Settings
 from app.observability import tracing
 
 log = logging.getLogger(__name__)
+
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})  # same set as the bridge (checkpoint calls)
+MAX_BACKOFF_S = 2.0  # bridge default max_backoff
+# Memory API: search `limit` must be within 5–200 (agentbase-memory reference) — clamp, then cut to what was asked
+SEARCH_LIMIT_MIN, SEARCH_LIMIT_MAX = 5, 200
+
+
+async def with_retry[T](
+    call: Callable[[], Awaitable[T]], *, max_retries: int, backoff_s: float, what: str
+) -> T:
+    """Retry 429/5xx GreenNodeRequestError with exponential backoff + jitter. Other errors (400, 401, 404,
+    network/timeout) raise at once. Cancellation (REQUEST_TIMEOUT_S) interrupts the backoff sleep immediately."""
+    for attempt in range(max(max_retries, 0) + 1):
+        try:
+            return await call()
+        except GreenNodeRequestError as e:
+            if e.status_code not in RETRYABLE_STATUS or attempt >= max_retries:
+                raise
+            delay = min(backoff_s * 2**attempt, MAX_BACKOFF_S) * random.uniform(0.5, 1.0)
+            log.warning(
+                "%s: HTTP %s, retry %d/%d in %.2fs",
+                what,
+                e.status_code,
+                attempt + 1,
+                max_retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 class LongTermMemory(Protocol):
@@ -41,6 +79,8 @@ class AgentBaseLTM:
         self._memory_id = settings.memory_id
         self._strategy_id = settings.memory_strategy_id
         self._min_score = settings.ltm_min_score
+        self._max_retries = settings.memory_max_retries
+        self._backoff_s = settings.memory_retry_backoff_s
 
     def namespace(self, user_id: str) -> str:
         return f"/strategies/{self._strategy_id}/actors/{user_id}"
@@ -48,29 +88,40 @@ class AgentBaseLTM:
     async def search(self, user_id: str, query: str, limit: int) -> list[str]:
         from greennode_agentbase.memory.models import MemoryRecordSearchRequest
 
-        results = await self._client.search_memory_records_async(
-            id=self._memory_id,
-            namespace=self.namespace(user_id),
+        request = MemoryRecordSearchRequest(
             # The API limits query to ≤ 1000 chars (400 if exceeded) — keep the end (usually the question)
-            request=MemoryRecordSearchRequest(query=query[-self._max_query :], limit=limit),
+            query=query[-self._max_query :],
+            limit=min(max(limit, SEARCH_LIMIT_MIN), SEARCH_LIMIT_MAX),
         )
-        facts = []
+        results = await with_retry(
+            lambda: self._client.search_memory_records_async(
+                id=self._memory_id, namespace=self.namespace(user_id), request=request
+            ),
+            max_retries=self._max_retries,
+            backoff_s=self._backoff_s,
+            what="memory.search",
+        )
+        facts: list[str] = []
         for r in results or []:
             # SDK 1.0.x returns list[dict] {id, memory, score, created_at}; objects are tolerated too
             memory = r.get("memory") if isinstance(r, dict) else getattr(r, "memory", None)
             score = (r.get("score") if isinstance(r, dict) else getattr(r, "score", None)) or 0.0
             if memory and (self._min_score is None or score >= self._min_score):
                 facts.append(memory)
-        return facts
+        return facts[: max(limit, 0)]
 
     async def save(self, user_id: str, fact: str) -> None:
         from greennode_agentbase.memory.models import MemoryRecordInsertDirectlyRequest
 
         # SDK 1.0.x: request MUST be a MemoryRecordInsertDirectlyRequest (passing a list => TypeError)
-        await self._client.insert_memory_records_directly_async(
-            id=self._memory_id,
-            namespace=self.namespace(user_id),
-            request=MemoryRecordInsertDirectlyRequest(memory_records=[fact]),
+        request = MemoryRecordInsertDirectlyRequest(memory_records=[fact])
+        await with_retry(
+            lambda: self._client.insert_memory_records_directly_async(
+                id=self._memory_id, namespace=self.namespace(user_id), request=request
+            ),
+            max_retries=self._max_retries,
+            backoff_s=self._backoff_s,
+            what="memory.save",
         )
 
 

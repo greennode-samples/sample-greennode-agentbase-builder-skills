@@ -53,11 +53,24 @@ LLM_TIER_FALLBACKS='{"large": ["qwen/qwen3.8-max"], "small": ["qwen/qwen3.8-flas
 LLM_FALLBACK_MODELS='["qwen/qwen3.8-flash"]'   # shared for tiers without their own entry
 ```
 
-- Switch models only on **infrastructure/model** errors: `APIConnectionError`/timeout, `RateLimitError` (429), `InternalServerError` (5xx), `NotFoundError` (model removed/wrong path), `PermissionDeniedError` (model not enabled). Do **not** switch on `BadRequestError` (400) or a wrong API key, since changing models doesn't fix those.
+- Switch models only on **infrastructure/model** errors: `APIConnectionError`/timeout, `RateLimitError` (429), `InternalServerError` (5xx), `NotFoundError` (model removed/wrong path), `PermissionDeniedError` (model not enabled), and a provider error **inside a streamed 200 response** (vLLM-style SSE chunk `data: {"error": {...}}` — the openai SDK raises it as a bare `openai.APIError` with no status; each model is wrapped so exactly that class is re-raised as `ProviderStreamError`, which is in `FALLBACK_ERRORS`). Do **not** switch on `BadRequestError` (400), `AuthenticationError` (401), `UnprocessableEntityError` (422) or context-overflow errors — they are `APIError` subclasses and are left unchanged, since changing models doesn't fix them.
 - With fallbacks ⇒ the **primary** gets `max_retries=0` (switch fast instead of re-calling a hung model); fallback models keep `LLM_MAX_RETRIES` so a 429 (account-wide 10 RPM) still gets the SDK's backoff.
-- **Time budget:** worst case = (1 + fallbacks × (1 + `LLM_MAX_RETRIES`)) × `LLM_TIMEOUT_S` (×2 for the reasoning tier) must stay under `REQUEST_TIMEOUT_S` (default 180s), otherwise the request is cancelled before the last fallback answers. The app logs a WARNING at startup when a tier is over budget.
+- **Time budget** (`worst_case_s(tier)`): every attempt hangs until `LLM_TIMEOUT_S` (×2 for the reasoning tier) **plus the SDK's retry sleeps** (0.5 s × 2ⁿ, capped at 8 s per retry: 0.5 s for 1 retry, 1.5 s for 2, 3.5 s for 3) must stay under `REQUEST_TIMEOUT_S` (default 180 s), otherwise the request is cancelled before the last fallback answers:
+  - with fallbacks: `(1 + F × (1 + R)) × T + F × sleep(R)` (primary 1 attempt, each of the F fallbacks 1 + R attempts);
+  - without: `(1 + R) × T + sleep(R)`.
+
+  The app logs a WARNING the first time a tier is used if it is over budget. The template defaults are `LLM_TIMEOUT_S=25`, `LLM_MAX_RETRIES=1` (the earlier 60 s / 2 retries were over budget for every tier even without fallbacks: 3 × 60 + 1.5 = 181.5 s). Values that fit `REQUEST_TIMEOUT_S=180` (with `LLM_STREAMING=true` the timeout is an *inactivity* timeout — time to first token or between chunks — so 25 s is generous for MaaS models measured at 2.5–7 s per call):
+
+  | Setup | `LLM_TIMEOUT_S` | `LLM_MAX_RETRIES` | Fallbacks | Worst case large / small | Worst case reasoning |
+  |---|---|---|---|---|---|
+  | **Recommended**: 1 fallback per tier | 25 | 1 | 1 per tier | 3 × 25 + 0.5 = 75.5 s | 3 × 50 + 0.5 = 150.5 s |
+  | More fallbacks for large/small | 25 | 1 | 2 large/small, **1** reasoning | 5 × 25 + 1 = 126 s | 150.5 s |
+  | No fallbacks | 40 | 1 | 0 | 2 × 40 + 0.5 = 80.5 s | 2 × 80 + 0.5 = 160.5 s |
+  | Reasoning-heavy agent | 45 | 1 | 1 per tier | 135.5 s | 270.5 s ⇒ needs `REQUEST_TIMEOUT_S=300` |
+
+  These numbers cover **one** LLM call. A turn can have several (router, tool rounds, judge) plus Memory and tool time, so keep headroom: the recommended row still leaves about 30 s in the reasoning tier's worst case. With `LLM_STREAMING=false` the timeout must cover the whole answer: keep 60 s or more and raise `REQUEST_TIMEOUT_S`. Not budgeted: a server `Retry-After` header replaces the SDK backoff (the SDK honours up to 120 s). Whether MaaS sends `Retry-After` on 429 is not verified, so check a 429's headers before relying on retries.
 - Fallbacks should have similar capability, **a different model family / provider** (avoid correlated failures), be enabled on AIP and already evaluated.
-- Streaming: if the primary fails **mid-answer**, the fallback answers from scratch and the stream first sends `{"event": "reset", "reason": "llm_fallback"}` so the client clears the partial text (tested).
+- Streaming: if the primary fails **mid-answer**, the fallback answers from scratch and the stream first sends `{"event": "reset", "reason": "llm_fallback"}` so the client clears the partial text. Tested with a fake model that dies after tokens (`APIConnectionError`) and with the real `ChatOpenAI` against a local OpenAI-compatible mock server that streams tokens and then an SSE error chunk: the backup model answers, and the service emits `reset` followed by the backup's tokens only. Not yet observed on MaaS itself.
 - Langfuse: the primary model's generation at level ERROR, followed by the fallback model's generation (different `model_name`) in the same trace.
 - Verified on MaaS: nonexistent primary model (404) → automatically switched to `qwen/qwen3.8-flash` and answered normally.
 - Cross-provider fallback (OpenAI, internal vLLM): needs per-model `base_url`/key, extend `_chat()`; keys stored in Identity.
@@ -107,9 +120,9 @@ Note: most models on MaaS emit reasoning tokens, even flash variants. Langfuse v
 
 ## Standard code (assets of this skill)
 
-- `app/llm/__init__.py`: `get_llm(task, tools)` is the **only entry point**; `tier_for`, `model_for`, `fallbacks_for`, `FALLBACK_ERRORS`. `_chat` caches by (model, tier, role); the small tier uses temperature 0, the reasoning tier timeout ×2.
+- `app/llm/__init__.py`: `get_llm(task, tools)` is the **only entry point**; `tier_for`, `model_for`, `fallbacks_for`, `FALLBACK_ERRORS`, `ProviderStreamError`, `worst_case_s`. `_chat` caches by (model, tier, role); the small tier uses temperature 0, the reasoning tier timeout ×2.
 - `app/llm/routing.py`: `classify()` for adaptive routing.
-- `tests/test_llm.py`: default/overridden tiers, flow table, fallback on infrastructure errors (no fallback on 400), each flow uses the right model, adaptive routing picks the right flow.
+- `tests/test_llm.py`: default/overridden tiers, flow table, fallback on infrastructure errors (no fallback on 400), each flow uses the right model, adaptive routing picks the right flow. Against a local OpenAI-compatible mock HTTP server: an SSE error chunk before or after the first token falls back (`ainvoke`, `invoke`, `abatch`, and the streamed service turn with `reset`), while HTTP 400/401/422 do not. Time budget: the backoff constants match the openai SDK, `worst_case_s` per setup, and the warning fires for the defaults and stays quiet for every row of the §4 table.
 - `streaming=True` + `stream_usage=True` ⇒ Langfuse gets TTFT and usage when streaming (MaaS returns usage when streaming).
 
 ## Prompt caching
@@ -125,6 +138,8 @@ The docs say LLM calls on Runtime may go through the Sidecar LLM Proxy `localhos
 | Error | Cause | Fix |
 |---|---|---|
 | 401 | Wrong/deleted key | `/agentbase-llm api-keys list`, reload with `--save-env` (fallback can't help) |
+| `ProviderStreamError` / bare `openai.APIError: <message>` (no status), often after some tokens | Provider failed inside the stream (SSE error chunk: engine overloaded or crashed) | Falls back automatically when the tier has fallbacks; without fallbacks it surfaces as an error, so add a fallback |
+| WARNING `LLM tier …: worst case … > REQUEST_TIMEOUT_S` | Timeout × attempts + retry backoff exceed the request budget | Use the §4 time-budget table values |
 | 404 model not found | Wrong `path` / model not enabled | Fix the path; with fallback the request still works but the trace shows ERROR — must fix |
 | Frequent 429 | Account limit 10 RPM shared by all models, or Protect & Govern limits | A fallback model does NOT help (same account limit); request a whitelist, turn off adaptive routing/reflection, lower `MAX_TOOL_ROUNDS`, lower eval `--concurrency` |
 | No usage/cost on Langfuse | Missing model price / provider doesn't return usage when streaming | Declare model price; `LLM_STREAM_USAGE=false` |

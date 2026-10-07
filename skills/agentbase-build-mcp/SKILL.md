@@ -16,7 +16,8 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
   ├─ /tavily   ← MCP Connector "tavily"  (outbound API Key 2LO, providerName in Identity)
   ├─ /stock    ← MCP Connector "stock"
   └─ /github   ← MCP Connector "github"  (outbound OAuth 3LO)
-        │  Policy Group bound to the gateway: tools/call → ALLOW | DENY (403 "Request denied by policy")
+        │  Policy Group bound to the gateway: tools/call → ALLOW | DENY / no match ⇒ HTTP 403
+        │  ("No policy allows this request"; also seen as MCP error "Request denied by policy")
         ▼
    MCP Server → Provider (Tavily, GitHub, …)
 ```
@@ -48,8 +49,10 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
    |---|---|---|
    | OAuth 2LO / 3LO | Secret Provider (Managed / Custom) in Access Control | 3LO needs a Return URL + user consent |
    | API Key 2LO / 3LO | Secret Provider (the user enters the key in the Console/Identity — never in chat) | |
-   | Inbound forward | The agent's own inbound credential | Gateway inbound ≠ NONE |
+   | Inbound forward | The agent's own inbound credential | Gateway inbound ≠ NONE. ⚠ See below |
    | No authorization | — | |
+
+   **Inbound forward** sends the MCP server the **same credential the agent used on the gateway** ([connect-a-connector](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors/connect-a-connector)). With gateway inbound **IAM** that is the agent's platform IAM token (runtime service account; locally your developer service account with `AgentBaseFullAccess`) — the server could call AgentBase APIs as your agent ⇒ **never use Inbound forward with IAM inbound**. With inbound **JWT** it forwards the end user's JWT ⇒ only towards **your own** MCP server that validates the same IdP (`/agentbase-build-mcp-server`), never a third-party server.
 
    List connectors + `connectUrl` via API (read): `GET https://agentbase.api.vngcloud.vn/gateway/api/v1/mcp-connectors?page=1&pageSize=50` (IAM token via `get_token.sh`). Item: `name`, `template.id` (`custom`, …), `connectUrl`, `outboundAuth{type, flow, provider}`, `gateway{name, endpoint, inboundAuth, state}`.
 4. **Policy Group** — `/agentbase-policy` (REQUIRED, otherwise the agent gets 403 for every tool):
@@ -63,7 +66,7 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
       "resources": ["gateway:sample-mcp-gw"]}
      ```
    - Evaluation order ([policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups)): policies are evaluated **top-to-bottom by `order`, the first match decides** ALLOW/DENY, no match ⇒ DENY, inactive policies are skipped. Put specific DENY rules before broad ALLOW rules. (Older notes saying "deny wins within a group" are wrong.)
-   - Limits: ≤ **20 policies per group**; group name 5–50 chars `[A-Za-z0-9_]` starting with a letter; 1 gateway ↔ at most 1 group (attaching another replaces it); changes apply within ~30s. Principal wildcards: `jwt:*` / `iam:*` only — `jwt:abc*` is a literal.
+   - Limits: ≤ **20 policies per group**; group name 5–50 chars `[A-Za-z0-9_]` starting with a letter; 1 gateway ↔ at most 1 group (attaching another replaces it); changes apply within ~30s. Match-all principals ([policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups) *Principal and Wildcard Rules*): bare **`iam`** = all IAM identities, bare **`jwt`** (or `jwt:*`) = all JWT users; Console principal *All* = everyone. `iam:*` is not in the official table (`/agentbase-policy` uses it) — prefer bare `iam`. `jwt:abc*` is **not** a prefix match, it is a literal id.
 5. **Declare in the agent** — `mcp_servers.json`, **one entry per connector**, URL = `connectUrl`:
 
 ```json
@@ -79,13 +82,13 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 | Field | Meaning |
 |---|---|
 | `url` | The connector's `connectUrl` (`${MCP_GATEWAY_URL}` = gateway endpoint, set in `.env.<env>`) |
-| `auth` | **Required, no default** (an entry without it is skipped with an error log). `iam` (agent IAM token, auto-refresh — `IAMBearerAuth`; only for the AgentBase MCP Gateway, other hosts log a warning) · `user_jwt` (forwards end-user JWT, per request) · `none` |
+| `auth` | **Required, no default** (an entry without it is skipped with an error log). `iam` (agent IAM token, auto-refresh — `IAMBearerAuth`) · `user_jwt` (forwards the end user's JWT, per request) · `none`. `iam` and `user_jwt` are meant for the AgentBase MCP Gateway (`*.agentbase-gateway.aiplatform.vngcloud.vn`): any other host logs a WARNING because the credential is sent there — `user_jwt` direct to a server is only OK for your own MCP server validating the same IdP |
 | `headers` | Static headers, `${ENV}` expanded. A static key for a self-built MCP server: `"auth": "none", "headers": {"Authorization": "Bearer ${MY_KEY}"}` — `Authorization` together with `iam`/`user_jwt` is rejected (it would be overwritten) |
 | `allow_tools` | Whitelist of the MCP server's **original** tool names (e.g. `tavily_search`). Empty = all |
 | `envs`, `enabled` | Load per `APP_ENV`, temporarily disable |
 | `transport` | `streamable_http` (default) or `stdio` (local process: `command`, `args`, `env`; no `auth` needed) |
 
-`${VAR}` is expanded with `os.path.expandvars` over the raw JSON: an **unset** variable stays literally `${VAR}`, and a value containing `"` or `\\` breaks the JSON — keep secrets URL/JSON-safe. `user_jwt` servers need the caller's JWT: in `AUTH_MODE=api_key` and for A2A calls there is none ⇒ that server is skipped (`tools.collect.output.mcp_errors`).
+`${VAR}` (braces only; `$VAR` stays literal) is expanded **after** parsing the JSON, inside string values only — any value is safe (quotes/backslashes can't break the file or inject keys) and substituted values are not re-expanded. An **unset or empty** variable makes that server a config error: it is skipped with an ERROR log naming the variable (never sent as a literal `${VAR}`/empty key); entries filtered out by `envs`/`enabled: false` are not expanded. `user_jwt` servers need the caller's JWT: in `AUTH_MODE=api_key` (incl. A2A callers using an API key) there is none ⇒ that server is skipped (`tools.collect.output.mcp_errors`); A2A calls authenticated with a user JWT keep it (the verified principal is passed through `/a2a`).
 
 6. **Naming & HITL** — tool name in the agent = `<server>_<tool>` (e.g. `tavily_tavily_search`); policy action = `<connector>__<tool>` (e.g. `tavily__tavily_search`). Side-effect tools (GitHub create issue, Slack post, M365 send mail…) ⇒ add to `HITL_TOOLS` using the agent-side name (`github_create_issue`).
 7. **Verify** — `make dev`, trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
@@ -106,9 +109,10 @@ Console *AgentBase → MCP Connectors* ([browse-connector-catalog](https://docs.
 
 ## Runtime behavior (asset `app/tools/mcp.py`)
 
-- **Policy-deny guard**: the gateway returns MCP error `Request denied by policy.`; the adapter raises `ToolException` → LangChain turns it into text ⇒ the LLM assumes a transient error and **retries many times** (observed: 3 times). `_guard_policy()` converts it to `POLICY_DENIED: …` (telling the LLM not to retry) + trace event `mcp.policy_denied` (WARNING). With the guard: 1 call. Additionally, once a connector has been denied, **every other tool of that connector is short-circuited for the current turn** without sending a request to the gateway (`reset_policy_denials()` per request; the event has `short_circuit=true`). Reason: a reasoning model was observed trying 8 denied tools in turn, taking 84s.
+- **Policy-deny guard**: a deny reaches the agent either as **HTTP 403** on `tools/call` (the documented gateway behavior, `No policy allows this request` — the adapter raises `ExceptionGroup[httpx.HTTPStatusError]` and the body never reaches the exception) or as MCP error `Request denied by policy.` (`ToolException`, which LangChain turns into text) ⇒ either way the LLM assumes a transient error and **retries many times** (observed: 3 times). `_guard_policy()` walks nested exception groups and treats a 403 status or a deny marker in the error text as a deny ⇒ `POLICY_DENIED: …` (telling the LLM not to retry) + trace event `mcp.policy_denied` (WARNING). With the guard: 1 call. Successful results are never scanned for deny text (prompt-injection safe). Any 403 on `tools/call` counts — a self-hosted server answering 403 is treated the same way. Additionally, once a connector has been denied, **every other tool of that connector is short-circuited for the current turn** without sending a request to the gateway (`reset_policy_denials()` per request; the event has `short_circuit=true`). Reason: a reasoning model was observed trying 8 denied tools in turn, taking 84s.
 - Tool lists of `iam`/`none` servers are cached for 5 minutes; `user_jwt` is fetched per request.
-- Connector error/timeout ⇒ that connector is skipped, span `mcp.list_tools` WARNING, `tools.collect.output.mcp_errors`.
+- Connector error/timeout ⇒ that connector is skipped, span `mcp.list_tools` WARNING, `tools.collect.output.mcp_errors`. The error shown is the real (innermost) one, e.g. `HTTPStatusError: Client error '401 Unauthorized' for url …`, not `unhandled errors in a TaskGroup`. Shared (`iam`/`none`) servers that fail with a non-auth error are skipped for `MCP_FAILURE_TTL_S`; `user_jwt` servers and 401/403 are never negatively cached (one user's failure must not hide the server from others).
+- Secrets in traces: span `mcp.list_tools` records the URL as `scheme://host/path` (no query string or userinfo — e.g. `?tavilyApiKey=…` is dropped) and query-string values in error messages/logs are masked to `***`. Headers are never traced.
 - `IAMBearerAuth`: client_credentials to `https://iam.api.vngcloud.vn/accounts-api/v2/auth/token`, cached per `expires_in`, logs principal `iam:<sub>`.
 
 ## Troubleshooting (seen in practice)
@@ -116,7 +120,8 @@ Console *AgentBase → MCP Connectors* ([browse-connector-catalog](https://docs.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `401` at `iam.api.vngcloud.vn/.../auth/token` | Mismatched ID/secret pair: the shell has `GREENNODE_CLIENT_ID` of another account while the secret comes from `.greennode.json` (SDK falls back per field) | `env \| grep GREENNODE_`; locally use only `.greennode.json`; `normalize_iam_env()` drops stray variables |
-| `Request denied by policy` / 403 `No policy allows this request` | Gateway has no Policy Group bound, or principal/action mismatch | Bind a PG; principal = `iam:<sub>` (see agent log), exact action `<connector>__<tool>` |
+| `Request denied by policy` / 403 `No policy allows this request` / trace `mcp.policy_denied` | Gateway has no Policy Group bound, or principal/action mismatch | Bind a PG; principal = `iam:<sub>` (see agent log), exact action `<connector>__<tool>` |
+| `MCP server 'x' skipped — environment variable(s) … unset or empty` | `${VAR}` in `mcp_servers.json` not set in the env (e.g. `MCP_GATEWAY_URL=` left empty) | Set it in `.env` / `.env.<env>` / runtime env |
 | Error when pointing at the gateway root | Gateway routes by connector path | Use each connector's `connectUrl` |
 | `MCP server 'x' unavailable` | IAM 401, wrong URL, connector not ACTIVE | Check span `mcp.list_tools` (status_message), `GET /mcp-connectors` |
 | Tool shows in the UI but the agent doesn't see it | Filtered out by `allow_tools`, or 5-minute cache | Check the original name; restart / wait for TTL; *Sync tools* on the connector |

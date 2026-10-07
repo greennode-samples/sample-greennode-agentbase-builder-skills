@@ -1,8 +1,9 @@
 # MCP server for AgentBase Runtime: 0.0.0.0:8080, GET /health, POST /mcp. Build linux/amd64.
+# Fails closed: MCP_APP_ENV=prod refuses MCP_AUTH_MODE=none ⇒ the runtime env must set api_key or jwt.
 FROM python:3.13-slim
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" MCP_APP_ENV=prod
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project

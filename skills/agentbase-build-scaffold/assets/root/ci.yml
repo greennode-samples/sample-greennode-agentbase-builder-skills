@@ -1,10 +1,16 @@
 # __PROJECT_NAME__ — CI: lint + test on every push/PR, eval gate, manual deploy to AgentBase.
-# Deploy setup (once per GitHub Environment dev/staging/prod — Settings → Environments, add required reviewers for prod):
+#
+# Repository-level (Settings → Secrets and variables → Actions), used by `eval`:
+#   secrets: EVAL_LLM_API_KEY (dedicated key — eval traffic gets its own rate limit), LANGFUSE_PUBLIC_KEY,
+#            LANGFUSE_SECRET_KEY (optional)
+#   vars:    EVAL_LLM_MODEL (or LLM_MODEL), LANGFUSE_BASE_URL (optional), EVAL_MIN_PASS_RATE (default 0.8)
+# Per GitHub Environment dev / staging / prod (Settings → Environments; add required reviewers on prod), used by
+# `deploy` — environment-scoped values are only visible to jobs that declare `environment:`:
 #   secrets: GRN_ACCESS_KEY_ID, GRN_SECRET_ACCESS_KEY (dedicated CI service account), VCR_USERNAME, VCR_PASSWORD
-#            (vCR robot account), LLM_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, EVAL_LLM_API_KEY (repo-level)
+#            (vCR robot account), LLM_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 #   vars:    AGENT_NAME, VCR_REGISTRY, VCR_REPO, RUNTIME_FLAVOR, LLM_MODEL, MEMORY_ID, MEMORY_STRATEGY_ID,
 #            AUTH_JWKS_URL, AUTH_ISSUER, AUTH_AUDIENCE, LANGFUSE_BASE_URL, AGENT_ENDPOINT, GRN_DEFAULT_REGION
-# See /agentbase-build-deploy and references/iam-permissions.md.
+# See /agentbase-build-deploy (CI/CD) and /agentbase-build references/iam-permissions.md.
 name: ci
 
 on:
@@ -14,16 +20,23 @@ on:
   workflow_dispatch:
     inputs:
       deploy_env:
-        description: "Deploy after tests to this GitHub Environment (dev | staging | prod); empty = no deploy"
-        required: false
-        default: ""
+        description: "Deploy after tests to this GitHub Environment (none = tests only)"
+        type: choice
+        options: [none, dev, staging, prod]
+        default: none
 
 permissions:
   contents: read
 
+# Superseded push/PR runs are cancelled. Manual runs get their own group (run_id) so a deploy is never cancelled by a
+# push or by another dispatch; deploys to one environment are serialized by the job-level `deploy-<env>` group.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'latest' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+defaults:
+  run:
+    shell: bash # GitHub then runs `bash -eo pipefail`: a failing command inside a pipe fails the step
 
 jobs:
   test:
@@ -42,6 +55,8 @@ jobs:
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      gate: ${{ steps.gate.outputs.gate }}
     defaults:
       run:
         working-directory: src/backend
@@ -49,8 +64,8 @@ jobs:
       APP_ENV: local
       AUTH_MODE: none
       MEMORY_BACKEND: inmemory
-      LLM_API_KEY: ${{ secrets.EVAL_LLM_API_KEY }} # a dedicated key: eval traffic gets its own rate limit
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_API_KEY: ${{ secrets.EVAL_LLM_API_KEY }}
+      LLM_MODEL: ${{ vars.EVAL_LLM_MODEL || vars.LLM_MODEL }}
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
@@ -58,25 +73,41 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
-      - name: Eval gate (skipped until EVAL_LLM_API_KEY is configured)
-        if: env.LLM_API_KEY != ''
+      - name: Eval gate
+        id: gate
         # --concurrency 1: MaaS allows 10 requests/min per account
-        run: >-
-          uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl
-          --min-pass-rate ${{ vars.EVAL_MIN_PASS_RATE || '0.8' }} --concurrency 1
-      - if: env.LLM_API_KEY == ''
-        run: echo "::notice::EVAL_LLM_API_KEY is not set — eval gate skipped"
+        run: |
+          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_MODEL" ]; then
+            echo "::notice::EVAL_LLM_API_KEY / EVAL_LLM_MODEL not set — eval gate skipped (deploy allowed to dev only)"
+            echo "gate=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl \
+            --min-pass-rate "${{ vars.EVAL_MIN_PASS_RATE || '0.8' }}" --concurrency 1
+          echo "gate=passed" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: [test, eval]
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy_env != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_env != 'none'
     runs-on: ubuntu-latest
     environment: ${{ inputs.deploy_env }}
+    concurrency:
+      group: deploy-${{ inputs.deploy_env }}
+      cancel-in-progress: false
     env:
       GRN_VERSION: v1.13.0 # pinned; release assets carry the version suffix (latest/download/grn-linux-amd64 is 404)
+      AGENT_NAME: ${{ vars.AGENT_NAME }}
       IMAGE: ${{ vars.VCR_REGISTRY }}/${{ vars.VCR_REPO }}/${{ vars.AGENT_NAME }}:${{ github.sha }}
+      GRN_DEFAULT_REGION: ${{ vars.GRN_DEFAULT_REGION || 'HCM-3' }}
     steps:
+      - name: Require the eval gate outside dev
+        if: needs.eval.outputs.gate != 'passed' && inputs.deploy_env != 'dev'
+        run: |
+          echo "::error::The eval gate did not run (EVAL_LLM_API_KEY / EVAL_LLM_MODEL missing) — refusing to deploy to ${{ inputs.deploy_env }}"
+          exit 1
+
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
 
       - name: Install grn (pinned version + SHA256 check)
         run: |
@@ -95,9 +126,8 @@ jobs:
           docker build --platform linux/amd64 -t "$IMAGE" src/backend
           docker push "$IMAGE"
 
-      - name: Render the manifest (secrets stay in the CI secret store, the file is never committed)
+      - name: Render the manifest and runtime spec (secrets stay in the CI secret store; files never committed)
         env:
-          AGENT_NAME: ${{ vars.AGENT_NAME }}
           APP_ENV: ${{ inputs.deploy_env }}
           RUNTIME_FLAVOR: ${{ vars.RUNTIME_FLAVOR }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -110,22 +140,39 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
-        run: envsubst < deploy/agent.yaml.tpl > "$RUNNER_TEMP/agent.yaml"
+          VCR_USERNAME: ${{ secrets.VCR_USERNAME }}
+          VCR_PASSWORD: ${{ secrets.VCR_PASSWORD }}
+        run: |
+          envsubst < deploy/agent.yaml.tpl > "$RUNNER_TEMP/agent.yaml"
+          uv run --no-project --with 'pyyaml==6.0.2' python deploy/render_runtime_spec.py \
+            "$RUNNER_TEMP/agent.yaml" "$RUNNER_TEMP/runtime.yaml"
 
-      - name: Deploy (idempotent; waits for ACTIVE)
-        env:
+      # `deploy up` only CREATES a runtime — an existing one is "converged, not re-applied", so a new image/env would
+      # silently not ship. Existing runtime ⇒ full-spec `runtime update` (new version, DEFAULT endpoint rolls forward).
+      # Never add `-o json` to commands that print specs: it prints secrets in clear text into the CI log.
+      - name: Deploy (create on first run, update afterwards)
+        env: # the privileged CI service account is visible to this step only
           GRN_ACCESS_KEY_ID: ${{ secrets.GRN_ACCESS_KEY_ID }}
           GRN_SECRET_ACCESS_KEY: ${{ secrets.GRN_SECRET_ACCESS_KEY }}
-          GRN_DEFAULT_REGION: ${{ vars.GRN_DEFAULT_REGION || 'HCM-3' }}
-        # Never add `-o json` here: it prints secrets in clear text into the CI log
         run: |
-          grn agentbase deploy up --file "$RUNNER_TEMP/agent.yaml"
-          grn agentbase deploy status "${{ vars.AGENT_NAME }}"
+          # A failing `runtime list` must FAIL the step — never fall through to `deploy up`, which would succeed
+          # without re-applying an existing runtime (old image shipped "green")
+          LIST_JSON=$(grn agentbase runtime list --size 100 -o json)
+          RUNTIME_ID=$(jq -er --arg n "$AGENT_NAME" '[.listData[] | select(.name == $n) | .id][0] // ""' <<< "$LIST_JSON")
+          if [ -z "$RUNTIME_ID" ]; then
+            echo "No runtime named $AGENT_NAME yet — creating identity + runtime"
+            grn agentbase deploy up --file "$RUNNER_TEMP/agent.yaml"
+          else
+            echo "Updating runtime $RUNTIME_ID to $IMAGE"
+            grn agentbase runtime update "$RUNTIME_ID" --file "$RUNNER_TEMP/runtime.yaml"
+            grn agentbase runtime wait "$RUNTIME_ID" --timeout 15m
+          fi
+          grn agentbase deploy status "$AGENT_NAME"
 
       - name: Smoke test
         if: vars.AGENT_ENDPOINT != ''
         run: curl -fsS --retry 5 --retry-delay 10 "${{ vars.AGENT_ENDPOINT }}/health"
 
-      - name: Remove the rendered manifest
+      - name: Remove the rendered files
         if: always()
-        run: rm -f "$RUNNER_TEMP/agent.yaml"
+        run: rm -f "$RUNNER_TEMP/agent.yaml" "$RUNNER_TEMP/runtime.yaml"

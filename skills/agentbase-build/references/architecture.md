@@ -30,7 +30,7 @@
    5. `build_graph()` (cheap; built per request because tools may differ per user) with a shared checkpointer.
    6. Check whether a HITL interrupt is pending (chat ⇒ 409, resume ⇒ one is required).
    7. `graph.ainvoke` / `graph.astream` with `configurable = {thread_id: session_id, actor_id: user_id}`.
-   8. Read `aget_state` → return `success` (response, tools_used) or `interrupted` (interrupt payload).
+   8. Build the result from the graph OUTPUT (`__interrupt__` in the ainvoke/astream output — `aget_state` may miss it with AgentBase Memory) → `success` (response, tools_used) or `interrupted` (interrupt payload).
 3. Graph:
 
 ```

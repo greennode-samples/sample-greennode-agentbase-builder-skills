@@ -33,7 +33,7 @@ Mobile app ──(Bearer <user JWT>)──▶ BFF (verify JWT, rate-limit)
 
 | IdP | JWKS URL | Notes |
 |---|---|---|
-| Keycloak | `https://<host>/realms/<realm>/protocol/openid-connect/certs` | issuer = `https://<host>/realms/<realm>` (the host the frontend sees, including behind a reverse proxy). Access token defaults to `aud=account` ⇒ add an *Audience* mapper (client scope) pointing to the agent's client, `AUTH_AUDIENCE=<that client>`. Frontend: public client, *Standard flow* + PKCE S256, redirect `<scheme>://auth` (and `http://localhost:8081` for web). `sub` is a UUID ⇒ valid as `user_id` directly |
+| Keycloak | `https://<host>/realms/<realm>/protocol/openid-connect/certs` | issuer = `https://<host>/realms/<realm>` (the host the frontend sees, including behind a reverse proxy). Access token defaults to `aud=account` ⇒ add an *Audience* mapper (client scope) pointing to the agent's client, `AUTH_AUDIENCE=<that client>`. Frontend: public client, *Standard flow* + PKCE S256, redirect `<scheme>://auth` (and `http://localhost:8081` for web). `sub` is a UUID ⇒ valid as `user_id` directly. ID tokens (`typ: ID`) are rejected |
 | Auth0 | `https://<tenant>/.well-known/jwks.json` | use the API's `audience`; frontend passes `audience` |
-| Cognito | `https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json` | access token has no `aud` ⇒ leave `AUTH_AUDIENCE` empty, check `client_id` via claims |
+| Cognito | `https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json` | access token has no `aud` ⇒ leave `AUTH_AUDIENCE` empty, set `AUTH_ALLOW_NO_AUDIENCE=true` **and** `AUTH_ALLOWED_CLIENT_IDS=["<app client id>"]` (matched against the `client_id` claim; required outside local). ID tokens (`token_use=id`) are rejected |
 | Azure AD / Entra | `https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys` | issuer v2.0 |

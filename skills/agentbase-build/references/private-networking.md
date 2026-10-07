@@ -52,3 +52,4 @@ Agent (Runtime, Public or Private) → MCP Gateway (Private, Route CIDRs include
 2. From inside the VPC: the target answers (`curl https://<internal-host>/health`).
 3. Gateway: `tools/list` through the connector returns the tools; `tools/call` is allowed by the Policy Group.
 4. Timeouts only for private targets ⇒ missing **Route CIDRs** or a missing route/ACL on the VPC/DC side.
+5. Name resolution fails for internal hosts ⇒ DNS resolution must be enabled in the VPC (MCP Gateway docs); prefer IPs or VPC DNS names that resolve inside the VPC.

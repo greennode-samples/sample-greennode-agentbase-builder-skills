@@ -42,8 +42,9 @@ Each skill **owns** its piece of code in `assets/backend/` (at the exact target 
 ```
 <project>/
 ├── Makefile  README.md  .agentbase-state.json
-├── .github/workflows/ci.yml   # lint + test, eval gate, manual deploy (grn agentbase deploy up)
+├── .github/workflows/ci.yml   # lint + test, eval gate, manual deploy (grn: deploy up first, runtime update after)
 ├── deploy/agent.yaml.tpl      # AgentBase manifest, rendered in CI from secrets
+├── deploy/render_runtime_spec.py  # derives the `grn agentbase runtime update` spec from the rendered manifest
 └── src/
     ├── backend/   # uv · LangGraph · greennode-agentbase · Langfuse v4 · MCP · JWT · HITL · evals
     └── frontend/  # (optional) Expo React Native
@@ -51,7 +52,8 @@ Each skill **owns** its piece of code in `assets/backend/` (at the exact target 
 
 ```bash
 bash skills/agentbase-build-scaffold/scripts/scaffold.sh my-agent ./my-agent --with-frontend
-cd my-agent && make test && make dev && make invoke MSG="hello"
+cd my-agent && make test          # then fill src/backend/.env + .greennode.json, `make check-creds`, `make dev`,
+                                  # and in another terminal: make invoke MSG="hello"
 ```
 
 ## Official GreenNode docs
@@ -157,13 +159,14 @@ Agents load a skill automatically when your request matches its description. You
 
 ## Verified
 
-- **Offline**: a freshly scaffolded project passes 164 tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets, outbound credentials via a fake Identity API incl. non-blocking 3LO and per-user isolation, eval gate, compression invariants, tracing masks); MCP server template passes 21 e2e tests (auth, per-user isolation, tools, local quickstart); Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
+- **Offline**: a freshly scaffolded project passes 292 tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets, outbound credentials via a fake Identity API incl. non-blocking 3LO and per-user isolation, eval gate, compression invariants, tracing masks); MCP server template passes 33 e2e tests (fail-closed auth incl. JWT audience and JWKS rotation, per-user isolation, atomic idempotency, tools, local quickstart); Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
 - **Real GreenNode** (runtime `test-agent`, v1→v6): api_key auth (401), short/long-term memory on AgentBase Memory, per-user isolation (memory, HITL, feedback, A2A tasks), HITL on real memory, MCP Connector via Gateway + Policy (ALLOW/DENY), A2A Agent Card + task isolation, real model tiers + fallback on MaaS (10 models), prompt cache.
 - **Self-hosted [Langfuse](https://github.com/langfuse/langfuse) v4.49**: full trace tree, cost/cache/reasoning/TTFT, prompt versions, scores, dataset + experiment. Traces were used to find and fix a 55s → 11s slowdown (parallel MCP + negative cache, skipping reflection for simple questions, Memory timeouts).
 - Per-feature details, platform bugs encountered and open items: `skills/agentbase-build/references/platform-coverage.md`.
 
 ## To verify on a real environment
 
-- How the AgentBase Runtime endpoint authenticates callers (affects the Direct vs BFF choice, see `agentbase-build-auth`).
-- HITL interrupt/resume with real `AgentBaseMemoryEvents` (has run with `InMemorySaver`).
-- Traces to a real Langfuse server (structure verified via the OTel exporter).
+- Runtime Inbound Auth (IAM / JWT) and IP Access Control end-to-end with this template (documented, not yet exercised; affects Direct vs BFF, see `agentbase-build-auth`).
+- OAuth2 3LO consent round-trip and delegated keys through `app/identity.py` (tested against the SDK with a fake Identity API).
+- `grn agentbase deploy up` / `runtime update` and the CI workflow on GitHub (validated with actionlint and YAML rendering only).
+- Long-term memory auto-extraction from this template's events (see `agentbase-build-memory`).

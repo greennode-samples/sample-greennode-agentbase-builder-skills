@@ -11,6 +11,10 @@ compare across runs, block regressions in CI.
   uv run python -m evals.run_eval --dataset __PROJECT_NAME__-regressions
 
 HITL in eval: --hitl approve (default) | reject — answers interrupts automatically to run the full flow.
+
+Exit codes: 0 gate passed · 1 pass_rate < --min-pass-rate (the ONLY quality verdict) ·
+            2 the eval could not run (bad args/settings, missing or invalid JSONL, unknown dataset,
+              Langfuse unreachable / wrong keys, unexpected crash) — fix the setup, not the agent.
 """
 
 from __future__ import annotations
@@ -20,11 +24,13 @@ import asyncio
 import json
 import os
 import sys
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from langfuse.api import NotFoundError
 
 load_dotenv()
 
@@ -41,12 +47,41 @@ from evals.evaluators import (  # noqa: E402
 EXIT_GATE_FAILED, EXIT_CONFIG_ERROR = 1, 2
 
 
+class ConfigError(Exception):
+    """The eval could not run (setup problem) ⇒ exit 2, never confused with a failed quality gate (1)."""
+
+
 def load_jsonl(path: str) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in Path(path).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        raise ConfigError(f"cannot read dataset file {path}: {e.strerror or e}") from e
+    items = []
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            raise ConfigError(f"{path}:{n}: invalid JSON ({e.msg})") from e
+    return items
+
+
+def _langfuse_url() -> str:
+    return os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST") or "Langfuse"
+
+
+def _langfuse(what: str, fn, *args: Any, not_found: str | None = None, **kwargs: Any) -> Any:
+    """Langfuse API call; failures are setup/infra problems (exit 2), not quality regressions."""
+    try:
+        return fn(*args, **kwargs)
+    except NotFoundError as e:
+        raise ConfigError(not_found or f"Langfuse {what}: not found") from e
+    except Exception as e:  # noqa: BLE001 — network error, 401 wrong keys, 5xx…
+        raise ConfigError(
+            f"Langfuse {what} failed at {_langfuse_url()} ({type(e).__name__}: {e}) — check "
+            "LANGFUSE_BASE_URL/keys, or unset LANGFUSE_PUBLIC_KEY/SECRET_KEY to run locally"
+        ) from e
 
 
 def _field(item: Any, name: str) -> Any:
@@ -102,7 +137,7 @@ async def run_local(items: list[dict], task) -> dict[str, float]:
     return {"pass_rate": passed / (len(items) or 1)}
 
 
-def main() -> int:
+def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", help="Local JSONL")
     ap.add_argument("--dataset", help="Langfuse Dataset name")
@@ -111,14 +146,49 @@ def main() -> int:
     ap.add_argument("--hitl", choices=["approve", "reject"], default="approve")
     ap.add_argument("--min-pass-rate", type=float, default=0.0)
     ap.add_argument("--concurrency", type=int, default=4)
-    args = ap.parse_args()
+    return ap.parse_args()
 
+
+def main() -> int:
+    args = _parse_args()
+    try:
+        return _run(args)
+    except ConfigError as e:
+        print(f"Config error: {e}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — a crash of the runner itself is not a quality verdict
+        traceback.print_exc()
+        print(f"Eval could not run: {type(e).__name__}: {e}", file=sys.stderr)
+    return EXIT_CONFIG_ERROR
+
+
+def _push(client: Any, data: str, dataset: str) -> None:
+    """Upsert the JSONL into `dataset`. Langfuse item ids are GLOBAL (unique across datasets) ⇒ the id is
+    namespaced `<dataset>:<id>`, so the same JSONL can be pushed to several datasets without collisions."""
+    items = load_jsonl(data)
+    _langfuse(f"create dataset '{dataset}'", client.create_dataset, name=dataset)
+    for it in items:
+        item_id = it.get("id")
+        _langfuse(
+            f"upsert item '{item_id}' into dataset '{dataset}'",
+            client.create_dataset_item,
+            dataset_name=dataset,
+            id=f"{dataset}:{item_id}" if item_id else None,
+            input=it["input"],
+            expected_output=it.get("expected_output"),
+            metadata=it.get("metadata"),
+        )
+
+
+def _run(args: argparse.Namespace) -> int:
     try:
         settings = get_settings()
     except ValueError as e:  # e.g. LLM_API_KEY missing — not a quality regression
         errors = getattr(e, "errors", None)
-        print(f"Config error: {errors()[0]['msg'] if callable(errors) else e}", file=sys.stderr)
-        return EXIT_CONFIG_ERROR
+        raise ConfigError(errors()[0]["msg"] if callable(errors) else str(e)) from e
+    if not (args.data or args.dataset):
+        raise ConfigError("--data <jsonl> or --dataset <Langfuse dataset> is required")
+    if args.push and not (args.data and args.dataset):
+        raise ConfigError("--push requires --data and --dataset")
     tracing.init_tracing(settings)
     client = tracing.get_client()
     task = make_task(args.hitl)
@@ -126,40 +196,39 @@ def main() -> int:
 
     if client is None:
         if not args.data:
-            print("No Langfuse key => --data JSONL is required", file=sys.stderr)
-            return EXIT_CONFIG_ERROR
+            raise ConfigError("No Langfuse key => --data JSONL is required")
         metrics = asyncio.run(run_local(load_jsonl(args.data), task))
     else:
-        if args.push:
-            if not (args.data and args.dataset):
-                print("--push requires --data and --dataset", file=sys.stderr)
-                return EXIT_CONFIG_ERROR
-            client.create_dataset(name=args.dataset)
-            for it in load_jsonl(args.data):
-                client.create_dataset_item(
-                    dataset_name=args.dataset,
-                    id=it.get("id"),
-                    input=it["input"],
-                    expected_output=it.get("expected_output"),
-                    metadata=it.get("metadata"),
+        try:
+            # Fail fast (before any paid LLM call) when Langfuse is down or the keys are wrong
+            _langfuse("auth check", client.auth_check)
+            if args.push:
+                _push(client, args.data, args.dataset)
+            common = dict(
+                name=f"{settings.agent_name}-eval",
+                run_name=run_name,
+                task=task,
+                evaluators=ITEM_EVALUATORS,
+                run_evaluators=RUN_EVALUATORS,
+                max_concurrency=args.concurrency,
+                metadata={"model": settings.llm_model, "version": settings.agent_version},
+            )
+            if args.dataset:
+                dataset = _langfuse(
+                    f"get dataset '{args.dataset}'",
+                    client.get_dataset,
+                    args.dataset,
+                    not_found=f"Langfuse dataset '{args.dataset}' not found — create it with "
+                    f"--push --data <jsonl> --dataset {args.dataset}",
                 )
-        common = dict(
-            name=f"{settings.agent_name}-eval",
-            run_name=run_name,
-            task=task,
-            evaluators=ITEM_EVALUATORS,
-            run_evaluators=RUN_EVALUATORS,
-            max_concurrency=args.concurrency,
-            metadata={"model": settings.llm_model, "version": settings.agent_version},
-        )
-        if args.dataset:
-            dataset = client.get_dataset(args.dataset)
-            expected = len(dataset.items)
-            result = dataset.run_experiment(**common)
-        else:
-            data = load_jsonl(args.data)
-            expected = len(data)
-            result = client.run_experiment(data=data, **common)
+                expected = len(dataset.items)
+                result = dataset.run_experiment(**common)
+            else:
+                data = load_jsonl(args.data)
+                expected = len(data)
+                result = client.run_experiment(data=data, **common)
+        finally:
+            tracing.shutdown_tracing()
         print(result.format())
         metrics = {e.name: float(e.value) for e in result.run_evaluations}
         # Gate over the WHOLE dataset: an item without a result (dropped by Langfuse) counts as failed
@@ -169,7 +238,6 @@ def main() -> int:
                 f"WARNING: {expected - done}/{expected} items produced no result", file=sys.stderr
             )
         metrics["pass_rate"] = count_passed(result.item_results) / (expected or 1)
-        tracing.shutdown_tracing()
 
     rate = metrics.get("pass_rate", 0.0)
     print(f"pass_rate={rate:.2%} (min {args.min_pass_rate:.0%})")

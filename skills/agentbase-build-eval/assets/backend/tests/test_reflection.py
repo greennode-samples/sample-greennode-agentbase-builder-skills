@@ -123,7 +123,7 @@ def test_gate_fails_when_langfuse_drops_crashed_items(monkeypatch):
         format=lambda: "",
     )
     dataset = SimpleNamespace(items=[object()] * 4, run_experiment=lambda **kw: result)
-    client = SimpleNamespace(get_dataset=lambda name: dataset)
+    client = SimpleNamespace(auth_check=lambda: True, get_dataset=lambda name: dataset)
     monkeypatch.setattr(run_eval.tracing, "init_tracing", lambda s: None)
     monkeypatch.setattr(run_eval.tracing, "get_client", lambda: client)
     monkeypatch.setattr(run_eval.tracing, "shutdown_tracing", lambda: None)

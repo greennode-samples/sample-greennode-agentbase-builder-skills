@@ -11,7 +11,7 @@
 | Prompt injection via tool / web / document content | See below |
 | Secret leakage | Secrets only in Identity / the runtime env file; never in the image; `_mask` in Langfuse; tokens never logged |
 | Races within a session (double-submitted approve, 2 tabs) | Lock per (user, session) + `interrupt_id` ⇒ 409 |
-| Hangs / cascading overload (Memory, MaaS, MCP) | `REQUEST_TIMEOUT_S`, Memory timeout + retry, `MEMORY_MAX_CONCURRENCY` semaphore, `MCP_LIST_TIMEOUT_S`, negative cache for failing MCP (`MCP_FAILURE_TTL_S`, not applied to auth/per-user errors) |
+| Hangs / cascading overload (Memory, MaaS, MCP) | `REQUEST_TIMEOUT_S`, Memory timeout + retry, `MEMORY_MAX_CONCURRENCY` FIFO limiter (fair between sync and async callers), `MCP_LIST_TIMEOUT_S`, negative cache for failing MCP (`MCP_FAILURE_TTL_S`, not applied to auth/per-user errors) |
 | Runaway cost (loops, huge questions) | `MAX_MESSAGE_CHARS`, `MAX_TOOL_ROUNDS`, hard trim, MaaS rate limit, fallback with bounded retries |
 
 ## Prompt injection (mandatory for agents with tools that read external content)
@@ -27,4 +27,4 @@
 
 - Enable long-term memory only when there is a data policy (decision-guide §1).
 - Right to erasure ("forget me"): delete memory records by the user's namespace and events by actor (`/agentbase-memory`: records delete / events delete). If the product promises this right, provide a tool or admin endpoint.
-- PII is masked by default before being sent to Langfuse (`TRACE_MASK_PII`: email, VN phone numbers, CCCD/CMND); add business patterns (account numbers, customer IDs) to `tracing._PII_RES`.
+- PII is masked by default before being sent to Langfuse (`TRACE_MASK_PII`: email, VN phone numbers, CCCD/CMND); add business patterns (account numbers, customer IDs) in `tracing._mask_text` (see `agentbase-build-tracing` references/trace-schema.md → Masking).

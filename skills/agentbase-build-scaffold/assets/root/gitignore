@@ -13,3 +13,4 @@
 src/frontend/.expo/
 # Rendered AgentBase manifest (contains secrets) — only deploy/agent.yaml.tpl is committed
 deploy/agent.yaml
+deploy/runtime.yaml

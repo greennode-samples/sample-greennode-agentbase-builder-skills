@@ -33,6 +33,17 @@ from app.config import Settings
 from app.observability import tracing
 
 VALID_ACTIONS = {"approve", "edit", "reject"}
+REJECTED_PREFIX = "Not executed:"
+
+
+def is_rejected_tool_message(m: Any) -> bool:
+    """ToolMessage written for a call the user rejected (the tool never ran)."""
+    return (
+        isinstance(m, ToolMessage)
+        and m.status == "error"
+        and isinstance(m.content, str)
+        and m.content.startswith(REJECTED_PREFIX)
+    )
 
 
 def requires_approval(tool_name: str, settings: Settings) -> bool:
@@ -135,7 +146,7 @@ def build_tools_node(tools: list):
             if tc["id"] in rejected:
                 out.append(
                     ToolMessage(
-                        content=f"Not executed: {rejected[tc['id']]}. Ask the user again if needed.",
+                        content=f"{REJECTED_PREFIX} {rejected[tc['id']]}. Ask the user again if needed.",
                         tool_call_id=tc["id"],
                         name=tc["name"],
                         status="error",

@@ -16,17 +16,18 @@ description: "Authentication standard for AI agents on GreenNode AgentBase: inbo
 ## Inbound — workflow
 
 1. Ask the user for the IdP and its details: issuer, JWKS URL (usually `<issuer>/.well-known/jwks.json` or from discovery), audience, identity claim (default `sub`).
-2. Env (`.env.<env>`): `AUTH_MODE=jwt`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_USER_CLAIM`, `AUTH_TOKEN_HEADER`. Outside `local`, missing `AUTH_ISSUER`/`AUTH_AUDIENCE` ⇒ app refuses to start (IdP without `aud`, like Cognito ⇒ `AUTH_ALLOW_NO_AUDIENCE=true` **plus** `AUTH_ALLOWED_CLIENT_IDS=["<app client id>"]`, required outside local — checked against `azp`/`client_id`; tokens with `token_use` ≠ `access` (ID tokens) are always rejected). `AUTH_FORWARD_CLAIMS` = claims passed to tools via `RunnableConfig` (default empty). `sub` containing characters outside `[A-Za-z0-9._@+=-]` ⇒ `user_id = u-<sha256(iss|sub)>` (stable, no traversal). JWKS is prefetched at startup; IdP unreachable ⇒ 503 (not 401).
+2. Env (`.env.<env>`): `AUTH_MODE=jwt`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_USER_CLAIM`, `AUTH_TOKEN_HEADER`. Outside `local`, missing `AUTH_ISSUER`/`AUTH_AUDIENCE` ⇒ app refuses to start (IdP without `aud`, like Cognito ⇒ `AUTH_ALLOW_NO_AUDIENCE=true` **plus** `AUTH_ALLOWED_CLIENT_IDS=["<app client id>"]`, required outside local — checked against `azp`/`client_id`). ID/refresh tokens are rejected **when the IdP marks them**: `token_use` ≠ `access` (Cognito) or `typ` = `ID`/`Refresh`/`Offline`/`Logout` (Keycloak); IdPs that mark neither (Auth0, Entra…) rely on `AUTH_AUDIENCE` (an ID token's `aud` is the app's client id, not the API) or `AUTH_ALLOWED_CLIENT_IDS`. `AUTH_FORWARD_CLAIMS` = claims passed to tools via `RunnableConfig` (default empty). `sub` containing characters outside `[A-Za-z0-9._@+=-]` — or already shaped like a hashed id `u-<40 hex>` (no collision with another user) — ⇒ `user_id = u-<sha256(iss|sub)>` (stable, no traversal). JWKS is prefetched at startup; IdP unreachable ⇒ 503 (not 401).
 3. Frontend: OIDC Authorization Code + PKCE (public client, no client secret) — `/agentbase-build-frontend`.
-4. Test: `tests/test_auth.py` (valid token, missing token, expired, wrong audience, spoofed user header, client allowlist / ID token without `aud`, `APP_ENV=local` refused on the Runtime).
+4. Test: `tests/test_auth.py` — against a **real local JWKS endpoint** (kid lookup, key type, rotation): valid token (RSA + EC keys), missing token, expired / wrong audience ⇒ 401, spoofed user header ⇒ 403, `alg` not matching the key ⇒ 401, key removed from the JWKS ⇒ rejected once the 1h cache expires, JWKS down ⇒ 503, client allowlist / ID token (`token_use`, Keycloak `typ`), hashed-id collision, `APP_ENV=local` refused on the Runtime.
 
 `authenticate()` behavior:
 - Missing/invalid token ⇒ 401; `X-GreenNode-AgentBase-User-Id` differs from `sub` ⇒ 403.
 - `Principal(user_id, token, claims)`; overrides `GreenNodeAgentBaseContext.set_user_id()` so Identity decorators (USER_FEDERATION) use the correct user.
 - `AUTH_MODE=none` is blocked by `Settings` when `APP_ENV != local`.
-- JWKS cached 1h (`PyJWKClient`), 30s leeway, `exp` and `iat` required.
+- JWK **set** cached 1h (`PyJWKClient`, `cache_keys=False` — its per-kid cache never expires, so a key the IdP removed would stay trusted until restart); a removed key stops working when the set is refetched (≤ 1h), an unknown `kid` triggers a refetch (at most every 30s, PyJWT cooldown). 30s leeway, `exp` and `iat` required.
+- The token's `alg` must be in `AUTH_ALGORITHMS` **and** match its JWKS key (the key's `alg`, else RS256 for RSA / ES* by curve) — mismatch ⇒ 401. An IdP signing RS384/RS512/PS* whose JWKS omits `alg` therefore needs the `alg` published.
 
-Role-based access (RBAC): read `principal.claims` (e.g. `roles`, `groups`) in `service`/tools to reject early; per-tool permissions at the Gateway layer use a Policy Group (`/agentbase-policy`, principal `jwt:<sub>` or `principal.<claim>`).
+Role-based access (RBAC): put `roles`/`groups` in `AUTH_FORWARD_CLAIMS` and check them **in the tools** (`config["configurable"]["user_claims"]`) or in `service._Run._prepare` — the path shared by `/invocations`, `/a2a` (which gets the same verified claims + token) and `run_chat`. A check only in `service.handle` is bypassed by A2A, which never goes through `handle`. Per-tool permissions at the Gateway layer use a Policy Group (`/agentbase-policy`, principal `jwt:<sub>` or `principal.<claim>`).
 
 ## AgentBase Runtime endpoint security
 

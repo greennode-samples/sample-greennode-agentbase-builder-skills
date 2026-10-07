@@ -44,7 +44,8 @@ class NotesStore:
         # Short-lived connection per call ⇒ safe with asyncio.to_thread (sqlite3 objects are per-thread)
         return sqlite3.connect(self._path, timeout=5)
 
-    async def add(self, owner: str, text: str, idempotency_key: str | None = None) -> int:
+    async def add(self, owner: str, text: str, idempotency_key: str | None = None) -> NoteRow:
+        """Insert a note, or return the note already stored under (owner, idempotency_key)."""
         return await asyncio.to_thread(self._add, owner, text, idempotency_key)
 
     async def list(self, owner: str, limit: int, offset: int) -> tuple[list[NoteRow], int]:
@@ -53,20 +54,24 @@ class NotesStore:
     async def delete(self, owner: str, note_id: int) -> bool:
         return await asyncio.to_thread(self._delete, owner, note_id)
 
-    def _add(self, owner: str, text: str, idempotency_key: str | None) -> int:
+    def _add(self, owner: str, text: str, idempotency_key: str | None) -> NoteRow:
+        key = idempotency_key or None  # "" = no key
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        # One transaction, atomic under concurrency: a retry (or a concurrent call) with the same key
+        # hits the UNIQUE index and inserts nothing, then reads back the note stored the first time.
         with closing(self._connect()) as c, c:
-            if idempotency_key:
-                row = c.execute(
-                    "SELECT id FROM notes WHERE owner = ? AND idempotency_key = ?",
-                    (owner, idempotency_key),
-                ).fetchone()
-                if row:  # retry of the same write ⇒ same result, no duplicate
-                    return row[0]
             cur = c.execute(
-                "INSERT INTO notes (owner, text, idempotency_key, created_at) VALUES (?, ?, ?, ?)",
-                (owner, text, idempotency_key, datetime.now(UTC).isoformat(timespec="seconds")),
+                "INSERT INTO notes (owner, text, idempotency_key, created_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (owner, idempotency_key) DO NOTHING",
+                (owner, text, key, now),
             )
-            return int(cur.lastrowid)
+            if key is None:
+                return NoteRow(int(cur.lastrowid), text, now)
+            row = c.execute(
+                "SELECT id, text, created_at FROM notes WHERE owner = ? AND idempotency_key = ?",
+                (owner, key),
+            ).fetchone()
+            return NoteRow(*row)
 
     def _list(self, owner: str, limit: int, offset: int) -> tuple[list[NoteRow], int]:
         with closing(self._connect()) as c:

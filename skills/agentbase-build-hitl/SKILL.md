@@ -62,7 +62,7 @@ Rules enforced in code:
 
 ## Tests
 
-`tests/test_hitl.py`: interrupt → approve; edit args; reject; resume with nothing pending ⇒ 409; chat while pending ⇒ 409. On the runtime with real AgentBase Memory (already run): interrupt → interleaved chat 409 → other user resume 409 → session owner approves ⇒ tool runs, memory stored for the correct user.
+`tests/test_hitl.py`: interrupt → approve; edit args; reject; resume with nothing pending ⇒ 409; chat while pending ⇒ 409; stale / already-used `interrupt_id` ⇒ 409 (in-memory checkpointer, which exposes the interrupt). On the runtime with real AgentBase Memory (already run): interrupt → interleaved chat 409 → other user resume 409 → session owner approves ⇒ tool runs, memory stored for the correct user.
 
 ## Official docs
 

@@ -9,6 +9,7 @@ Add business evaluators here (correct JSON format, policy compliance, right MCP 
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -99,9 +100,11 @@ async def llm_judge_correctness(*, input, output, expected_output=None, **_) -> 
     except json.JSONDecodeError:
         data = {}
     try:
-        score = min(max(float(data.get("score")), 0.0), 1.0)
+        score = float(data.get("score"))
     except (TypeError, ValueError):
         score = 0.0
+    # json.loads accepts NaN/Infinity: NaN survives min/max clamping and would pass every threshold
+    score = min(max(score, 0.0), 1.0) if math.isfinite(score) else 0.0
     return Evaluation(
         name="correctness",
         value=score,
@@ -112,8 +115,13 @@ async def llm_judge_correctness(*, input, output, expected_output=None, **_) -> 
 ITEM_EVALUATORS = [no_error, must_contain, expected_tools, forbidden_tools, llm_judge_correctness]
 
 
+def _score(value: float) -> float:
+    """Non-finite scores count as 0: min([1.0, nan]) == 1.0 would let a NaN score pass the item."""
+    return float(value) if math.isfinite(value) else 0.0
+
+
 def item_passed(evaluations: list[Evaluation]) -> bool:
-    nums = [e.value for e in evaluations if isinstance(e.value, int | float)]
+    nums = [_score(e.value) for e in evaluations if isinstance(e.value, int | float)]
     return bool(nums) and min(nums) >= PASS_THRESHOLD
 
 
@@ -132,9 +140,17 @@ def pass_rate(*, item_results, **_) -> Evaluation:
 
 
 def avg(name: str):
-    def _avg(*, item_results, **_) -> Evaluation:
-        vals = [e.value for r in item_results for e in r.evaluations if e and e.name == name]
-        return Evaluation(name=f"avg_{name}", value=sum(vals) / len(vals) if vals else 0.0)
+    def _avg(*, item_results, **_) -> Evaluation | None:
+        vals = [
+            _score(e.value)
+            for r in item_results
+            for e in r.evaluations
+            if e and e.name == name and isinstance(e.value, int | float)
+        ]
+        # e.g. no item has expected_output ⇒ no judge ran: skip it, don't record a fake 0.000
+        if not vals:
+            return None
+        return Evaluation(name=f"avg_{name}", value=sum(vals) / len(vals))
 
     return _avg
 

@@ -83,6 +83,29 @@ async def test_resume_without_pending_is_409(fake_llm):
     assert e.value.status_code == 409
 
 
+async def test_stale_interrupt_id_is_409(fake_llm):
+    """Double-submit / stale tab: a resume naming an interrupt that is not the pending one is refused."""
+    fake_llm(_call(), AIMessage("Remembered."))
+    out = await service.handle({"message": "remember"}, ctx("hitl-6"))
+    interrupt_id = out["interrupt"]["id"]
+    assert interrupt_id
+    approve = [{"tool_call_id": "c1", "action": "approve"}]
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.handle(
+            {"type": "resume", "decisions": approve, "interrupt_id": "stale-id"}, ctx("hitl-6")
+        )
+    assert e.value.status_code == 409 and "interrupt_id" in e.value.message
+    out = await service.handle(
+        {"type": "resume", "decisions": approve, "interrupt_id": interrupt_id}, ctx("hitl-6")
+    )
+    assert out["status"] == "success" and out["tools_used"] == ["remember"]
+    with pytest.raises(GreenNodeRequestError) as e:  # the same approval submitted again
+        await service.handle(
+            {"type": "resume", "decisions": approve, "interrupt_id": interrupt_id}, ctx("hitl-6")
+        )
+    assert e.value.status_code == 409
+
+
 def test_placeholder_and_waiting_detection():
     from types import SimpleNamespace
 

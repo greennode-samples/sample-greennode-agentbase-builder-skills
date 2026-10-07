@@ -8,7 +8,7 @@ description: "Observability/tracing standard using the Langfuse Python SDK v4 fo
 ## Version constraints (REQUIRED)
 
 - **Langfuse Python SDK v4** (`langfuse>=4,<5`, OpenTelemetry-based) + the `langchain` package (required for `langfuse.langchain`).
-- APIs used: `Langfuse(...)`, `get_client()`, `start_as_current_observation(as_type=...)`, `propagate_attributes(...)`, `langfuse.langchain.CallbackHandler`, `create_event`, `create_score`, `get_prompt`, `run_experiment`.
+- APIs used: `Langfuse(..., mask=, mask_otel_spans=)` (`mask_otel_spans` verified on SDK 4.17; `init_tracing` skips it with a warning on older 4.x), `get_client()`, `start_as_current_observation(as_type=...)`, `propagate_attributes(...)`, `langfuse.langchain.CallbackHandler`, `create_event`, `create_score`, `get_prompt`, `run_experiment`.
 - **FORBIDDEN** legacy v2/v3 APIs: `from langfuse.decorators import observe, langfuse_context`, `langfuse.trace(...)`, `CallbackHandler(user_id=..., session_id=...)`, old-style `handler.flush()`, `update_current_trace` to set user/session (v4 uses `propagate_attributes`).
 - The only module that touches Langfuse: `app/observability/tracing.py` (an asset of this skill). Other code only calls the helpers: `trace_request`, `step`, `event`, `score_trace`, `record_feedback`, `langchain_callbacks`.
 
@@ -50,7 +50,7 @@ agent.invoke [agent]        input=message|resume · output={response, tools_used
     │   └─ memory.recall [span]      input{query, namespace, limit, trigger:auto} · output{facts, count}
     ├─ route [chain]                 (LLM_ADAPTIVE_ROUTING) llm.route [span] output{complexity, task, reason}
     │   └─ llm.router [generation]   (tier small)
-    ├─ agent [chain]                 (links the Langfuse prompt version when using Prompt Management)
+    ├─ agent [chain]
     │   ├─ context.hard_trim [event, WARNING]
     │   └─ llm.<task> [chain]        metadata{llm_task, llm_tier} · links prompt version (agent flow only)
     │       ├─ <model> [generation]  NAME = model (e.g. qwen/qwen3.8-flash) · input = messages + tool schemas ·
@@ -80,11 +80,11 @@ Field details and how to read them: `references/trace-schema.md`.
 | Online evaluation | `tracing.score_trace("<metric>", value, comment=...)` |
 
 - `step()` attaches itself to the **currently running LangGraph node/tool** (reads the current run from `var_child_runnable_config`), so the span lands in the right place in the tree. Without a LangChain run, it attaches to the current OTel span.
-- An exception inside `step()` ⇒ observation `level=ERROR` + `status_message`, then re-raised.
+- An exception inside `step()` ⇒ observation `level=ERROR` + masked `status_message`, then re-raised (outside the OTel span context, so no raw `exception` event/stacktrace is exported). Same for `trace_request`.
 - Name spans `<domain>.<action>` (`crm.lookup_customer`, `payment.create`) for filtering/dashboards.
-- **Never** put in input/output: tokens, API keys, passwords, card data. `_mask()` masks by key — the normalized key name contains a secret part (`authorization`, `token`, `secret`, `password`, `cookie`, `credential`) or `api_key`/`private_key`/`secret_key` (so `X-API-Key`, `refresh_token`, `set-cookie` are masked but `max_tokens` is not) — and values: JWT, `Bearer`/`Basic` credentials, `sk-…`/`vn-…` API keys. PII (`TRACE_MASK_PII=true`, default): emails, VN phones, card numbers (Luhn-checked), 12-digit CCCD, and 9-digit CMND only after an ID keyword (a bare 9-digit amount stays readable) ⇒ `***EMAIL***`/`***PHONE***`/`***CARD***`/`***ID***`. Trace `user_id` is not passed through `mask` by Langfuse ⇒ an email-shaped user id is hashed (`trace_user_id`). Add business patterns in `_mask_text`. Tests: `tests/test_tracing_mask.py`. Disable only in dev environments using fake data that need to see raw values.
+- **Never** put tokens, API keys, passwords or card data in input/output — masking is a safety net. `_mask` masks secret **keys** (dict keys and `[key, value]` header pairs/tuples whose normalized name has a part `token`, `secret`, `password`, `cookie`, `credential`, `otp`, `pin`, `cvv`, `signature`/`sig`… or contains `api_key`/`private_key`/`access_key` — but not `max_tokens`, `token_usage`, `input_token_details`), secrets **inside text** (`key=value`, `key: value`, JSON/repr inside a string, URL query such as `?tavilyApiKey=…&sig=…`, `user:password@host`, `Bearer`/`Basic`, JWT, `sk-…`/`vn-…`), dataclass/pydantic objects passed to the helpers, and PII (`TRACE_MASK_PII=true`, default: email, VN mobile, Luhn-valid card, CCCD-shaped 12 digits, 9/12 digits after a CMND/CCCD/căn cước… keyword ⇒ `***EMAIL***`/`***PHONE***`/`***CARD***`/`***ID***`). Langfuse does **not** pass `status_message`, score comments, trace `user_id` or trace metadata through `mask` ⇒ the helpers mask status messages and comments, `langchain_callbacks()` returns a masking CallbackHandler, `mask_otel_spans` re-masks `status_message` on every exported span, `trace_user_id` hashes email-shaped ids; keep `trace_request(metadata=…)` non-sensitive. Rules, known limits and false-positive tradeoffs: `references/trace-schema.md` → Masking. Add business patterns in `_mask_text`; tests: `tests/test_tracing_mask.py`, `tests/test_tracing_export.py`. Disable PII masking only in dev environments using fake data.
 - **Generations always carry the model name**: `get_llm` wraps the model in a chain `llm.<task>` (or the `run_name` set by the caller, e.g. `context.summarize`, `reflection.judge`), while the inner generation is named via the `RunnableBinding`'s `config_factories`. Reason: `RunnableWithFallbacks` passes the chain's `run_name` down to the child model, overriding `with_config(run_name=...)`; this actually happened — generations carried the flow name and the UI didn't show which model was called.
-- **Prompt version is attached only to the agent's generation**: the `langfuse_prompt` metadata is set on the chain wrapping the LLM call in the `agent` node (`agent.<task>`). Setting it on node/graph metadata also wrongly attaches the prompt to judge, router and summarize generations (seen on real Langfuse).
+- **Prompt version is attached only to the agent's generation**: the `langfuse_prompt` metadata is passed at call time to the chain wrapping the LLM call in the `agent` node (`llm.<task>`, named by `get_llm` in `app/llm`). Setting it on node/graph metadata also wrongly attaches the prompt to judge, router and summarize generations (seen on real Langfuse).
 - Non-LangChain platform calls must have their own span: `memory.checkpoint_load` (checkpoint read; once hung for 7 minutes while this step was invisible in the trace), `memory.recall`, `mcp.list_tools`, `knowledge.search` (query + list of hits file/heading/score — see why RAG returns the wrong source).
 - Nodes never create a new `Langfuse()`; don't call `flush()` per request (lifespan flushes on shutdown).
 
@@ -99,8 +99,8 @@ Field details and how to read them: `references/trace-schema.md`.
 ## Step 5 — Prompt Management (optional, recommended for prod)
 
 1. Create a text prompt on Langfuse named `LANGFUSE_PROMPT_NAME`, with label `production`/`staging`.
-2. Env: `LANGFUSE_PROMPT_NAME`, `LANGFUSE_PROMPT_LABEL`, `LANGFUSE_PROMPT_CACHE_TTL` (default 300s).
-3. `app/prompts/__init__.py::get_system_prompt()` fetches the prompt (SDK cache), falling back to `system.md` on error; the graph attaches `metadata.langfuse_prompt` to the `agent` node ⇒ generations link to the prompt version ⇒ compare latency/cost/score per version, change prompts without redeploying.
+2. Env: `LANGFUSE_PROMPT_NAME`, `LANGFUSE_PROMPT_LABEL`, `LANGFUSE_PROMPT_CACHE_TTL` (seconds, default 300; blank or not an integer ⇒ 300 with a warning). `LANGFUSE_PROMPT_CACHE_TTL` is read with `os.getenv` in `app/prompts/__init__.py` (not a `Settings` field) — `.env.example` lists it with the default.
+3. `app/prompts/__init__.py::get_system_prompt()` fetches the prompt (SDK cache), falling back to `system.md` on error; `graph/builder.py` passes `metadata.langfuse_prompt` at call time to the agent's `llm.<task>` chain ⇒ the agent generations link to the prompt version ⇒ compare latency/cost/score per version, change prompts without redeploying.
 
 ## Reading traces via API / script (Langfuse v4 events_only)
 
@@ -114,7 +114,7 @@ Real example (a "Hello" message took 55s); the trace showed it immediately: `mcp
 
 ## Step 6 — Feedback & sessions
 
-- The response returns `trace_id`; the frontend sends `{"type":"feedback","trace_id","score"}` ⇒ score `user_feedback`.
+- The response returns `trace_id`; the frontend sends `{"type":"feedback","trace_id","score"}` ⇒ score `user_feedback`. `record_feedback` sends a deterministic score id (`feedback_score_id`: sha256 of `user|trace|name`, 32 hex) ⇒ Langfuse upserts: re-tapping 👍/👎 keeps ONE score with the latest value (the eval loop never reads stale votes). Pass `user_id=` when calling it.
 - Langfuse **Sessions** = `session_id` (the whole conversation, including HITL resume turns); **Users** = `user_id`.
 - Traces with 👎 ⇒ add to the regression dataset (`/agentbase-build-eval`).
 
@@ -122,7 +122,7 @@ Real example (a "Hello" message took 55s); the trace showed it immediately: `mcp
 
 1. `make dev`, send 2–3 requests (1 with a tool call), open Langfuse: exactly 1 trace/request, tree matches Step 2, has user/session.
 2. Generations have model, usage, cost; TTFT when streaming.
-3. Search traces for `Bearer`/`eyJ` ⇒ no results.
+3. Search traces (input/output **and** statusMessage of failed observations) for `Bearer `, `eyJ`, `sk-`, `access_token=`, `password=`, `api_key`/`ApiKey=` followed by anything other than `***` ⇒ no results.
 4. Remove the keys ⇒ the agent still runs normally.
 
 ## Troubleshooting

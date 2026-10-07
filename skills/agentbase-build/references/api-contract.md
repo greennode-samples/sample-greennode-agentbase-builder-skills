@@ -39,26 +39,26 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
 {"status": "success", "response": "…", "tools_used": ["get_current_time"],
  "session_id": "…", "trace_id": "…", "feedback_token": "…"}
 
-{"status": "interrupted", "session_id": "…", "trace_id": "…",
+{"status": "interrupted", "session_id": "…", "trace_id": "…", "feedback_token": "…",
  "interrupt": {"id": "…", "type": "tool_approval", "message": "<AI message>",
                "tool_calls": [{"id": "call_1", "name": "gateway_create_ticket", "args": {…}}]}}
 ```
 
-Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` invalid payload · `401` missing/invalid token · `403` spoofed user header · `409` invalid HITL state / stale `interrupt_id` / another request of the same session is running · `422` exceeded `MAX_TOOL_ROUNDS` · `502` LLM returned an error · `503` MaaS/Memory overloaded or JWKS unreachable (client retries with backoff) · `504` exceeded `REQUEST_TIMEOUT_S` · `500` other errors.
+Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` invalid payload · `401` missing/invalid token · `403` spoofed user header · `409` invalid HITL state (chat while an approval is pending, resume with nothing pending, stale `interrupt_id`) — a second request of the same session on the same replica **waits** for the first (per-session lock), it is not rejected · `422` exceeded `MAX_TOOL_ROUNDS` · `502` LLM returned an error · `503` MaaS/Memory overloaded or JWKS unreachable (client retries with backoff) · `504` exceeded `REQUEST_TIMEOUT_S` · `500` other errors.
 
 ## SSE events (`stream: true`)
 
-Each frame is `data: {json}\n\n`:
+Each frame is `data: {json}\n\n`. Clients must parse per the SSE spec (LF/CRLF/CR line endings, multi-line `data:` joined with "\n", flush the last event at EOF):
 
 | event | Fields | Frontend handling |
 |---|---|---|
 | `token` | `data` | append to the answer bubble |
 | `tool_start` | `name` | show "using tool …" |
 | `tool_end` | `name`, `status` | |
-| `reset` | `reason` | **clear the displayed text** (self-eval requested a new answer) |
+| `reset` | `reason`: `self_eval_retry` (self-eval asked for a new answer) or `llm_fallback` (the primary model failed mid-answer and a backup restarts it) | **clear the displayed text** |
 | `interrupt` | same as the `interrupted` response | show the approval card (Approve / Reject; `edit` is supported by the API — the sample `ApprovalCard` has no Edit button yet) |
-| `done` | same as the `success` response | finalize the bubble, store `trace_id` for feedback |
-| `error` | `message`, `status?` | show the error; `401` ⇒ log in again |
+| `done` | same as the `success` response | finalize the bubble, store `trace_id` + `feedback_token` for feedback |
+| `error` | `message`, `status?` | show the error; `401` ⇒ log in again; `409` on a resume ⇒ the approval was already handled or expired: drop the approval card (retrying only gets 409 again) |
 
 ## A2A (when `A2A_ENABLED=true`)
 

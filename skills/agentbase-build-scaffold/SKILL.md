@@ -62,7 +62,7 @@ Rules: **every Python command runs via `uv run`** (including one-liners: `uv run
 
 `APP_ENV=local` (the default) is **refused on the Runtime** (detected: `GREENNODE_AGENT_IDENTITY` injected by the platform **and** no `.greennode.json` — locally the IAM pair always lives in that file), so a deploy env file that forgets `APP_ENV` cannot fall back to `AUTH_MODE=none`.
 
-Deploy env files **must not contain** `GREENNODE_CLIENT_ID`, `GREENNODE_CLIENT_SECRET`, `GREENNODE_AGENT_IDENTITY`, `GREENNODE_ENDPOINT_URL` (the runtime injects them).
+Deploy env files **must not contain** `GREENNODE_CLIENT_ID`, `GREENNODE_CLIENT_SECRET`, `GREENNODE_AGENT_IDENTITY` (the runtime injects them) or `GREENNODE_ENDPOINT_URL` (platform-reserved name; set `A2A_PUBLIC_URL` instead).
 
 ## What the scaffold creates
 
@@ -77,7 +77,7 @@ See the directory tree and module responsibilities in `/agentbase-build` → `re
 - `assets/backend/tests/{conftest,test_agent,test_isolation}.py` — `fake_llm` fixture (patches `get_llm` in every module listed in `LLM_MODULES`; add new LLM-calling modules there); conftest overrides env so tests don't depend on `.env`; per-user isolation tests.
 - `assets/backend/.python-version` — `3.13`.
 - `assets/backend/Dockerfile` — `python:3.13-slim` + uv, non-root, port 8080.
-- `assets/root/*` — Makefile, README, .gitignore, `.agentbase-state.json`, `ci.yml` → `.github/workflows/ci.yml` (lint + test, eval gate, manual deploy; checked with actionlint) and `agent.yaml.tpl` → `deploy/agent.yaml.tpl` (manifest for `grn agentbase deploy up`, rendered in CI). Existing files are never overwritten — see `/agentbase-build-deploy` *CI/CD*.
+- `assets/root/*` — Makefile, README, .gitignore, `.agentbase-state.json`, `ci.yml` → `.github/workflows/ci.yml` (lint + test, eval gate, manual deploy; checked with actionlint) and `agent.yaml.tpl` → `deploy/agent.yaml.tpl` (manifest for `grn agentbase deploy up`, rendered in CI) and `render_runtime_spec.py` → `deploy/render_runtime_spec.py` (spec for `grn agentbase runtime update` on later deploys). Existing files are never overwritten — see `/agentbase-build-deploy` *CI/CD*.
 
 ## After scaffolding — customize for your domain
 

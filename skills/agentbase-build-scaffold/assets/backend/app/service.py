@@ -15,10 +15,11 @@ Headers:
 
 Response non-stream:
   {"status": "success",     "response", "tools_used", "session_id", "trace_id", "feedback_token"}
-  {"status": "interrupted", "interrupt": {"id","type","tool_calls","message"}, "session_id", "trace_id"}
+  {"status": "interrupted", "interrupt": {"id","type","tool_calls","message"}, "session_id", "trace_id",
+   "feedback_token"}
 Response stream (SSE, one `data: {...}` per line):
-  token | tool_start | tool_end | reset (self-eval forces a re-answer) |
-  interrupt {interrupt} | done {response, tools_used, trace_id} | error {message}
+  token | tool_start | tool_end | reset {reason: self_eval_retry | llm_fallback} (clear the shown text) |
+  interrupt {…same as interrupted} | done {…same as success} | error {message, status}
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from app.graph.builder import build_graph, recursion_limit
 from app.hitl import (
     interrupt_payload,
     is_placeholder_tool_message,
+    is_rejected_tool_message,
     is_waiting_approval,
     last_ai,
     requires_approval,
@@ -71,6 +73,8 @@ def _error(msg: str, status: int = 400) -> GreenNodeRequestError:
 
 
 async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
+    if not isinstance(payload, dict):  # JSON array/string body ⇒ 400, not an AttributeError 500
+        raise _error("Request body must be a JSON object")
     kind = payload.get("type", "chat")
     principal = await authenticate_async(context, get_settings())
 
@@ -83,7 +87,10 @@ async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
     validate_session_id(context.session_id)  # prevents path traversal into another user's session
 
     if kind == "chat":
-        message = (payload.get("message") or "").strip()
+        raw = payload.get("message")
+        if raw is not None and not isinstance(raw, str):
+            raise _error("`message` must be a string")
+        message = (raw or "").strip()
         if not message:
             raise _error("`message` is required")
         if len(message) > MAX_MESSAGE_CHARS:
@@ -111,17 +118,31 @@ async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
     return await run.invoke()
 
 
-async def run_chat(message: str, *, user_id: str, session_id: str) -> dict:
-    """Call the agent in-process, BYPASSING inbound auth — only for eval / tests / internal jobs / A2A."""
+def _principal_for(user_id: str, principal: Principal | None) -> Principal:
+    """A2A passes the verified Principal (claims + token survive ⇒ RBAC / user_jwt keep working)."""
+    if principal is None:
+        return Principal(user_id=user_id)
+    if principal.user_id != user_id:
+        raise ValueError("principal.user_id must equal user_id")
+    return principal
+
+
+async def run_chat(
+    message: str, *, user_id: str, session_id: str, principal: Principal | None = None
+) -> dict:
+    """Call the agent in-process, BYPASSING inbound auth — only for eval / tests / internal jobs / A2A.
+    Callers that already authenticated (A2A) pass `principal` so claims and the token are kept."""
     validate_user_id(user_id)
     validate_session_id(session_id)
+    if message is not None and not isinstance(message, str):
+        raise _error("`message` must be a string")
     message = (message or "").strip()
     if not message:
         raise _error("`message` is required")
     if len(message) > MAX_MESSAGE_CHARS:
         raise _error(f"`message` exceeds {MAX_MESSAGE_CHARS} chars")
     run = _Run(
-        Principal(user_id=user_id),
+        _principal_for(user_id, principal),
         session_id,
         "chat",
         {"messages": [HumanMessage(message)]},
@@ -130,13 +151,15 @@ async def run_chat(message: str, *, user_id: str, session_id: str) -> dict:
     return await run.invoke()
 
 
-async def run_resume(decisions: list[dict], *, user_id: str, session_id: str) -> dict:
-    """Resume HITL in-process — only for eval / tests / A2A."""
+async def run_resume(
+    decisions: list[dict], *, user_id: str, session_id: str, principal: Principal | None = None
+) -> dict:
+    """Resume HITL in-process — only for eval / tests / A2A (pass `principal` when already authenticated)."""
     validate_user_id(user_id)
     validate_session_id(session_id)
     decisions = validate_decisions(decisions)
     run = _Run(
-        Principal(user_id=user_id),
+        _principal_for(user_id, principal),
         session_id,
         "resume",
         Command(resume=decisions),
@@ -174,8 +197,12 @@ def _handle_feedback(payload: dict[str, Any], principal: Principal) -> dict:
     token = str(payload.get("feedback_token") or "")
     if not hmac.compare_digest(token, feedback_token(principal.user_id, trace_id)):
         raise _error("feedback_token is not valid for this user", 403)
+    # user_id ⇒ deterministic score id: re-tapping 👍/👎 updates the same score instead of adding duplicates
     ok = tracing.record_feedback(
-        trace_id=trace_id, value=float(score), comment=payload.get("comment")
+        trace_id=trace_id,
+        value=float(score),
+        comment=payload.get("comment"),
+        user_id=principal.user_id,
     )
     return {"status": "success" if ok else "ignored"}
 
@@ -219,12 +246,18 @@ def _final_text(messages: list) -> str:
 
 
 def _tools_used(messages: list) -> list[str]:
-    """Names of tools run in the current turn (after the last HumanMessage)."""
+    """Names of tools that actually RAN in the current turn (after the last HumanMessage) — not the bridge's
+    placeholders, not calls the user rejected in HITL (eval `expected_tools` / `--hitl reject` rely on this)."""
     used: list[str] = []
     for m in reversed(messages):
         if isinstance(m, HumanMessage):
             break
-        if isinstance(m, ToolMessage) and m.name and not is_placeholder_tool_message(m):
+        if (
+            isinstance(m, ToolMessage)
+            and m.name
+            and not is_placeholder_tool_message(m)
+            and not is_rejected_tool_message(m)
+        ):
             used.append(m.name)
     return list(reversed(used))
 
@@ -392,9 +425,8 @@ class _Run:
                 async with asyncio.timeout(max(left(), 0.001)):
                     graph, config = await self._prepare()
                 interrupts, final = None, None
-                streaming: dict[
-                    Any, str
-                ] = {}  # langgraph_step → id of the agent message being streamed
+                # langgraph_step → (id of the agent message being streamed, text already sent?)
+                streaming: dict[Any, tuple[str, bool]] = {}
                 it = graph.astream(
                     self.graph_input, config, stream_mode=["messages", "updates", "values"]
                 ).__aiter__()
@@ -440,28 +472,27 @@ def _deadline(seconds: float):
     yield lambda: end - time.monotonic()
 
 
-def _stream_events(mode: str, data: Any, streaming: dict[Any, str] | None = None) -> list[dict]:
-    """`streaming` (per request) remembers which message each agent step is streaming: a DIFFERENT message in the
-    SAME step means the primary model failed mid-answer and a fallback model restarted it ⇒ `reset` first, so the
-    client never shows "partial primary answer + fallback answer" glued together."""
+def _stream_events(
+    mode: str, data: Any, streaming: dict[Any, tuple[str, bool]] | None = None
+) -> list[dict]:
+    """`streaming` (per request) remembers, per agent step, the message being streamed and whether text was already
+    sent. A DIFFERENT message in the SAME step after text went out means the primary model failed mid-answer and a
+    fallback restarted it (with text OR a tool call) ⇒ `reset` first, so the client never shows
+    "partial primary answer + fallback answer" glued together."""
     events: list[dict] = []
     if mode == "messages":
         chunk, meta = data
-        if (
-            isinstance(chunk, AIMessageChunk)
-            and meta.get("langgraph_node") == "agent"
-            and chunk.text
-        ):
-            if streaming is not None:
-                step, previous = (
-                    meta.get("langgraph_step"),
-                    streaming.get(meta.get("langgraph_step")),
-                )
-                if previous is not None and chunk.id and chunk.id != previous:
-                    events.append({"event": "reset", "reason": "llm_fallback"})
-                if chunk.id:
-                    streaming[step] = chunk.id
-            events.append({"event": "token", "data": chunk.text})
+        if isinstance(chunk, AIMessageChunk) and meta.get("langgraph_node") == "agent":
+            if streaming is not None and chunk.id:
+                step = meta.get("langgraph_step")
+                previous_id, sent_text = streaming.get(step, (None, False))
+                if previous_id is not None and chunk.id != previous_id:
+                    if sent_text:
+                        events.append({"event": "reset", "reason": "llm_fallback"})
+                    sent_text = False
+                streaming[step] = (chunk.id, sent_text or bool(chunk.text))
+            if chunk.text:
+                events.append({"event": "token", "data": chunk.text})
         return events
     for node, update in (data or {}).items():
         if not isinstance(update, dict):

@@ -7,7 +7,8 @@
 | Gateway | 1 gateway / environment / domain group (e.g. `search-gw-prod`, `corp-gw-prod`). Never share a gateway between dev & prod |
 | Connector | 1 connector / upstream (tavily, github, hr-mcp). Short, stable names — the name appears in `connectUrl` **and** in policy actions |
 | Policy Group | 1 group / gateway; each agent (principal) gets 1 ALLOW policy listing exactly the actions it needs (least privilege) |
-| Principal | Agent on Runtime: `iam:<sub>` of the runtime service account. User via JWT: `jwt:<sub>` or a `principal.<claim>` condition |
+| Principal | Agent on Runtime: `iam:<sub>` of the runtime service account. User via JWT: `jwt:<sub>` or a `principal.<claim>` condition. Match-all (official *Principal and Wildcard Rules*): bare `iam` = every IAM identity, bare `jwt` / `jwt:*` = every JWT user, *All* = everyone; `iam:*` is not in the official table (prefer `iam`), `jwt:abc*` is a literal id |
+| Connector outbound auth | Prefer API Key / OAuth from a Secret Provider. **Inbound forward** re-sends the agent's gateway credential to the MCP server: never on an IAM-inbound gateway (that is the agent's platform IAM token); on a JWT-inbound gateway only towards your own server validating the same IdP |
 
 ## Example (real observed structure, IDs replaced with placeholders)
 
@@ -28,7 +29,7 @@ Gateway `sample-mcp-gw` (inbound IAM) has 2 connectors `tavily`, `stock` (outbou
 ]
 ```
 
-E2E result with the agent running as `<sub-demo-sa>`: `stock_stock_quote` ⇒ real data; `tavily_tavily_search` ⇒ `Request denied by policy` ⇒ guard returns `POLICY_DENIED`, agent does not retry.
+E2E result with the agent running as `<sub-demo-sa>`: `stock_stock_quote` ⇒ real data; `tavily_tavily_search` ⇒ `Request denied by policy` ⇒ guard returns `POLICY_DENIED`, agent does not retry. The documented deny shape — HTTP 403 `No policy allows this request` (no rule matches, or no Policy Group bound) — gets the same treatment: the guard recognizes the 403 status inside the adapter's exception group (covered offline by a fake gateway in `tests/test_mcp.py`).
 
 ## Common conditions
 
@@ -43,7 +44,9 @@ Exact keys/operators: read `/agentbase-policy` (`references/policy-statement.md`
 
 ## Governance checklist before prod
 
-- [ ] Prod gateway has a Policy Group; no policy with `principal: "*"` + `actions: ["*"]`.
+- [ ] Prod gateway has a Policy Group; no ALLOW policy with a match-all principal (*All* / `"*"`, `iam`, `jwt`, `jwt:*`) + `actions: ["*"]`.
+- [ ] No connector on an IAM-inbound gateway uses outbound **Inbound forward**; on JWT-inbound gateways only for your own MCP servers validating the same IdP.
+- [ ] `mcp_servers.json`: `auth: iam` / `user_jwt` only point at `*.agentbase-gateway.aiplatform.vngcloud.vn` (no non-gateway WARNING in the startup log, except your own JWT-validating server).
 - [ ] Each prod agent has its own principal (dedicated runtime service account) and only the actions it needs.
 - [ ] Side-effect tools are both restricted by Policy and go through `HITL_TOOLS`.
 - [ ] Upstream secrets live in Identity (Managed/Custom provider), rotated periodically.

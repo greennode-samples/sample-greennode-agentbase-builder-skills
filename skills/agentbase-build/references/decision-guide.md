@@ -7,7 +7,7 @@ Principle: **build minimal by default; every enabled component must have a reaso
 | Component | Reason |
 |---|---|
 | Runtime contract, `service.py`, standard graph | Common skeleton |
-| Inbound auth (`jwt` / `api_key`) | The Runtime endpoint is public, with no platform auth |
+| Inbound auth (`jwt` / `api_key`) | The Runtime's own Inbound Auth (IAM / JWT / None) is optional and may be None ⇒ the agent always verifies callers itself |
 | Short-term memory (checkpointer) | Multi-turn conversations; HITL also needs a checkpointer |
 | Compression | Insurance for long conversations; costs nothing until the threshold is exceeded |
 | Langfuse tracing (can be sampled) | An agent cannot be debugged without traces |
@@ -24,7 +24,7 @@ Principle: **build minimal by default; every enabled component must have a reaso
 - One-off tasks (batch, stateless API), or an agent shared by a whole department under one account.
 - There is no data policy yet: you need user consent, a retention period (`eventExpiryDuration`), a right to deletion, and a list of data that must never be stored (health, finance, passwords…). State it explicitly in the system prompt.
 
-**Choosing a strategy**: `USER_PREFERENCE` (preferences, form of address, language) → `SEMANTIC` (events/facts) → `CUSTOM` (only when specific business fields must be extracted, with a prompt).
+**Choosing a strategy**: `USER_PREFERENCE` (preferences, form of address, language) → `SEMANTIC` (events/facts) → `CUSTOM` (only when specific business fields must be extracted, with a prompt). The template recalls from ONE strategy per agent (`MEMORY_STRATEGY_ID`).
 **Auto-recall vs tool**: `LTM_AUTO_RECALL=true` when every turn needs personalization. If it is only needed occasionally, disable auto-recall and let the LLM call `recall_memory` itself, saving 1 search per turn.
 
 ## 2. Loops

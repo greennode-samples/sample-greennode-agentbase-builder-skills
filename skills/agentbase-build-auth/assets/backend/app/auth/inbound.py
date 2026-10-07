@@ -6,8 +6,9 @@ Principles:
 - After verification, override user_id in GreenNodeAgentBaseContext so @requires_api_key /
   @requires_access_token (USER_FEDERATION) use the right user.
 - AUTH_MODE=none only runs with APP_ENV=local (enforced in config).
-- The AgentBase Runtime endpoint is public, with NO platform auth layer (verified) ⇒ jwt or
-  api_key is mandatory outside local.
+- The Runtime's own Inbound Auth (IAM / JWT / None) and IP access control are optional settings, and
+  "No authorization" leaves the endpoint public ⇒ the agent ALWAYS authenticates its caller itself:
+  jwt or api_key is mandatory outside local (defense in depth, whatever the Runtime setting).
 - api_key: only for trusted callers (server/BFF/job/test) — NEVER embed the key in a mobile app. The
   User-Id header is REQUIRED (no shared bucket) — the trusted caller is responsible for its value.
   Env stores only the key's SHA-256.
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -55,10 +57,19 @@ def validate_session_id(session_id: str | None) -> str:
     return session_id
 
 
+# Shape of a hashed user id. A raw subject with this shape is hashed too, otherwise a `sub` equal to another
+# user's hashed id would map to that user (collision ⇒ cross-user memory).
+HASHED_USER_ID_RE = re.compile(r"^u-[0-9a-f]{40}$")
+
+
 def user_id_from_subject(subject: str, issuer: str | None) -> str:
     """An IdP `sub` may contain path-unsafe characters (Auth0 `auth0|abc`, ...) ⇒ map it stably
     to `u-<sha256(iss|sub)>` instead of rejecting."""
-    if USER_ID_RE.fullmatch(subject) and ".." not in subject:
+    if (
+        USER_ID_RE.fullmatch(subject)
+        and ".." not in subject
+        and not HASHED_USER_ID_RE.fullmatch(subject)
+    ):
         return subject
     return "u-" + hashlib.sha256(f"{issuer or ''}|{subject}".encode()).hexdigest()[:40]
 
@@ -76,7 +87,10 @@ def _unauthorized(msg: str, status: int = 401) -> GreenNodeRequestError:
 
 @lru_cache(maxsize=4)
 def _jwks_client(url: str) -> jwt.PyJWKClient:
-    return jwt.PyJWKClient(url, cache_keys=True, lifespan=3600)
+    # The JWK SET is cached 1h; an unknown `kid` forces a refetch (rate-limited by PyJWT's 30s cooldown).
+    # cache_keys stays False: that per-kid LRU never expires ⇒ a key the IdP removed (compromised/rotated
+    # out) would stay trusted until restart.
+    return jwt.PyJWKClient(url, cache_keys=False, lifespan=3600)
 
 
 def _header(context: RequestContext, name: str) -> str | None:
@@ -95,22 +109,40 @@ def _extract_bearer(raw: str | None) -> str | None:
 def verify_jwt(token: str, settings: Settings) -> dict[str, Any]:
     try:
         key = _jwks_client(settings.auth_jwks_url).get_signing_key_from_jwt(token)
+    except json.JSONDecodeError as e:
+        # The IdP/proxy answered the JWKS URL with non-JSON (maintenance page…): an outage, not a bad token ⇒ 503
+        # (a 401 would log every user out). PyJWT doesn't wrap this error.
+        raise _unauthorized("Identity provider unavailable", status=503) from e
+    except (
+        jwt.PyJWKClientConnectionError
+    ) as e:  # IdP/JWKS unreachable ⇒ 503 (not 401 — no mass logouts)
+        raise _unauthorized("Identity provider unavailable", status=503) from e
+    except jwt.PyJWTError as e:
+        raise _unauthorized(f"Invalid token: {type(e).__name__}") from e
+    except (TypeError, ValueError) as e:
+        raise _unauthorized("Invalid token: unusable key or token") from e
+    try:
         claims = jwt.decode(
             token,
-            key.key,
+            # The PyJWK (not key.key) binds the alg to the key — its JWKS `alg`, else RS256 for RSA / the
+            # curve's ES* for EC ⇒ a header alg that doesn't fit the key (ES256 + RSA kid) is a 401, not a 500.
+            key,
             algorithms=settings.auth_algorithms,
             audience=settings.auth_audience or None,
             issuer=settings.auth_issuer or None,
             options={"require": ["exp", "iat"], "verify_aud": bool(settings.auth_audience)},
             leeway=30,
         )
-    except jwt.PyJWKClientConnectionError as e:
-        # IdP/JWKS unreachable ⇒ 503 (not 401 — avoids mass client logouts)
-        raise _unauthorized("Identity provider unavailable", status=503) from e
     except jwt.PyJWTError as e:
         raise _unauthorized(f"Invalid token: {type(e).__name__}") from e
-    # Only access tokens are accepted (Cognito-style IdPs mark ID tokens with token_use=id)
+    # malformed key/token that PyJWT doesn't wrap in PyJWTError ⇒ still 401, never an unauthenticated 500
+    except (TypeError, ValueError) as e:
+        raise _unauthorized("Invalid token: unusable key or token") from e
+    # Only access tokens: reject the token types the IdP marks — Cognito `token_use` (id), Keycloak `typ`
+    # (ID / Refresh / Offline / Logout). An IdP that marks neither relies on AUTH_AUDIENCE / AUTH_ALLOWED_CLIENT_IDS.
     if claims.get("token_use", "access") != "access":
+        raise _unauthorized("Invalid token: not an access token")
+    if str(claims.get("typ", "")).lower() in ("id", "refresh", "offline", "logout"):
         raise _unauthorized("Invalid token: not an access token")
     if settings.auth_allowed_client_ids:
         client = claims.get("azp") or claims.get("client_id")

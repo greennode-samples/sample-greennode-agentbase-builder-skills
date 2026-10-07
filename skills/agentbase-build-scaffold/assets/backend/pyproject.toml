@@ -14,7 +14,7 @@ dependencies = [
     "langchain-openai>=1.1.0,<2.0.0",
     "langchain-mcp-adapters>=0.3.0,<0.4.0",
     # Observability
-    "langfuse>=4.0.0,<5.0.0",
+    "langfuse>=4.17.0,<5.0.0",  # mask_otel_spans (status_message masking) verified on 4.17
     # Config + auth
     "pydantic>=2.6,<3",  # greennode-agentbase 1.0.x still uses class-based Config (removed in pydantic 3)
     "pydantic-settings>=2.6.0",

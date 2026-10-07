@@ -3,7 +3,8 @@
 Rules:
 - Don't read os.environ scattered around the code; import `get_settings()`.
 - Variables injected by AgentBase Runtime (GREENNODE_CLIENT_ID, GREENNODE_CLIENT_SECRET,
-  GREENNODE_AGENT_IDENTITY, GREENNODE_ENDPOINT_URL) are NOT declared here — the SDK reads them.
+  GREENNODE_AGENT_IDENTITY) are NOT declared here — the SDK reads them. GREENNODE_ENDPOINT_URL is read as an
+  optional fallback only (it is not in the documented injected list).
 - LANGFUSE_* variables are read by the Langfuse SDK; here we only check whether it is enabled.
 """
 
@@ -41,8 +42,9 @@ class Settings(BaseSettings):
     llm_model: str = ""  # use the model's `path` field on AIP (not `code`)
     llm_temperature: float = 0.2
     llm_max_tokens: int | None = None
-    llm_timeout_s: float = 60.0
-    llm_max_retries: int = 2
+    # per attempt (streaming ⇒ inactivity timeout); sized so a fallback chain fits REQUEST_TIMEOUT_S (llm skill §4)
+    llm_timeout_s: float = 25.0
+    llm_max_retries: int = 1
     # streaming=True so Langfuse records TTFT (completion_start_time); stream_usage for usage/cost
     # when streaming. If the provider returns no usage when streaming => set LLM_STREAM_USAGE=false.
     llm_streaming: bool = True
@@ -67,7 +69,7 @@ class Settings(BaseSettings):
     # Long-term memory: enable per the Agent Spec (decision-guide §1) — stores personal data long-term
     ltm_enabled: bool = False
     ltm_auto_recall: bool = True
-    ltm_recall_limit: int = 5
+    ltm_recall_limit: int = Field(default=5, ge=5, le=200)  # Memory search API accepts 5–200
     # AgentBase Memory: timeout/retry per call (seen in practice: a checkpoint read hung ~7 minutes when the platform
     # was flaky with the default 30s × 5 retries). Search query max 1000 chars (API limit).
     memory_timeout_s: float = 10.0
@@ -106,7 +108,8 @@ class Settings(BaseSettings):
 
     # --- Inbound auth (authenticates the agent's caller) ---
     # jwt: end-user via IdP (OIDC/JWKS) · api_key: trusted caller (server/BFF/test) · none: local only
-    # NOTE: the AgentBase Runtime endpoint does NOT authenticate — the agent MUST protect itself.
+    # The Runtime's own Inbound Auth (IAM / JWT / None, + IP access control) is optional and may be "None" ⇒ the
+    # agent always verifies callers itself (defense in depth) — /agentbase-build-auth.
     auth_mode: Literal["jwt", "api_key", "none"] = "jwt"
     # Header carrying the user JWT. Use "Authorization" if the runtime endpoint doesn't claim it;
     # if Authorization is already used for IAM, switch to a custom header (the SDK only forwards Authorization
@@ -148,7 +151,8 @@ class Settings(BaseSettings):
 
     # --- A2A (Agent2Agent) — see app/a2a/. Server: other agents call this one; client: a2a_agents.json
     a2a_enabled: bool = False
-    # Public URL of the agent (Agent Card). Empty => GREENNODE_ENDPOINT_URL (runtime-injected) or localhost
+    # Public URL of the agent (Agent Card). Set it explicitly on the Runtime; empty => GREENNODE_ENDPOINT_URL if
+    # present (not in the documented injected list) or localhost
     a2a_public_url: str = ""
     a2a_description: str = "AgentBase agent"
     a2a_skills: list[dict] = Field(

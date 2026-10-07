@@ -43,12 +43,17 @@ async def test_sessions_and_users_are_isolated(fake_llm):
     assert not any("secret of u1" in str(m.content) for m in model.calls[-1])
 
 
-async def test_stream_emits_tokens_and_done(fake_llm):
-    fake_llm(AIMessage("Hello there"))
+async def test_stream_emits_tokens_and_done(monkeypatch):
+    """A streaming model must produce `token` events whose text equals the final `done` response."""
+    _, Fake, _ = _streaming_models()
+    model = Fake(messages=iter([AIMessage("Hello there")]))
+    monkeypatch.setattr("app.graph.builder.get_llm", lambda task="agent", tools=None: model)
     gen = await service.handle({"message": "hi", "stream": True}, ctx(session="s-stream"))
     events = [e async for e in gen]
-    assert events[-1]["event"] == "done"
-    assert events[-1]["response"] == "Hello there"
+    tokens = [e["data"] for e in events if e["event"] == "token"]
+    assert len(tokens) >= 2  # really streamed, not one final blob
+    assert "".join(tokens) == "Hello there"
+    assert events[-1]["event"] == "done" and events[-1]["response"] == "Hello there"
 
 
 async def test_validation_errors(fake_llm):
@@ -212,3 +217,81 @@ async def test_normal_stream_has_no_reset(monkeypatch):
     events = [e async for e in gen]
     assert "reset" not in [e["event"] for e in events]
     assert "".join(e["data"] for e in events if e["event"] == "token") == "Hello there friend"
+
+
+async def test_non_string_message_is_400_not_500(fake_llm):
+    fake_llm(AIMessage("ok"))
+    for message in (123, ["hi"], {"text": "hi"}):
+        with pytest.raises(GreenNodeRequestError) as e:
+            await service.handle({"message": message}, ctx())
+        assert e.value.status_code == 400
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.run_chat(123, user_id="u1", session_id="s1")  # type: ignore[arg-type]
+    assert e.value.status_code == 400
+
+
+async def test_non_object_payload_is_400_not_500(fake_llm):
+    fake_llm(AIMessage("ok"))
+    for body in (["chat"], "hi", 42):
+        with pytest.raises(GreenNodeRequestError) as e:
+            await service.handle(body, ctx())
+        assert e.value.status_code == 400
+
+
+async def test_request_timeout_returns_504(monkeypatch):
+    import asyncio
+
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    class _Slow(GenericFakeChatModel):
+        async def _agenerate(self, *a, **k):
+            await asyncio.sleep(5)
+
+    monkeypatch.setenv("REQUEST_TIMEOUT_S", "0.3")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.graph.builder.get_llm",
+        lambda task="agent", tools=None: _Slow(messages=iter([AIMessage("late")])),
+    )
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.handle({"message": "hi"}, ctx(session="s-timeout"))
+    assert e.value.status_code == 504
+
+
+async def test_rejected_hitl_call_is_not_in_tools_used(fake_llm, monkeypatch):
+    """eval `expected_tools` / `--hitl reject` rely on tools_used listing only tools that actually ran."""
+    monkeypatch.setenv("HITL_TOOLS", '["remember"]')
+    get_settings.cache_clear()
+    call = AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}])
+    fake_llm(call, AIMessage("Not saved."))
+    await service.handle({"message": "remember x"}, ctx(session="s-rej"))
+    out = await service.handle(
+        {"type": "resume", "decisions": [{"tool_call_id": "c1", "action": "reject"}]},
+        ctx(session="s-rej"),
+    )
+    assert out["status"] == "success" and out["tools_used"] == []
+
+
+def test_fallback_answering_with_a_tool_call_still_resets():
+    """Primary streamed text then died; the fallback (new message id, same step) starts with a TOOL CALL ⇒ the
+    partial text must be cleared before anything else, or the user sees 'Let me' glued to the final answer."""
+    from langchain_core.messages import AIMessageChunk
+
+    streaming: dict = {}
+    meta = {"langgraph_node": "agent", "langgraph_step": 1}
+    first = service._stream_events(
+        "messages", (AIMessageChunk("Let me", id="run-a"), meta), streaming
+    )
+    tool = AIMessageChunk(
+        "", id="run-b", tool_call_chunks=[{"name": "t", "args": "{}", "id": "c", "index": 0}]
+    )
+    second = service._stream_events("messages", (tool, meta), streaming)
+    assert first == [{"event": "token", "data": "Let me"}]
+    assert second == [{"event": "reset", "reason": "llm_fallback"}]
+    # A new message after a tool-only message (nothing shown yet) needs no reset
+    quiet: dict = {}
+    service._stream_events("messages", (tool, {**meta, "langgraph_step": 2}), quiet)
+    nxt = service._stream_events(
+        "messages", (AIMessageChunk("Hi", id="run-c"), {**meta, "langgraph_step": 2}), quiet
+    )
+    assert nxt == [{"event": "token", "data": "Hi"}]

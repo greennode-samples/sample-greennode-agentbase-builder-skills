@@ -20,6 +20,8 @@ The LLM chooses and calls tools only from what the server exposes: name, docstri
 
 - Every store method takes `owner` as its first parameter, and every query has `WHERE owner = ?`, including UPDATE and DELETE. A "not found" for another user's row must look exactly like a truly missing row, so the response doesn't leak that it exists.
 - Writes: put `UNIQUE(owner, idempotency_key)` on the table and accept an optional `idempotency_key`. LLM agents retry, and a retry must not create a duplicate.
+  - Make it **atomic**: `INSERT … ON CONFLICT (owner, idempotency_key) DO NOTHING`, then `SELECT` the row by `(owner, idempotency_key)` in the **same transaction** (Postgres: same statements, default READ COMMITTED). SELECT-then-INSERT races: concurrent retries hit the UNIQUE index and the raw `UNIQUE constraint failed` SQL error reaches the LLM.
+  - A replay returns the **stored** row (original text, id, `created_at`), not the new arguments — `store.add()` returns the row.
 - Wrap blocking I/O in `asyncio.to_thread`, or use an async driver. Never block the event loop: one server handles many concurrent calls.
 - Local uses SQLite (a file, `MCP_DB_PATH`). With **more than 1 Runtime replica**, keep the same interface and switch to Postgres (asyncpg / SQLAlchemy async) with a connection pool. Schema changes then go through migrations (Alembic), not `CREATE TABLE IF NOT EXISTS`.
 
@@ -58,5 +60,6 @@ Cover the minimum with the fixtures in `tests/conftest.py`:
 | invalid input | wrong type, empty, out of range ⇒ `res.isError` |
 | missing scope | `make_token("u", scope="…without it…")` |
 | per-user isolation | two tokens (`alice`, `bob`) on `jwt_server` |
+| idempotent write | same `idempotency_key` twice ⇒ same stored row; 8 concurrent retries (`session(...)` + `asyncio.gather`) ⇒ one row, no error |
 | upstream failures | `start_server(JWT_ENV, backend=handler)` with a fake handler returning 404/500/timeout |
 | annotations | `list_tools(...)`, then check `annotations` and `outputSchema` |
