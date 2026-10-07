@@ -199,3 +199,23 @@ async def test_decision_relayed_when_tool_is_human_approved(
     fake_llm(AIMessage("peer handled it"))
     out, reached = await _ask_peer(a2a_server, tmp_path, monkeypatch, "approve", hitl='["ask_*"]')
     assert reached >= 1 and "peer handled it" in out
+
+
+def test_plain_http_agents_refused_outside_local(tmp_path, monkeypatch, caplog):
+    from app.a2a.client import load_a2a_agents
+
+    cfg = tmp_path / "a2a_agents.json"
+    cfg.write_text(
+        '{"agents": {"plain": {"url": "http://peer.internal", "auth": "api_key", "api_key": "k"},'
+        ' "tls": {"url": "https://peer.example", "auth": "api_key", "api_key": "k"}}}'
+    )
+    for k, v in {
+        "A2A_AGENTS_FILE": str(cfg),
+        "APP_ENV": "dev",
+        "AUTH_MODE": "api_key",
+        "AUTH_API_KEY_SHA256": '["' + "0" * 64 + '"]',
+    }.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    assert set(load_a2a_agents(get_settings())) == {"tls"}
+    assert "must be https" in caplog.text

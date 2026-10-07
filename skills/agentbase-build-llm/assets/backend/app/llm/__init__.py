@@ -19,6 +19,7 @@ agentbase-build-llm.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Literal
 
@@ -29,6 +30,8 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
+
+log = logging.getLogger(__name__)
 
 Tier = Literal["reasoning", "large", "small"]
 TIERS: tuple[Tier, ...] = ("reasoning", "large", "small")
@@ -90,12 +93,34 @@ def _chat(model: str, tier: Tier, role: str) -> ChatOpenAI:
         temperature=s.llm_temperature if tier != "small" else 0,
         max_tokens=s.llm_max_tokens,
         timeout=s.llm_timeout_s * (2 if tier == "reasoning" else 1),  # reasoning models run longer
-        max_retries=min(s.llm_max_retries, 1) if fallbacks_for(tier) else s.llm_max_retries,
+        # With fallbacks the PRIMARY doesn't retry (switch fast); fallbacks keep retries so a 429 still gets the
+        # SDK's backoff — the MaaS rate limit is per account, shared by every model in the chain.
+        max_retries=0 if role == "primary" and fallbacks_for(tier) else s.llm_max_retries,
         streaming=s.llm_streaming,
         stream_usage=s.llm_stream_usage,
         tags=[f"llm.{tier}", f"llm.{role}"],
         metadata={"llm_tier": tier, "llm_role": role, "llm_base_url": s.llm_base_url},
     )
+
+
+@lru_cache(maxsize=8)
+def _warn_if_over_budget(tier: Tier) -> None:
+    """Worst case = every model in the chain times out once. If that exceeds REQUEST_TIMEOUT_S the request is
+    cancelled before the last fallback can answer — the fallback chain is then partly useless."""
+    s = get_settings()
+    per_attempt = s.llm_timeout_s * (2 if tier == "reasoning" else 1)
+    n_fallbacks = len(fallbacks_for(tier))
+    # primary: 1 attempt when fallbacks exist; each fallback: 1 + retries
+    attempts = 1 + n_fallbacks * (1 + s.llm_max_retries) if n_fallbacks else 1 + s.llm_max_retries
+    if per_attempt * attempts > s.request_timeout_s:
+        log.warning(
+            "LLM tier %s: worst case %d × %.0fs > REQUEST_TIMEOUT_S=%.0fs — lower LLM_TIMEOUT_S or raise "
+            "REQUEST_TIMEOUT_S so the last model in the chain can still answer",
+            tier,
+            attempts,
+            per_attempt,
+            s.request_timeout_s,
+        )
 
 
 def get_chat_model(task: str = "agent") -> BaseChatModel:
@@ -114,6 +139,7 @@ def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnabl
     """
     tier = tier_for(task)
     primary_model = model_for(tier)
+    _warn_if_over_budget(tier)
 
     def _gen(model: str, role: str) -> Runnable:
         r: Runnable = _chat(model, tier, role)

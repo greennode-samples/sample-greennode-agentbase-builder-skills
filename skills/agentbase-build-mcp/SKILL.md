@@ -24,7 +24,7 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 | Concept | What it really is | Remember |
 |---|---|---|
 | **MCP Gateway** | Proxy (Kong) — inbound auth + Policy enforcement | 1 gateway binds at most 1 Policy Group |
-| **MCP Connector** | A **target** of the gateway, with `connectUrl = <gateway endpoint>/<connector name>` | The agent points at **each connectUrl**; calling the gateway root ⇒ error |
+| **MCP Connector** | A **target** of the gateway; its URL is auto-generated from the gateway (observed `<gateway endpoint>/<connector name>`) | Copy the connector's **Endpoint** from the Console *Connected* tab (or `connectUrl` from the API) exactly — some include a `/mcp` suffix. The agent points at **each** connector URL; the gateway root ⇒ error |
 | **Policy Group** | Set of ALLOW/DENY rules for `tools/call` | **Not bound ⇒ every tools/call is 403**; `tools/list` is always allowed |
 
 ## Choosing the tool type
@@ -61,7 +61,8 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
       "actions": ["tavily__tavily_search", "tavily__tavily_extract", "stock__stock_quote"],
       "resources": ["gateway:sample-mcp-gw"]}
      ```
-   - Evaluation order: the docs say *first match wins by `order`, no match ⇒ DENY*; the `/agentbase-policy` skill says *deny wins within a group* — design rules without overlapping ALLOW/DENY on the same action so you don't depend on this difference.
+   - Evaluation order ([policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups)): policies are evaluated **top-to-bottom by `order`, the first match decides** ALLOW/DENY, no match ⇒ DENY, inactive policies are skipped. Put specific DENY rules before broad ALLOW rules. (Older notes saying "deny wins within a group" are wrong.)
+   - Limits: ≤ **20 policies per group**; group name 5–50 chars `[A-Za-z0-9_]` starting with a letter; 1 gateway ↔ at most 1 group (attaching another replaces it); changes apply within ~30s. Principal wildcards: `jwt:*` / `iam:*` only — `jwt:abc*` is a literal.
 5. **Declare in the agent** — `mcp_servers.json`, **one entry per connector**, URL = `connectUrl`:
 
 ```json
@@ -81,6 +82,9 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 | `headers` | Static headers, `${ENV}` expanded. A static key for a self-built MCP server: `"auth": "none", "headers": {"Authorization": "Bearer ${MY_KEY}"}` — `Authorization` together with `iam`/`user_jwt` is rejected (it would be overwritten) |
 | `allow_tools` | Whitelist of the MCP server's **original** tool names (e.g. `tavily_search`). Empty = all |
 | `envs`, `enabled` | Load per `APP_ENV`, temporarily disable |
+| `transport` | `streamable_http` (default) or `stdio` (local process: `command`, `args`, `env`; no `auth` needed) |
+
+`${VAR}` is expanded with `os.path.expandvars` over the raw JSON: an **unset** variable stays literally `${VAR}`, and a value containing `"` or `\\` breaks the JSON — keep secrets URL/JSON-safe. `user_jwt` servers need the caller's JWT: in `AUTH_MODE=api_key` and for A2A calls there is none ⇒ that server is skipped (`tools.collect.output.mcp_errors`).
 
 6. **Naming & HITL** — tool name in the agent = `<server>_<tool>` (e.g. `tavily_tavily_search`); policy action = `<connector>__<tool>` (e.g. `tavily__tavily_search`). Side-effect tools (GitHub create issue, Slack post, M365 send mail…) ⇒ add to `HITL_TOOLS` using the agent-side name (`github_create_issue`).
 7. **Verify** — `make dev`, trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
@@ -113,3 +117,12 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 - Wrap important I/O with `tracing.step("<domain>.<action>")`; side-effect ⇒ `HITL_TOOLS`; add unit tests.
 
 Governance details & per-agent policy design examples: `references/governance.md`.
+
+## Official docs
+
+- [mcp-gateway](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/mcp-gateway) — gateway inbound modes (IAM / JWT / None), evaluation pipeline
+- [manage-mcp-gateway](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/mcp-gateway/manage-mcp-gateway) — gateway form fields and limits
+- [mcp-connectors](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors) — catalog / custom connectors
+- [connect-a-connector](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors/connect-a-connector) — outbound auth: OAuth 2LO/3LO, API Key, Inbound forward, No auth; Managed vs Custom secret
+- [policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups) — principal/action formats, conditions, first-match evaluation
+- [manage-policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups/manage-policy-groups) — limits, attach/detach behavior

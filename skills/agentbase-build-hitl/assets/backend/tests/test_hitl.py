@@ -98,3 +98,54 @@ def test_placeholder_and_waiting_detection():
     # AgentBaseMemoryEvents may return interrupts=() but next=('approval',)
     assert is_waiting_approval(SimpleNamespace(interrupts=(), next=("approval",)))
     assert not is_waiting_approval(SimpleNamespace(interrupts=(), next=()))
+
+
+async def test_invalid_edit_is_rejected_not_executed(fake_llm):
+    """`remember` takes {"fact": str}; an edit with the wrong shape must not reach the tool."""
+    model = fake_llm(_call("x"), AIMessage("ok"))
+    await service.handle({"message": "remember"}, ctx("hitl-5"))
+    await service.handle(
+        {
+            "type": "resume",
+            "decisions": [{"tool_call_id": "c1", "action": "edit", "args": {"wrong": 1}}],
+        },
+        ctx("hitl-5"),
+    )
+    tool_msgs = [m for m in model.calls[-1] if isinstance(m, ToolMessage)]
+    assert (
+        tool_msgs[-1].status == "error" and "Edited arguments are invalid" in tool_msgs[-1].content
+    )
+
+
+def test_edited_args_checked_against_mcp_json_schema():
+    """MCP tools carry a JSON-Schema dict the adapter does not enforce — validate it ourselves."""
+    from langchain_core.tools import StructuredTool
+
+    from app.hitl import edited_args_error
+
+    async def _noop(**kwargs):
+        return "ok"
+
+    schema = {
+        "type": "object",
+        "properties": {"amount": {"type": "integer"}, "to": {"type": "string"}},
+        "required": ["amount", "to"],
+        "additionalProperties": False,
+    }
+    tool = StructuredTool(name="pay", description="pay", args_schema=schema, coroutine=_noop)
+    assert edited_args_error(tool, {"amount": 10, "to": "bob"}) is None
+    assert edited_args_error(tool, {"amount": "lots", "to": "attacker"})
+    assert edited_args_error(tool, {})
+    assert edited_args_error(tool, {"amount": 1, "to": "b", "extra": True})
+
+
+async def test_unmatched_hitl_pattern_is_reported(monkeypatch, caplog):
+    import app.tools as tools_mod
+    from app.auth.inbound import Principal
+    from app.tools import collect_tools
+
+    tools_mod._reported_unmatched.clear()  # warned once per pattern per process
+    monkeypatch.setenv("HITL_TOOLS", '["remember", "github_create-issue"]')
+    get_settings.cache_clear()
+    await collect_tools(get_settings(), Principal(user_id="u1"))
+    assert "github_create-issue" in caplog.text and "approval NOT enforced" in caplog.text

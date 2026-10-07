@@ -34,7 +34,7 @@ description: "Evaluation loop standard for AI agents on GreenNode AgentBase with
 ## (2) Offline eval (asset `evals/`)
 
 ```bash
-make eval                     # local JSONL → Langfuse Experiment (if keys set) | local run (no keys)
+make eval                     # local JSONL → Langfuse Experiment (if LANGFUSE_* set) | local run (no Langfuse); LLM_API_KEY always required
 make eval MIN=0.9             # change the threshold
 make eval-push                # upsert JSONL to a Langfuse Dataset, then run a Dataset Run
 uv run python -m evals.run_eval --dataset <project>-regressions --min-pass-rate 0.85
@@ -42,6 +42,7 @@ uv run python -m evals.run_eval --data ... --hitl reject   # test the rejection 
 ```
 
 - The task runs the real agent in-process (`service.run_chat`, random user/session, auto-resumes HITL per `--hitl`).
+- MaaS allows **10 requests/minute per account** (all models): each item costs ≥ 2 calls (agent + judge, more with tools/routing) ⇒ use `--concurrency 1` and small datasets on a default account, or request a whitelist; otherwise 429s show up as failed items.
 - Evaluators (`evals/evaluators.py`), Langfuse v4 signature:
   - `no_error` — has a reply, status success.
   - `expected_tools` — all expected tools were called.
@@ -51,7 +52,8 @@ uv run python -m evals.run_eval --data ... --hitl reject   # test the rejection 
   - Run-level: `pass_rate` (an item passes when every score ≥ `PASS_THRESHOLD`=0.7), `avg_correctness`, `avg_expected_tools`.
 - Add business evaluators (valid JSON format, policy compliance, length...) to `ITEM_EVALUATORS`.
 - Default `run_name` is `<AGENT_VERSION>-<LLM_MODEL>` ⇒ compare runs by version/model in the Datasets tab.
-- Exit code ≠ 0 when `pass_rate < --min-pass-rate` ⇒ use as a **CI gate**.
+- Exit codes: `0` pass · `1` `pass_rate < --min-pass-rate` (**CI gate**) · `2` config error (e.g. no `LLM_API_KEY`).
+- The gate divides by the **dataset size**: an item whose agent run crashed (LLM 502, timeout…) is recorded as `status=error` and fails; a judge error scores `correctness=0`. Langfuse silently drops raising tasks/evaluators, so never let them raise.
 
 CI (GitHub Actions example):
 
@@ -60,8 +62,15 @@ CI (GitHub Actions example):
 - run: cd src/backend && uv sync --frozen
 - run: make test
 - run: make eval MIN=0.8
-  env: { LLM_API_KEY: ${{ secrets.LLM_API_KEY }}, LLM_MODEL: ..., MEMORY_BACKEND: inmemory, APP_ENV: local,
-         AUTH_MODE: none, LANGFUSE_PUBLIC_KEY: ..., LANGFUSE_SECRET_KEY: ..., LANGFUSE_BASE_URL: ... }
+  env:
+    LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+    LLM_MODEL: ${{ vars.LLM_MODEL }}
+    MEMORY_BACKEND: inmemory
+    APP_ENV: local
+    AUTH_MODE: none
+    LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+    LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+    LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
 ```
 
 Actually run against self-hosted Langfuse v4.49: `--push` creates the dataset, `run_experiment` creates a Dataset Run (prints the UI link), each item's trace has `experiment-item-task` (agent nested inside) and `experiment-item-evaluation` (each evaluator). Read scores via `GET /api/public/v3/scores?name=correctness`.
@@ -89,3 +98,7 @@ Actually run against self-hosted Langfuse v4.49: `--push` creates the dataset, `
 ## Test
 
 `tests/test_reflection.py` (retry + removal of the poor answer, evaluators). Add tests for new evaluators.
+
+## Official docs
+
+- [available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models) — MaaS rate limits — size eval concurrency to them

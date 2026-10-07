@@ -23,7 +23,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - Every LLM call goes through `get_llm("<task>")` (`grep -rn "ChatOpenAI(" app | grep -v app/llm` is empty).
 
 ## Memory
-- [B] `MEMORY_BACKEND=agentbase` + `MEMORY_ID` in dev/staging/prod.
+- [B] `MEMORY_BACKEND=agentbase` + `MEMORY_ID` in staging/prod (dev may use `inmemory` only with 1 replica — history is lost on restart).
 - [B] actor_id comes from `Principal`, not a tool parameter; namespace matches the memory store's `namespaceTemplate`.
 - Compression thresholds tuned to the model's context window; long-conversation test passes.
 

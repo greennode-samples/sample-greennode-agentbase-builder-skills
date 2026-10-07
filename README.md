@@ -51,6 +51,10 @@ bash skills/agentbase-build-scaffold/scripts/scaffold.sh my-agent ./my-agent --w
 cd my-agent && make test && make dev && make invoke MSG="hello"
 ```
 
+## Official GreenNode docs
+
+Platform behavior (Runtime, Memory, Identity, MCP Gateway, Policy, MaaS) is documented at **https://docs.greennode.ai**. Each skill ends with an *Official docs* section linking the relevant pages; https://docs.greennode.ai/llms.txt indexes every page, and any page URL + `.md` returns Markdown.
+
 ## Prerequisites
 
 To build and run an agent you need these values. **Never paste secrets into the chat with your coding agent.** It creates the files from `.example` templates, you fill them in your editor, then you run `make check-creds`, which prints only OK/FAIL and non-secret IDs.

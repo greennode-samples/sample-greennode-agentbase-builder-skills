@@ -174,3 +174,30 @@ async def test_reflection_skipped_for_simple_questions(monkeypatch):
         monkeypatch.setattr(f"{mod}.get_llm", fake)
     await service.handle({"message": "hi"}, RequestContext(session_id="skip-refl", user_id="u"))
     assert used == ["router", "agent_simple"]  # no judge
+
+
+def test_primary_switches_fast_fallbacks_keep_backoff(monkeypatch):
+    llm._chat.cache_clear()
+    _env(monkeypatch, LLM_MODEL="L", LLM_MAX_RETRIES="2", LLM_FALLBACK_MODELS='["b1"]')
+    assert llm._chat("L", "large", "primary").max_retries == 0
+    # 429 is account-wide: the fallback must still back off and retry
+    assert llm._chat("b1", "large", "fallback").max_retries == 2
+    llm._chat.cache_clear()
+    _env(monkeypatch, LLM_FALLBACK_MODELS="[]")
+    assert llm._chat("L", "large", "primary").max_retries == 2
+    llm._chat.cache_clear()
+
+
+def test_warns_when_fallback_chain_exceeds_request_timeout(monkeypatch, caplog):
+    llm._warn_if_over_budget.cache_clear()
+    _env(
+        monkeypatch,
+        LLM_MODEL="L",
+        LLM_TIMEOUT_S="60",
+        REQUEST_TIMEOUT_S="180",
+        LLM_TIER_FALLBACKS='{"reasoning": ["r2"]}',
+    )
+    llm._warn_if_over_budget("reasoning")  # (1 + 1 × 3) attempts × 120s > 180s
+    llm._warn_if_over_budget("large")  # no fallback: 1 + 2 retries = 3 × 60s = 180s ⇒ ok
+    assert "tier reasoning" in caplog.text and "tier large" not in caplog.text
+    llm._warn_if_over_budget.cache_clear()

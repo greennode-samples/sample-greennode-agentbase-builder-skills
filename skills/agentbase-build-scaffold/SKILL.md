@@ -60,7 +60,7 @@ Rules: **every Python command runs via `uv run`** (including one-liners: `uv run
 
 `make check-creds` (`scripts/check_creds.py`) verifies IAM, LLM key/model and Langfuse keys and prints only `OK/FAIL` + non-secret IDs (IAM principal `iam:<sub>`). Run it after the user fills the files.
 
-`APP_ENV=local` (the default) is **refused on the Runtime** (detected via `GREENNODE_AGENT_IDENTITY`/`GREENNODE_ENDPOINT_URL`), so a deploy env file that forgets `APP_ENV` cannot fall back to `AUTH_MODE=none`.
+`APP_ENV=local` (the default) is **refused on the Runtime** (detected: `GREENNODE_AGENT_IDENTITY` injected by the platform **and** no `.greennode.json` — locally the IAM pair always lives in that file), so a deploy env file that forgets `APP_ENV` cannot fall back to `AUTH_MODE=none`.
 
 Deploy env files **must not contain** `GREENNODE_CLIENT_ID`, `GREENNODE_CLIENT_SECRET`, `GREENNODE_AGENT_IDENTITY`, `GREENNODE_ENDPOINT_URL` (the runtime injects them).
 
@@ -85,3 +85,9 @@ See the directory tree and module responsibilities in `/agentbase-build` → `re
 2. Add tools in `app/tools/local_tools.py` or via MCP (`/agentbase-build-mcp`).
 3. Add domain nodes in `app/graph/builder.py` (if you need a router/sub-agent), state fields in `state.py`.
 4. Add tests for each tool/node; add eval items to `evals/datasets/`.
+
+## Official docs
+
+- [runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference) — service contract the scaffold implements (port, `/health`, injected `GREENNODE_*`, session/user headers)
+- [getting-started](https://docs.greennode.ai/ai-stack/agent-base/getting-started) — creating the IAM service account and `.greennode.json` for local dev
+- [supporting-services](https://docs.greennode.ai/ai-stack/agent-base/supporting-services) — SDK install, vCR robot accounts, AIP API keys

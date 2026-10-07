@@ -57,3 +57,7 @@ make fe-dev     # Expo; open with Expo Go / simulator
 ```
 
 Verify: send a message (stream visible), tool calls displayed, HITL shows the approval card and resumes, 👍 creates a `user_feedback` score in Langfuse, expired tokens refresh automatically.
+
+## Official docs
+
+- [create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime) — Runtime Inbound Auth: JWT lets the app call directly, IAM requires a BFF

@@ -38,6 +38,7 @@ Create `src/backend/.env.<env>` (not committed) from `.env.example`. To review p
 ```bash
 make docker-build IMAGE=<registry>/<repo>/<project> TAG=<AGENT_VERSION>
 make docker-run IMAGE=... TAG=...   # local smoke test: curl :8080/health
+make docker-run IMAGE=... TAG=... ENV_FILE=src/backend/.env.prod   # boots with the DEPLOY config: catches a missing APP_ENV / AUTH_* before the Runtime does
 ```
 
 Standard Dockerfile: `python:3.13-slim` + uv, `uv sync --frozen --no-dev`, non-root, `EXPOSE 8080`, build with `--platform linux/amd64` (mandatory when building on ARM Macs).
@@ -76,3 +77,12 @@ Runtimes are billed continuously. Delete test runtimes, memory, API keys, connec
 ## Rollback
 
 Use `/agentbase-deploy`'s endpoint/version controls to point DEFAULT back to the previous version; compare traces by `release` to confirm recovery.
+
+## Official docs
+
+- [create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime) — create a runtime: image, env, autoscaling (1–10 replicas), Security Settings
+- [manage-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/manage-runtime) — update, stop/start, endpoints/versions, rollback
+- [runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference) — PATCH requires every field except `imageAuth`; reset-service-account
+- [container-registry](https://docs.greennode.ai/ai-stack/agent-base/container-registry) — vCR / AgentBase Container Registry
+- [logs-and-metrics](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/logs-and-metrics) — logs and metrics after deploy
+- [manage-agentbase-with-the-greennode-cli](https://docs.greennode.ai/ai-stack/agent-base/manage-agentbase-with-the-greennode-cli) — `grn agentbase …` CLI incl. `deploy up`

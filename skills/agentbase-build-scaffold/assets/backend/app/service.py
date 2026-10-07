@@ -389,6 +389,9 @@ class _Run:
                 async with asyncio.timeout(max(left(), 0.001)):
                     graph, config = await self._prepare()
                 interrupts, final = None, None
+                streaming: dict[
+                    Any, str
+                ] = {}  # langgraph_step → id of the agent message being streamed
                 it = graph.astream(
                     self.graph_input, config, stream_mode=["messages", "updates", "values"]
                 ).__aiter__()
@@ -403,7 +406,7 @@ class _Run:
                         continue
                     if mode == "updates" and isinstance(data, dict) and data.get("__interrupt__"):
                         interrupts = data["__interrupt__"]
-                    for event in _stream_events(mode, data):
+                    for event in _stream_events(mode, data, streaming):
                         yield event
                 result = await self._result(root, (final or {}).get("messages", []), interrupts)
                 if result["status"] == "interrupted":
@@ -434,7 +437,10 @@ def _deadline(seconds: float):
     yield lambda: end - time.monotonic()
 
 
-def _stream_events(mode: str, data: Any) -> list[dict]:
+def _stream_events(mode: str, data: Any, streaming: dict[Any, str] | None = None) -> list[dict]:
+    """`streaming` (per request) remembers which message each agent step is streaming: a DIFFERENT message in the
+    SAME step means the primary model failed mid-answer and a fallback model restarted it ⇒ `reset` first, so the
+    client never shows "partial primary answer + fallback answer" glued together."""
     events: list[dict] = []
     if mode == "messages":
         chunk, meta = data
@@ -443,6 +449,15 @@ def _stream_events(mode: str, data: Any) -> list[dict]:
             and meta.get("langgraph_node") == "agent"
             and chunk.text
         ):
+            if streaming is not None:
+                step, previous = (
+                    meta.get("langgraph_step"),
+                    streaming.get(meta.get("langgraph_step")),
+                )
+                if previous is not None and chunk.id and chunk.id != previous:
+                    events.append({"event": "reset", "reason": "llm_fallback"})
+                if chunk.id:
+                    streaming[step] = chunk.id
             events.append({"event": "token", "data": chunk.text})
         return events
     for node, update in (data or {}).items():

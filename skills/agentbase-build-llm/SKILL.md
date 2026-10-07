@@ -10,7 +10,8 @@ description: "LLM standard for AI agents on GreenNode AgentBase: GreenNode AI Pl
 | | Value |
 |---|---|
 | Provider | GreenNode AI Platform (MaaS) |
-| Endpoint | `https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1` (OpenAI-compatible) — do **not** use any other domain |
+| Endpoint | `https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1` (OpenAI-compatible, pay-as-you-go keys). A **Token Plan** key uses `https://tokenplan.api.greennode.ai/v1` with the model **code** — a key on the wrong host returns 401 ([connect-openai-compatible-to-maas](https://docs.greennode.ai/ai-stack/ai-coding/connect-openai-compatible-to-maas)) |
+| Rate limit | **10 requests/minute and 14,400/day per account, shared across ALL models** ([available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models)) — a fallback to another model does NOT bypass it; more needs a whitelist request. One chat turn can use several calls (router + agent + tool rounds + judge) ⇒ budget accordingly |
 | API key | Create/select via **`/agentbase-llm`** → `.env` `LLM_API_KEY` (never print the key) |
 | Model | The model's **`path`** field (`/agentbase-llm models list --status ENABLED`) |
 
@@ -53,9 +54,10 @@ LLM_FALLBACK_MODELS='["qwen/qwen3.8-flash"]'   # shared for tiers without their 
 ```
 
 - Switch models only on **infrastructure/model** errors: `APIConnectionError`/timeout, `RateLimitError` (429), `InternalServerError` (5xx), `NotFoundError` (model removed/wrong path), `PermissionDeniedError` (model not enabled). Do **not** switch on `BadRequestError` (400) or a wrong API key, since changing models doesn't fix those.
-- With fallbacks ⇒ the primary model's `max_retries` drops to 1 to switch quickly.
+- With fallbacks ⇒ the **primary** gets `max_retries=0` (switch fast instead of re-calling a hung model); fallback models keep `LLM_MAX_RETRIES` so a 429 (account-wide 10 RPM) still gets the SDK's backoff.
+- **Time budget:** worst case = (1 + fallbacks × (1 + `LLM_MAX_RETRIES`)) × `LLM_TIMEOUT_S` (×2 for the reasoning tier) must stay under `REQUEST_TIMEOUT_S` (default 180s), otherwise the request is cancelled before the last fallback answers. The app logs a WARNING at startup when a tier is over budget.
 - Fallbacks should have similar capability, **a different model family / provider** (avoid correlated failures), be enabled on AIP and already evaluated.
-- Streaming: fallback applies only if the error happens before the first token.
+- Streaming: if the primary fails **mid-answer**, the fallback answers from scratch and the stream first sends `{"event": "reset", "reason": "llm_fallback"}` so the client clears the partial text (tested).
 - Langfuse: the primary model's generation at level ERROR, followed by the fallback model's generation (different `model_name`) in the same trace.
 - Verified on MaaS: nonexistent primary model (404) → automatically switched to `qwen/qwen3.8-flash` and answered normally.
 - Cross-provider fallback (OpenAI, internal vLLM): needs per-model `base_url`/key, extend `_chat()`; keys stored in Identity.
@@ -109,6 +111,14 @@ The docs say LLM calls on Runtime may go through the Sidecar LLM Proxy `localhos
 |---|---|---|
 | 401 | Wrong/deleted key | `/agentbase-llm api-keys list`, reload with `--save-env` (fallback can't help) |
 | 404 model not found | Wrong `path` / model not enabled | Fix the path; with fallback the request still works but the trace shows ERROR — must fix |
-| Frequent 429 | Model/key rate limit (Protect & Govern) | Add a fallback on a different model, raise quota, lower `MAX_TOOL_ROUNDS` |
+| Frequent 429 | Account limit 10 RPM shared by all models, or Protect & Govern limits | A fallback model does NOT help (same account limit); request a whitelist, turn off adaptive routing/reflection, lower `MAX_TOOL_ROUNDS`, lower eval `--concurrency` |
 | No usage/cost on Langfuse | Missing model price / provider doesn't return usage when streaming | Declare model price; `LLM_STREAM_USAGE=false` |
 | Router picks the wrong tier | Router prompt doesn't fit the domain | Adjust `ROUTER_PROMPT` with domain examples, re-measure with eval |
+
+## Official docs
+
+- [available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models) — model list and **rate limits (10 RPM / 14,400 per day per account)**
+- [connect-openai-compatible-to-maas](https://docs.greennode.ai/ai-stack/ai-coding/connect-openai-compatible-to-maas) — pay-as-you-go vs Token Plan base URLs and model ids
+- [maas-api](https://docs.greennode.ai/ai-stack/model-as-a-service/maas-api) — MaaS API
+- [pricing](https://docs.greennode.ai/ai-stack/model-as-a-service/pricing) — pricing per model
+- [rate-limit](https://docs.greennode.ai/ai-stack/agent-base/protect-govern/rate-limit) — Protect & Govern request/token limits (429)

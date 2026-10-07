@@ -26,13 +26,13 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 
 ## Platform bugs/differences found during real runs (handled in the skills)
 
-1. The Runtime endpoint has **no auth** ⇒ the agent must use `jwt`/`api_key`.
+1. Runtimes created without Security Settings (Inbound Auth `No authorization`) are public ⇒ the agent must use `jwt`/`api_key`. The platform now offers Inbound Auth IAM/JWT + IP Access Control ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)); the agent still verifies tokens itself.
 2. `greennode-agentbase` 1.0.3: `insert_memory_records_directly` needs a `MemoryRecordInsertDirectlyRequest` (the official sample passes a list ⇒ TypeError); `search` returns `list[dict]`.
 3. `AgentBaseMemoryEvents`: reading state right after an interrupt may miss the `__interrupt__` write, and the bridge inserts a fake ToolMessage ⇒ take the interrupt from the graph output, treat `next=('approval',)` as pending approval.
 4. SDK `IAMCredentials` falls back per field ⇒ mismatched ID/secret pair ⇒ 401 ⇒ `.greennode.json` is the only source locally.
 5. Each MCP Connector has its own `connectUrl` (`<gateway>/<connector>`); the gateway root is unusable; policy principal = `iam:<sub>` (not client_id); a gateway without a Policy Group ⇒ 403 for everything; policy deny comes back as a ToolException ⇒ the LLM retries unless there is a guard.
 6. GreenNode IAM does not publish JWKS ⇒ IAM tokens cannot be used as inbound JWT.
-7. Memory API: search query ≤ 1000 characters (400 if longer); checkpoint reads sometimes hang ~7 minutes with the SDK's default timeout/retry ⇒ 10s timeout, 2 retries, `REQUEST_TIMEOUT_S`.
+7. Memory API: search query ≤ 1000 characters (400 if longer); checkpoint reads sometimes hang ~7 minutes with the SDK's default timeout/retry ⇒ 10s timeout, 3 retries (`MEMORY_MAX_RETRIES`), `REQUEST_TIMEOUT_S`.
 8. MaaS sometimes returns 503 (glm-5.3-flash) ⇒ a fallback model is mandatory for prod.
 9. Memory API limits 10 concurrent requests per IAM account (429), shared across all replicas ⇒ `MEMORY_MAX_CONCURRENCY` + retry backoff.
 10. Memory API concatenates `actorId`/`sessionId` straight into the path ⇒ a Session-Id containing `../` can point to another actor ⇒ the template validates Session-Id (`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`) at every entry point (invocations, A2A, eval).

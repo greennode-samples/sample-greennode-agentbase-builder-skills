@@ -41,7 +41,16 @@ def load_a2a_agents(settings: Settings) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
     raw = json.loads(os.path.expandvars(path.read_text(encoding="utf-8")))
-    return {n: c for n, c in (raw.get("agents") or {}).items() if c.get("enabled", True)}
+    agents = {}
+    for name, cfg in (raw.get("agents") or {}).items():
+        if not cfg.get("enabled", True):
+            continue
+        # Each call carries an API key or the user's JWT ⇒ never over plain http outside local
+        if not settings.is_local and not str(cfg.get("url", "")).startswith("https://"):
+            log.error("A2A agent %r skipped: url must be https:// outside APP_ENV=local", name)
+            continue
+        agents[name] = cfg
+    return agents
 
 
 def _headers(cfg: dict, settings: Settings, principal: Principal, user_id: str) -> dict[str, str]:

@@ -107,12 +107,23 @@ async def summarize_if_needed(
         if cut == 0:
             st.set(output={"decision": "skipped_nothing_to_cut"}, level="WARNING")
             return None
-        old = messages[:cut]
-        # The summarizer input must fit the budget too: truncate big tool outputs + keep the newest part
+        # The summarizer input must fit the budget too: truncate big tool outputs, then summarize only the
+        # OLDEST part that fits and remove exactly that part — never delete messages the summarizer didn't see.
+        # The rest stays in history and is compressed on a later turn.
         budget = settings.context_hard_limit_tokens
-        old_in = truncate_tool_outputs(old, max(budget // 4, 256))
-        while len(old_in) > 1 and count_tokens_approximately(old_in) > budget:
-            old_in = old_in[1:]
+        old_in = truncate_tool_outputs(messages[:cut], max(budget // 4, 256))
+        full_cut = cut
+        while cut > 0 and count_tokens_approximately(old_in[:cut]) > budget:
+            cut -= 1
+        while cut > 0 and isinstance(
+            messages[cut], ToolMessage
+        ):  # keep tool_call ↔ result together
+            cut -= 1
+        if cut == 0:
+            st.set(output={"decision": "skipped_oldest_message_over_budget"}, level="WARNING")
+            return None
+        old, old_in = messages[:cut], old_in[:cut]
+        meta["partial"] = cut < full_cut
         try:
             result = await get_llm("summarize").ainvoke(
                 [
@@ -152,7 +163,8 @@ def fit_to_budget(messages: list[AnyMessage], settings: Settings) -> list[AnyMes
     """Ensure the prompt is ≤ CONTEXT_HARD_LIMIT_TOKENS while NEVER losing the last HumanMessage.
 
     1) drop the bridge's placeholder ToolMessages; 2) truncate oversized tool outputs (keep head + tail);
-    3) trim old messages; 4) if still over (current turn too large): system + truncated current turn.
+    3) trim old messages; 4) if still over (current turn too large): system + truncated current turn;
+    5) if the user's message alone is still too large: keep its head + tail.
     """
     limit = settings.context_hard_limit_tokens
     messages = drop_placeholder_tool_messages(messages)
@@ -179,6 +191,20 @@ def fit_to_budget(messages: list[AnyMessage], settings: Settings) -> list[AnyMes
             work[last_h:], max(limit // (4 * max(len(work) - last_h, 1)), 64)
         )
         trimmed = system + turn
+        over = count_tokens_approximately(trimmed) - limit
+        human_i = next((i for i, m in enumerate(trimmed) if isinstance(m, HumanMessage)), None)
+        if (
+            over > 0
+            and human_i is not None
+            and isinstance(trimmed[human_i].content, str)
+            # only when the user's message itself is the problem (not AI text / tool args in this turn)
+            and count_tokens_approximately([trimmed[human_i]]) > limit // 2
+        ):
+            # The user's own message alone exceeds the budget (pasted document…) ⇒ keep head + tail of it,
+            # otherwise the LLM call fails with a context-length 400 on every retry.
+            h = trimmed[human_i]
+            keep = max(len(h.content) - over * 4 - 400, 256)  # ≈4 chars/token + room for the marker
+            trimmed[human_i] = h.model_copy(update={"content": _truncate_text(h.content, keep)})
     tracing.event(
         "context.hard_trim",
         level="WARNING",

@@ -16,6 +16,11 @@ else
 fi
 
 cp -R "$SKILL_DIR/assets/frontend/." "$DIR/"
+# Replace the project-name placeholder in the overlaid files (scaffold.sh does it too; this covers standalone use)
+(cd "$SKILL_DIR/assets/frontend" && find . -type f -print0) |
+  while IFS= read -r -d '' f; do
+    sed -i.bak "s/__PROJECT_NAME__/$NAME/g" "$DIR/$f" && rm -f "$DIR/$f.bak"
+  done
 [[ -f "$DIR/.env" ]] || cp "$DIR/.env.example" "$DIR/.env"
 
 if [[ $INSTALL -eq 0 ]]; then

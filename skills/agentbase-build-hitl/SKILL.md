@@ -33,10 +33,11 @@ rejected calls ⇒ error ToolMessage "Not executed: <reason>" → agent continue
 Rules enforced in code:
 - Missing decision for a tool_call ⇒ treated as **reject**.
 - While an interrupt is pending ⇒ a new `chat` in the same session returns **409** (must resume first) — avoids history with orphaned tool_calls.
-- `resume` with no pending interrupt ⇒ **409**; sending an `interrupt_id` that differs from the pending one (double-submit, stale tab) ⇒ **409**.
+- `resume` with no pending interrupt ⇒ **409**; sending an `interrupt_id` that differs from the pending one (double-submit, stale tab) ⇒ **409** — when the snapshot exposes the interrupt; with AgentBase Memory it may not (see caveats), then double-approve protection relies on the per-session lock (single replica) only.
 - A session runs only 1 request at a time (lock per user+session) ⇒ approving twice in parallel doesn't run the tool twice.
-- `edit` requires `args` to be an object; new args must satisfy the tool schema (the tool validates itself).
+- `edit` requires `args` to be an object and is validated against the tool's schema in the approval node (`edited_args_error`: Pydantic for local tools, JSON Schema for MCP tools, whose adapter does NOT validate). Invalid ⇒ the call is rejected with `Edited arguments are invalid (…)`, never executed.
 - The `approval` node **reruns from the start on resume** ⇒ don't put side effects before `interrupt()`.
+- A `HITL_TOOLS` pattern that matches no tool (typo, renamed MCP tool, connector down) logs a WARNING and appears as `tools.collect.output.hitl_unmatched` — approval is NOT enforced for it, so check that list after adding patterns.
 
 ## AgentBase Memory caveats (seen & fixed)
 
@@ -62,3 +63,7 @@ Rules enforced in code:
 ## Tests
 
 `tests/test_hitl.py`: interrupt → approve; edit args; reject; resume with nothing pending ⇒ 409; chat while pending ⇒ 409. On the runtime with real AgentBase Memory (already run): interrupt → interleaved chat 409 → other user resume 409 → session owner approves ⇒ tool runs, memory stored for the correct user.
+
+## Official docs
+
+- [memory](https://docs.greennode.ai/ai-stack/agent-base/memory) — LangGraph checkpointer bridge (`AgentBaseMemoryEvents`) that persists interrupted runs

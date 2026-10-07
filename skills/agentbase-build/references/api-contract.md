@@ -56,7 +56,7 @@ Each frame is `data: {json}\n\n`:
 | `tool_start` | `name` | show "using tool …" |
 | `tool_end` | `name`, `status` | |
 | `reset` | `reason` | **clear the displayed text** (self-eval requested a new answer) |
-| `interrupt` | same as the `interrupted` response | show the Approve / Edit / Reject card |
+| `interrupt` | same as the `interrupted` response | show the approval card (Approve / Reject; `edit` is supported by the API — the sample `ApprovalCard` has no Edit button yet) |
 | `done` | same as the `success` response | finalize the bubble, store `trace_id` for feedback |
 | `error` | `message`, `status?` | show the error; `401` ⇒ log in again |
 

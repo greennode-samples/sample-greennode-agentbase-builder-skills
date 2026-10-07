@@ -28,7 +28,9 @@ class _ConcurrencyLimitedClient:
     Seen in practice: 8 parallel requests ⇒ Memory API returns 429 "Too many concurrent streaming requests
     for this user. Limit: 10" (limit per IAM account, shared across all replicas). The bridge calls SYNC
     functions (create_event, list_events...) in a thread executor, LTM calls ASYNC functions (*_async) ⇒ both share
-    one threading.BoundedSemaphore; the async path acquires in the executor so it doesn't block the event loop.
+    one threading.BoundedSemaphore. The async path polls a NON-blocking acquire: it never blocks the event loop and
+    is cancellation-safe (REQUEST_TIMEOUT_S cancels requests; acquiring in an executor thread would let the thread
+    take a permit after the coroutine was cancelled — a permanent leak until every Memory call hangs).
     """
 
     def __init__(self, client: Any, limit: int):
@@ -42,7 +44,10 @@ class _ConcurrencyLimitedClient:
         if inspect.iscoroutinefunction(attr):
 
             async def async_limited(*args: Any, **kwargs: Any) -> Any:
-                await asyncio.get_running_loop().run_in_executor(None, self._sem.acquire)
+                delay = 0.005
+                while not self._sem.acquire(blocking=False):
+                    await asyncio.sleep(delay)  # cancelled here ⇒ nothing was acquired
+                    delay = min(delay * 2, 0.05)
                 try:
                     return await attr(*args, **kwargs)
                 finally:

@@ -59,7 +59,28 @@ def validate_decisions(decisions: Any) -> list[dict]:
     return decisions
 
 
-def build_approval_node(settings: Settings):
+def edited_args_error(tool: Any, args: dict) -> str | None:
+    """Why `args` don't fit the tool's input schema (None = valid). Uses `tool_call_schema` — the schema the LLM
+    sees, without injected args. MCP tools carry a JSON-Schema dict that the adapter does NOT enforce, so an edit
+    like {"amount": "lots"} would otherwise reach the MCP server unchecked."""
+    schema = getattr(tool, "tool_call_schema", None) if tool is not None else None
+    if schema is None:
+        return None
+    try:
+        if isinstance(schema, dict):
+            import jsonschema
+
+            jsonschema.validate(args, schema)
+        else:
+            schema.model_validate(args)
+    except Exception as e:  # noqa: BLE001 — jsonschema.ValidationError / pydantic.ValidationError
+        return (str(getattr(e, "message", "")) or str(e)).splitlines()[0][:200]
+    return None
+
+
+def build_approval_node(settings: Settings, tools: list | None = None):
+    by_name = {t.name: t for t in tools or []}
+
     async def approval(state: dict) -> dict:
         ai = last_ai(state["messages"])
         pending = [
@@ -79,7 +100,13 @@ def build_approval_node(settings: Settings):
                 continue
             d = by_id.get(tc["id"], {"action": "reject", "reason": "no decision"})
             if d["action"] == "edit":
-                tc = {**tc, "args": d["args"]}
+                if err := edited_args_error(by_name.get(tc["name"]), d["args"]):
+                    rejected[tc["id"]] = f"Edited arguments are invalid ({err})"
+                    tracing.event(
+                        "hitl.invalid_edit", level="WARNING", metadata={"tool": tc["name"]}
+                    )
+                else:
+                    tc = {**tc, "args": d["args"]}
             elif d["action"] == "reject":
                 rejected[tc["id"]] = d.get("reason") or "Rejected by the user"
             new_calls.append(tc)

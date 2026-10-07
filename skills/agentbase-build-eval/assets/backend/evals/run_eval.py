@@ -34,8 +34,11 @@ from app.service import run_chat, run_resume  # noqa: E402
 from evals.evaluators import (  # noqa: E402
     ITEM_EVALUATORS,
     RUN_EVALUATORS,
+    count_passed,
     item_passed,
 )
+
+EXIT_GATE_FAILED, EXIT_CONFIG_ERROR = 1, 2
 
 
 def load_jsonl(path: str) -> list[dict]:
@@ -58,15 +61,19 @@ def make_task(hitl_action: str):
         # metadata.user_id: run the item under a fixed identity (per-user seeded data); random by default
         user_id = meta.get("user_id") or f"eval-{uuid.uuid4().hex[:8]}"
         session_id = str(uuid.uuid4())
-        result = await run_chat(message, user_id=user_id, session_id=session_id)
-        for _round in range(5):
-            if result.get("status") != "interrupted":
-                break
-            decisions = [
-                {"tool_call_id": tc["id"], "action": hitl_action, "reason": "eval"}
-                for tc in result["interrupt"]["tool_calls"]
-            ]
-            result = await run_resume(decisions, user_id=user_id, session_id=session_id)
+        try:
+            result = await run_chat(message, user_id=user_id, session_id=session_id)
+            for _round in range(5):
+                if result.get("status") != "interrupted":
+                    break
+                decisions = [
+                    {"tool_call_id": tc["id"], "action": hitl_action, "reason": "eval"}
+                    for tc in result["interrupt"]["tool_calls"]
+                ]
+                result = await run_resume(decisions, user_id=user_id, session_id=session_id)
+        except Exception as e:  # noqa: BLE001
+            # Never raise: Langfuse drops raising items and pass_rate would only count the survivors.
+            return {"status": "error", "response": "", "error": f"{type(e).__name__}: {e}"}
         return result
 
     return task
@@ -92,7 +99,7 @@ async def run_local(items: list[dict], task) -> dict[str, float]:
         status = "PASS" if item_passed(evals) else "FAIL"
         print(f"[{status}] {it.get('id')}: " + ", ".join(f"{e.name}={e.value:.2f}" for e in evals))
     passed = sum(item_passed(e) for e in rows)
-    return {"pass_rate": passed / (len(rows) or 1)}
+    return {"pass_rate": passed / (len(items) or 1)}
 
 
 def main() -> int:
@@ -106,7 +113,12 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=4)
     args = ap.parse_args()
 
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValueError as e:  # e.g. LLM_API_KEY missing — not a quality regression
+        errors = getattr(e, "errors", None)
+        print(f"Config error: {errors()[0]['msg'] if callable(errors) else e}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
     tracing.init_tracing(settings)
     client = tracing.get_client()
     task = make_task(args.hitl)
@@ -115,13 +127,13 @@ def main() -> int:
     if client is None:
         if not args.data:
             print("No Langfuse key => --data JSONL is required", file=sys.stderr)
-            return 2
+            return EXIT_CONFIG_ERROR
         metrics = asyncio.run(run_local(load_jsonl(args.data), task))
     else:
         if args.push:
             if not (args.data and args.dataset):
                 print("--push requires --data and --dataset", file=sys.stderr)
-                return 2
+                return EXIT_CONFIG_ERROR
             client.create_dataset(name=args.dataset)
             for it in load_jsonl(args.data):
                 client.create_dataset_item(
@@ -141,16 +153,27 @@ def main() -> int:
             metadata={"model": settings.llm_model, "version": settings.agent_version},
         )
         if args.dataset:
-            result = client.get_dataset(args.dataset).run_experiment(**common)
+            dataset = client.get_dataset(args.dataset)
+            expected = len(dataset.items)
+            result = dataset.run_experiment(**common)
         else:
-            result = client.run_experiment(data=load_jsonl(args.data), **common)
+            data = load_jsonl(args.data)
+            expected = len(data)
+            result = client.run_experiment(data=data, **common)
         print(result.format())
         metrics = {e.name: float(e.value) for e in result.run_evaluations}
+        # Gate over the WHOLE dataset: an item without a result (dropped by Langfuse) counts as failed
+        done = len(result.item_results)
+        if done < expected:
+            print(
+                f"WARNING: {expected - done}/{expected} items produced no result", file=sys.stderr
+            )
+        metrics["pass_rate"] = count_passed(result.item_results) / (expected or 1)
         tracing.shutdown_tracing()
 
     rate = metrics.get("pass_rate", 0.0)
     print(f"pass_rate={rate:.2%} (min {args.min_pass_rate:.0%})")
-    return 0 if rate >= args.min_pass_rate else 1
+    return 0 if rate >= args.min_pass_rate else EXIT_GATE_FAILED
 
 
 if __name__ == "__main__":

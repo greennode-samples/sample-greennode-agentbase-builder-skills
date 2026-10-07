@@ -18,12 +18,12 @@ Three layers, one file each in `app/memory/` (assets of this skill):
 Call `/agentbase-memory` to create it (following that skill's HARD GATE). Suggested standard parameters, **user confirms**:
 
 - `name`: `<project>-memory`
-- `eventExpiryDuration`: 30 (days of conversation retention; per data policy)
+- `eventExpiryDuration`: 30 (days of conversation retention, allowed 1–365; per data policy). Name ≤ 50 chars `^[a-zA-Z0-9._-]*$`.
 - Strategy: `SEMANTIC` (general facts) and/or `USER_PREFERENCE`; `CUSTOM` + `customFactExtractionPrompt` when the business needs its own extraction.
 - `namespaceTemplate`: **`/strategies/{memoryStrategyId}/actors/{actorId}`** — MUST match `AgentBaseLTM.namespace()` in `long_term.py`.
 - `enableAutomaticMemoryRecordGeneration`: true (the platform extracts facts from events).
 
-Write into each environment's `.env`: `MEMORY_BACKEND=agentbase`, `MEMORY_ID=<id>`, `MEMORY_STRATEGY_ID=<strategy id>`; write `memory_id` into `.agentbase-state.json`.
+Write into each environment's `.env`: `MEMORY_BACKEND=agentbase`, `MEMORY_ID=<id>`, `MEMORY_STRATEGY_ID=<strategy id>` (the id returned by `GET /memories/{memoryId}/long-term-memory-strategies` — see [memory docs](https://docs.greennode.ai/ai-stack/agent-base/memory); the app **refuses to start** with `LTM_ENABLED=true` and `MEMORY_STRATEGY_ID` empty/`default`, because a wrong id makes recall silently return nothing); write `memory_id` into `.agentbase-state.json`.
 
 ## Step 2 — Short-term memory
 
@@ -50,6 +50,7 @@ Read `references/compression.md` to pick thresholds. Mechanism:
 1. Node `compress` (start of each turn): estimated tokens > `CONTEXT_MAX_TOKENS` ⇒ summarize old messages (except the last `CONTEXT_KEEP_LAST` messages) with `get_llm("summarize")` (summarize flow, small tier by default), merge into `state.summary`, remove old messages from the checkpoint via `RemoveMessage` ⇒ small checkpoint, fast Memory reads/writes.
 2. `fit_to_budget()` right before the LLM call: still above `CONTEXT_HARD_LIMIT_TOKENS` (e.g. huge tool output within the same turn) ⇒ `trim_messages(strategy="last", start_on="human")`, trace event `context.hard_trim` at WARNING.
 3. The cut point **never** separates an `AIMessage(tool_calls)` from its `ToolMessage` (`_safe_cut_index`, tested).
+4. If the old part is too big for the summarizer (`CONTEXT_HARD_LIMIT_TOKENS`), only the **oldest prefix that fits** is summarized and removed; the rest stays and is compressed on a later turn — messages are never deleted without being summarized (sweep test over message sizes).
 
 ## Checks
 
@@ -82,3 +83,8 @@ Measured 12 parallel conversations (24 turns) on real Memory: limit 8 → 14 ret
 - Putting the entire history into long-term memory.
 - Passing `user_id`/`namespace` from the client or from the LLM into tools.
 - Summarizing with the expensive main model when a secondary model is available.
+
+## Official docs
+
+- [memory](https://docs.greennode.ai/ai-stack/agent-base/memory) — memory stores, strategies (SEMANTIC / USER_PREFERENCE / CUSTOM), namespace template, LangGraph bridge, limits
+- [reference](https://docs.greennode.ai/ai-stack/agent-base/reference) — memory REST paths and pagination

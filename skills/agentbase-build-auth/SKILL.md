@@ -28,9 +28,15 @@ description: "Authentication standard for AI agents on GreenNode AgentBase: inbo
 
 Role-based access (RBAC): read `principal.claims` (e.g. `roles`, `groups`) in `service`/tools to reject early; per-tool permissions at the Gateway layer use a Policy Group (`/agentbase-policy`, principal `jwt:<sub>` or `principal.<claim>`).
 
-## AgentBase Runtime endpoint has NO auth (verified 2026-10)
+## AgentBase Runtime endpoint security
 
-`/health` and `POST /invocations` on `https://endpoint-<id>.agentbase-runtime.aiplatform.vngcloud.vn` accept requests **without a token** — requests go straight to the container. Anyone who knows the URL can use the agent's LLM key + MCP tools ⇒ the agent **must** authenticate itself (`jwt` or `api_key`); `Settings` blocks `AUTH_MODE=none` outside local. GreenNode IAM does not publish a JWKS (404) ⇒ IAM tokens cannot be used as inbound JWTs.
+The Runtime has **Security Settings** ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)): **IP Access Control** (allowed source CIDRs) and **Inbound Auth type** — `IAM Permissions` (GreenNode IAM token), `JSON Web Tokens` (Discovery URL or inline JWKS), or `No authorization` (public: anyone with the URL reaches the container — what we observed on runtimes created before this setting, 2026-10).
+
+- The agent **still authenticates itself** (`jwt`/`api_key`) whatever the Runtime setting — defense in depth, and `Settings` blocks `AUTH_MODE=none` outside local.
+- Runtime `JWT` with the same IdP as `AUTH_*` ⇒ bad tokens are rejected before the container (cheaper), and pattern **A. Direct** works.
+- Runtime `IAM Permissions` ⇒ a mobile/web app cannot call it directly ⇒ pattern **B. BFF**.
+- Add IP Access Control for server-to-server callers (BFF, other agents) when their egress IPs are fixed.
+- GreenNode IAM does not publish a JWKS (404) ⇒ IAM tokens cannot be used as the agent's inbound JWTs.
 
 ### `AUTH_MODE=api_key` (trusted callers: server, BFF, job, test)
 
@@ -45,7 +51,7 @@ Read `references/patterns.md`. Summary:
 - **A. Direct (default):** app → runtime endpoint with the user JWT in `Authorization`. Use when the endpoint does not require IAM in `Authorization`.
 - **B. BFF:** app → your BFF (verifies JWT) → runtime endpoint with an IAM token; the user JWT goes in a custom header (`AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token`). Use when the endpoint requires IAM, or you need your own rate-limiting/billing. **Never** embed IAM credentials in a mobile app.
 
-Verify with the platform how the runtime endpoint authenticates before choosing a pattern (try calling `<endpoint>/health` and `/invocations` without an IAM token).
+Choose the pattern from the Runtime's **Inbound Auth type** (above); verify by calling `<endpoint>/health` and `/invocations` without a token.
 
 ## Outbound — workflow
 
@@ -69,7 +75,7 @@ async def _read_calendar(*, access_token: str) -> dict: ...
 
 ## Per-user isolation (verified on runtime)
 
-- The only `user_id` source is `Principal` (JWT `sub` / api_key caller's header) ⇒ `validate_user_id()` (`^[A-Za-z0-9][A-Za-z0-9._@:+=-]{0,127}$`, `..` forbidden) prevents namespace injection since user_id is part of the memory path.
+- The only `user_id` source is `Principal` (JWT `sub` / api_key caller's header) ⇒ `validate_user_id()` (`^[A-Za-z0-9][A-Za-z0-9._@+=-]{0,127}$`, `..` forbidden) prevents namespace injection since user_id is part of the memory path.
 - Applies to: checkpointer (session, user), LTM namespace, HITL resume (different user ⇒ 409), feedback (`feedback_token` HMAC of user+trace ⇒ different user 403), A2A task store (owner = user), MCP server (`current_user()` from token), A2A client (passes user to the target agent).
 - `tests/test_isolation.py` — rerun whenever any data path changes.
 
@@ -85,3 +91,9 @@ async def _read_calendar(*, access_token: str) -> dict: ...
 - Logging/tracing tokens (already masked in tracing; do not `print` headers).
 - Hardcoding secrets or committing `.env`/`.greennode.json`.
 - Putting `GREENNODE_CLIENT_*` in deploy env files (the runtime injects them).
+
+## Official docs
+
+- [create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime) — Runtime Security Settings: Inbound Auth (IAM / JWT / None) and IP Access Control
+- [access-control](https://docs.greennode.ai/ai-stack/agent-base/access-control) — agent identities, API key / OAuth2 providers, 3LO `allowedReturnUrls`, `requires_api_key` / `requires_access_token`
+- [manage-service-accounts](https://docs.greennode.ai/ai-stack/agent-base/team-permissions/manage-service-accounts) — auto-created runtime service account, client secret shown once

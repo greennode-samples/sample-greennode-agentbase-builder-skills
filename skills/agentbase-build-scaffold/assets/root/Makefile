@@ -3,6 +3,7 @@ BACKEND := src/backend
 FRONTEND := src/frontend
 IMAGE ?= __PROJECT_NAME__
 TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+ENV_FILE ?= $(BACKEND)/.env
 
 .PHONY: setup check-creds dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev invoke
 
@@ -37,8 +38,8 @@ lock:             ## Update uv.lock after changing dependencies
 docker-build:     ## Build a linux/amd64 image for AgentBase Runtime
 	docker build --platform linux/amd64 -t $(IMAGE):$(TAG) $(BACKEND)
 
-docker-run:       ## Run the image locally with .env
-	docker run --rm -p 8080:8080 --env-file $(BACKEND)/.env $(IMAGE):$(TAG)
+docker-run:       ## Run the image locally: make docker-run ENV_FILE=src/backend/.env.prod (default .env)
+	docker run --rm -p 8080:8080 --env-file $(ENV_FILE) $(IMAGE):$(TAG)
 
 invoke:           ## Try the local agent: make invoke MSG="hello"
 	curl -s -X POST http://127.0.0.1:8080/invocations \

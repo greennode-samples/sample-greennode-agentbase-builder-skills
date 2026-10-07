@@ -167,8 +167,11 @@ class Settings(BaseSettings):
 
     @staticmethod
     def on_runtime() -> bool:
-        """True on AgentBase Runtime: these variables are injected by the platform, never set locally."""
-        return bool(os.getenv("GREENNODE_AGENT_IDENTITY") or os.getenv("GREENNODE_ENDPOINT_URL"))
+        """True on AgentBase Runtime: the platform injects GREENNODE_AGENT_IDENTITY (+ client id/secret), and the
+        image has no .greennode.json (.dockerignore). Locally the IAM pair lives in .greennode.json, so a developer
+        who also exports GREENNODE_AGENT_IDENTITY is NOT mistaken for the Runtime."""
+        injected = os.getenv("GREENNODE_AGENT_IDENTITY") or os.getenv("GREENNODE_ENDPOINT_URL")
+        return bool(injected) and not Path(".greennode.json").is_file()
 
     @property
     def signing_key(self) -> bytes:
@@ -187,8 +190,8 @@ class Settings(BaseSettings):
         # inherit local relaxations (AUTH_MODE=none ⇒ anyone can impersonate any user via the User-Id header).
         if self.is_local and self.on_runtime():
             raise ValueError(
-                "APP_ENV=local is not allowed on AgentBase Runtime (GREENNODE_AGENT_IDENTITY/"
-                "GREENNODE_ENDPOINT_URL are set). Set APP_ENV=dev|staging|prod in the deploy env file."
+                "APP_ENV=local is not allowed on AgentBase Runtime (GREENNODE_AGENT_IDENTITY is injected and "
+                "there is no .greennode.json). Set APP_ENV=dev|staging|prod in the deploy env file."
             )
         if not self.llm_model or not self.llm_api_key:
             raise ValueError(
@@ -197,6 +200,16 @@ class Settings(BaseSettings):
         if self.memory_backend == "agentbase" and not self.memory_id:
             raise ValueError(
                 "MEMORY_BACKEND=agentbase requires MEMORY_ID (create it with /agentbase-memory)."
+            )
+        if (
+            self.ltm_enabled
+            and self.memory_backend == "agentbase"
+            and self.memory_strategy_id in ("", "default")
+        ):
+            raise ValueError(
+                "LTM_ENABLED with MEMORY_BACKEND=agentbase requires MEMORY_STRATEGY_ID = the strategy id of the "
+                "memory store (see /agentbase-memory). The namespace is /strategies/<id>/actors/<user>, so a wrong "
+                "id makes long-term recall silently return nothing."
             )
         if self.memory_backend == "inmemory" and not self.is_local and self.app_env != "dev":
             raise ValueError("MEMORY_BACKEND=inmemory is only allowed with APP_ENV=local|dev.")

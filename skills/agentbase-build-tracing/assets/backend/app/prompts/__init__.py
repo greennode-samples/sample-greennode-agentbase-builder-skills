@@ -1,7 +1,7 @@
 """System prompt — Langfuse Prompt Management first, local file as fallback.
 
 - LANGFUSE_PROMPT_NAME empty => use prompts/system.md.
-- Name set => fetch the prompt by label (LANGFUSE_PROMPT_LABEL, default = APP_ENV or "production"),
+- Name set => fetch the prompt by label (LANGFUSE_PROMPT_LABEL, default "production"),
   SDK caches by TTL; connection lost => local file fallback. The prompt client is attached to the generation
   so Langfuse reports latency/cost/score per prompt version.
 """

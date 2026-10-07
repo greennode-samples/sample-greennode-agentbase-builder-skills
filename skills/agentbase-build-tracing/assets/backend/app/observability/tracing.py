@@ -30,6 +30,7 @@ LANGFUSE_SAMPLE_RATE, LANGFUSE_TRACING_ENABLED, LANGFUSE_DEBUG. Missing keys => 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import re
 import time
@@ -41,25 +42,35 @@ from app.config import Settings
 log = logging.getLogger(__name__)
 
 _client: Any = None
-_SECRET_KEYS = {
+# Secret KEYS: the key name (normalized: lower, "-"/" " → "_") is split on "_"; it is secret if a part is one of
+# _SECRET_PARTS or it contains one of _SECRET_SUBSTRINGS. Matches x_api_key, refresh_token, id_token, set_cookie,
+# langfuse_secret_key, x_greennode_agentbase_custom_api_key… but NOT max_tokens / prompt_tokens (usage numbers).
+_SECRET_PARTS = {
     "authorization",
-    "api_key",
-    "apikey",
     "token",
-    "access_token",
-    "password",
-    "client_secret",
     "secret",
-    "llm_api_key",
+    "password",
+    "passwd",
+    "cookie",
+    "credential",
+    "credentials",
 }
-_BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE)
-_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
-# Default PII (TRACE_MASK_PII): email, VN phone (+84/0 + 9 digits), CCCD 12 digits / CMND 9 digits. Extend per project.
-_PII_RES = (
-    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "***EMAIL***"),
-    (re.compile(r"(?<!\d)(?:\+?84|0)(?:[\s.-]?\d){9}(?!\d)"), "***PHONE***"),
-    (re.compile(r"(?<!\d)(?:\d{12}|\d{9})(?!\d)"), "***ID***"),
+_SECRET_SUBSTRINGS = ("api_key", "apikey", "private_key", "secret_key", "access_key")
+_NOT_SECRET_LAST_PARTS = {"usage", "type", "use", "count", "limit", "expires", "expiry", "ttl"}
+# Credential after Bearer/Basic: ≥ 8 chars with a digit/token symbol or a lower→UPPER switch inside the word
+# (base64 like "dXNlcjpw…") — so prose like "basic idea", "Basic plan", "Basic Information" is left alone.
+_BEARER_RE = re.compile(  # case-insensitive keyword only: the lower→UPPER check below must stay case-sensitive
+    r"\b((?i:bearer|basic))(\s+)(?=[A-Za-z0-9._~+/-]*(?:[0-9+/=._~-]|[a-z][A-Z]))[A-Za-z0-9\-._~+/]{8,}=*"
 )
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+_API_KEY_RE = re.compile(r"\b(?:sk|vn|rk)-[A-Za-z0-9_-]{20,}")  # OpenAI-style / GreenNode MaaS keys
+# Default PII (TRACE_MASK_PII): email, VN phone (+84/0 + 9 digits), card numbers (Luhn), CCCD 12 digits, and
+# CMND 9 digits ONLY after an ID keyword (a bare 9-digit number is usually an amount). Extend per project.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)(?:[\s.-]?\d){9}(?!\d)")
+_CARD_RE = re.compile(r"(?<!\d)\d(?:[ -]?\d){14,18}(?!\d)")
+_CCCD_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+_CMND_RE = re.compile(r"(?i)\b(cmnd|cccd|cmt|chứng minh|căn cước|id)(\D{0,12})(?<!\d)\d{9}(?!\d)")
 _mask_pii = True
 
 
@@ -90,21 +101,59 @@ def get_client() -> Any:
     return _client
 
 
+def _is_secret_key(key: Any) -> bool:
+    # camelCase → snake (accessToken → access_token), then "-"/" " → "_"
+    k = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key))
+    k = re.sub(r"[-\s]+", "_", k.lower())
+    parts = k.split("_")
+    if parts[-1] in _NOT_SECRET_LAST_PARTS:  # token_usage, credential_type, token_use… are metadata
+        return False
+    return any(p in _SECRET_PARTS for p in parts) or any(x in k for x in _SECRET_SUBSTRINGS)
+
+
+def _luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch) * (2 if i % 2 else 1)
+        total += d - 9 if d > 9 else d
+    return total % 10 == 0
+
+
+def _mask_card(m: re.Match) -> str:
+    digits = re.sub(r"\D", "", m.group(0))
+    # 15–19 digits (Amex 15, Visa/MC 16…): excludes 13-digit epoch-ms timestamps that happen to pass Luhn
+    return "***CARD***" if 15 <= len(digits) <= 19 and _luhn_ok(digits) else m.group(0)
+
+
+def _mask_text(text: str) -> str:
+    out = _BEARER_RE.sub(r"\1\2***", text)
+    out = _API_KEY_RE.sub("***KEY***", _JWT_RE.sub("***JWT***", out))
+    if _mask_pii:
+        out = _EMAIL_RE.sub("***EMAIL***", out)
+        out = _CARD_RE.sub(_mask_card, out)  # before phone/ID: a card contains shorter digit runs
+        out = _PHONE_RE.sub("***PHONE***", out)
+        out = _CCCD_RE.sub("***ID***", out)
+        out = _CMND_RE.sub(r"\1\2***ID***", out)
+    return out
+
+
 def _mask(*, data: Any, **_: Any) -> Any:
-    """Mask secrets before they leave the process. Extend (PII: email, phone, CCCD...) per project."""
+    """Mask secrets (always) and PII (TRACE_MASK_PII) before anything leaves the process."""
     if isinstance(data, dict):
-        return {
-            k: ("***" if str(k).lower() in _SECRET_KEYS else _mask(data=v)) for k, v in data.items()
-        }
+        return {k: ("***" if _is_secret_key(k) else _mask(data=v)) for k, v in data.items()}
     if isinstance(data, list | tuple):
         return [_mask(data=v) for v in data]
     if isinstance(data, str):
-        out = _JWT_RE.sub("***JWT***", _BEARER_RE.sub(r"\1***", data))
-        if _mask_pii:
-            for rx, rep in _PII_RES:
-                out = rx.sub(rep, out)
-        return out
+        return _mask_text(data)
     return data
+
+
+def trace_user_id(user_id: str) -> str:
+    """user_id as shown in Langfuse. Trace attributes (user_id/metadata) are NOT passed through `mask`, so an
+    email-shaped id (AUTH_USER_CLAIM=email) is replaced by a stable hash when PII masking is on."""
+    if _mask_pii and _EMAIL_RE.fullmatch(user_id):
+        return "u-" + hashlib.sha256(user_id.encode()).hexdigest()[:16]
+    return user_id
 
 
 # --------------------------------------------------------------------------- LangChain bridge
@@ -138,7 +187,7 @@ def trace_request(
         name="agent.invoke", as_type="agent", input=input, metadata=metadata
     ) as root:
         with propagate_attributes(
-            user_id=user_id,
+            user_id=trace_user_id(user_id),
             session_id=session_id,
             tags=[settings.agent_name, settings.app_env, *(tags or [])],
             version=settings.agent_version,

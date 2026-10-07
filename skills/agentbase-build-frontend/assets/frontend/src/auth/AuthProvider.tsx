@@ -3,7 +3,7 @@
 import * as AuthSession from 'expo-auth-session';
 import * as SecureStore from 'expo-secure-store';
 import * as WebBrowser from 'expo-web-browser';
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 
 import { env } from '../config/env';
@@ -102,6 +102,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await store.set(null);
   }, []);
 
+  const refreshing = useRef<Promise<string | null> | null>(null);
+
   const getAccessToken = useCallback(async () => {
     if (env.authMode === 'none') return null;
     if (!tokens) return null;
@@ -110,16 +112,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await signOut();
       return null;
     }
-    try {
-      const r = await AuthSession.refreshAsync(
-        { clientId: env.oidc.clientId, refreshToken: tokens.refreshToken },
-        discovery,
-      );
-      return (await save(r)).accessToken;
-    } catch {
-      await signOut();
-      return null;
+    // Single-flight: concurrent callers share ONE refresh. Two refreshes with the same refresh token fail under
+    // refresh-token rotation and would sign the user out.
+    if (!refreshing.current) {
+      const refreshToken = tokens.refreshToken;
+      refreshing.current = (async () => {
+        try {
+          const r = await AuthSession.refreshAsync(
+            { clientId: env.oidc.clientId, refreshToken },
+            discovery,
+          );
+          return (await save(r)).accessToken;
+        } catch {
+          await signOut();
+          return null;
+        } finally {
+          refreshing.current = null;
+        }
+      })();
     }
+    return refreshing.current;
   }, [tokens, discovery, save, signOut]);
 
   const value = useMemo<AuthState>(

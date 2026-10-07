@@ -80,15 +80,19 @@ async def llm_judge_correctness(*, input, output, expected_output=None, **_) -> 
     if not expected_output:
         return None
     question = input.get("message") if isinstance(input, dict) else str(input)
-    result = await get_llm("eval_judge").ainvoke(
-        [
-            SystemMessage(JUDGE),
-            HumanMessage(
-                f"QUESTION: {question}\nEXPECTED: {expected_output}\nANSWER: {_answer(output)}"
-            ),
-        ],
-        config={"run_name": "eval.judge", "tags": ["evaluation"]},
-    )
+    try:
+        result = await get_llm("eval_judge").ainvoke(
+            [
+                SystemMessage(JUDGE),
+                HumanMessage(
+                    f"QUESTION: {question}\nEXPECTED: {expected_output}\nANSWER: {_answer(output)}"
+                ),
+            ],
+            config={"run_name": "eval.judge", "tags": ["evaluation"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        # A raising evaluator is DROPPED by Langfuse ⇒ the item would pass on the other scores alone.
+        return Evaluation(name="correctness", value=0.0, comment=f"judge error: {type(e).__name__}")
     match = re.search(r"\{.*\}", str(result.content), re.S)
     try:
         data = json.loads(match.group(0)) if match else {}
@@ -113,8 +117,14 @@ def item_passed(evaluations: list[Evaluation]) -> bool:
     return bool(nums) and min(nums) >= PASS_THRESHOLD
 
 
+def count_passed(item_results) -> int:
+    return sum(item_passed([e for e in r.evaluations if e]) for r in item_results)
+
+
 def pass_rate(*, item_results, **_) -> Evaluation:
-    passed = sum(item_passed([e for e in r.evaluations if e]) for r in item_results)
+    """Over the items that produced a result. The CI gate (run_eval.main) divides by the DATASET size
+    instead, because Langfuse drops items whose task raised."""
+    passed = count_passed(item_results)
     total = len(item_results) or 1
     return Evaluation(
         name="pass_rate", value=passed / total, comment=f"{passed}/{total} items passed"

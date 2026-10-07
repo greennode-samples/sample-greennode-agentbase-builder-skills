@@ -84,6 +84,9 @@ def test_auth_none_forbidden_outside_local(monkeypatch):
     monkeypatch.setenv("APP_ENV", "prod")
     monkeypatch.setenv("MEMORY_BACKEND", "agentbase")
     monkeypatch.setenv("MEMORY_ID", "m")
+    monkeypatch.setenv(
+        "MEMORY_STRATEGY_ID", "strat-1"
+    )  # valid memory config: isolate the auth check
     get_settings.cache_clear()
     with pytest.raises(ValueError, match="AUTH_MODE=none"):
         get_settings()
@@ -164,3 +167,48 @@ def test_placeholder_dropped_when_real_tool_message_exists():
     assert drop_placeholder_tool_messages([ph]) == [
         ph
     ]  # no real one yet => keep it (avoids an orphan tool_call)
+
+
+def _streaming_models():
+    import httpx
+    import openai
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+
+    class _DiesMidStream(GenericFakeChatModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            for t in ["Xin ", "chào ", "anh"]:
+                chunk = ChatGenerationChunk(message=AIMessageChunk(content=t))
+                if run_manager:
+                    await run_manager.on_llm_new_token(t, chunk=chunk)
+                yield chunk
+            raise openai.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
+
+    return _DiesMidStream(messages=iter([])), GenericFakeChatModel, openai.APIConnectionError
+
+
+async def test_fallback_mid_stream_sends_reset_before_new_answer(monkeypatch):
+    """Primary dies after streaming tokens ⇒ fallback answers ⇒ client must get `reset` first, never
+    'Xin chào anhHello there' glued together."""
+    primary, Fake, conn_error = _streaming_models()
+    backup = Fake(messages=iter([AIMessage("Hello there")]))
+    llm = primary.with_fallbacks([backup], exceptions_to_handle=(conn_error,))
+    monkeypatch.setattr("app.graph.builder.get_llm", lambda task="agent", tools=None: llm)
+    gen = await service.handle({"message": "hi", "stream": True}, ctx(session="s-fallback"))
+    events = [e async for e in gen]
+    kinds = [e["event"] for e in events]
+    assert kinds.count("reset") == 1
+    after = events[kinds.index("reset") + 1 :]
+    assert "".join(e["data"] for e in after if e["event"] == "token") == "Hello there"
+    assert events[-1]["event"] == "done" and events[-1]["response"] == "Hello there"
+
+
+async def test_normal_stream_has_no_reset(monkeypatch):
+    _, Fake, _ = _streaming_models()
+    model = Fake(messages=iter([AIMessage("Hello there friend")]))
+    monkeypatch.setattr("app.graph.builder.get_llm", lambda task="agent", tools=None: model)
+    gen = await service.handle({"message": "hi", "stream": True}, ctx(session="s-plain"))
+    events = [e async for e in gen]
+    assert "reset" not in [e["event"] for e in events]
+    assert "".join(e["data"] for e in events if e["event"] == "token") == "Hello there friend"

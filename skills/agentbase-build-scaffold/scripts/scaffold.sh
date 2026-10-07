@@ -20,8 +20,12 @@ SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKEND_SKILLS=(agentbase-build-scaffold agentbase-build-llm agentbase-build-memory agentbase-build-tracing
   agentbase-build-mcp agentbase-build-auth agentbase-build-hitl agentbase-build-eval agentbase-build-a2a)
 
-NAME="${1:-}"; TARGET="${2:-}"
-[[ $# -ge 2 ]] && shift 2
+USAGE="Usage: scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]"
+if [[ $# -lt 2 ]]; then
+  echo "$USAGE" >&2; exit 2
+fi
+NAME="$1"; TARGET="$2"
+shift 2
 WITH_FE=0; SYNC=1
 for a in "$@"; do
   case "$a" in
@@ -32,7 +36,7 @@ for a in "$@"; do
 done
 
 if [[ -z "$NAME" || -z "$TARGET" ]]; then
-  echo "Usage: scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]" >&2; exit 2
+  echo "$USAGE" >&2; exit 2
 fi
 if [[ ! "$NAME" =~ ^[a-z][a-z0-9-]{2,39}$ ]]; then
   echo "project-name must match ^[a-z][a-z0-9-]{2,39}$ (lowercase, hyphen)" >&2; exit 2
@@ -43,6 +47,10 @@ fi
 for s in "${BACKEND_SKILLS[@]}"; do
   [[ -d "$SKILLS_DIR/$s/assets/backend" ]] || { echo "Missing skill $s in $SKILLS_DIR" >&2; exit 1; }
 done
+# Check prerequisites BEFORE writing anything (a failure later would leave a half-built project that a re-run refuses)
+if [[ $SYNC -eq 1 ]]; then
+  command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/ (or pass --no-sync)" >&2; exit 1; }
+fi
 
 mkdir -p "$TARGET/src/backend"
 for s in "${BACKEND_SKILLS[@]}"; do
@@ -50,7 +58,12 @@ for s in "${BACKEND_SKILLS[@]}"; do
 done
 
 ROOT_TPL="$SKILLS_DIR/agentbase-build-scaffold/assets/root"
-cp "$ROOT_TPL/Makefile" "$TARGET/Makefile"
+if [[ -f "$TARGET/Makefile" ]] && ! cmp -s "$ROOT_TPL/Makefile" "$TARGET/Makefile"; then
+  cp "$ROOT_TPL/Makefile" "$TARGET/Makefile.agentbase"
+  echo "⚠ $TARGET/Makefile already exists — kept it; the standard targets are in Makefile.agentbase (merge them)." >&2
+else
+  cp "$ROOT_TPL/Makefile" "$TARGET/Makefile"
+fi
 [[ -f "$TARGET/README.md" ]] || cp "$ROOT_TPL/README.md" "$TARGET/README.md"
 [[ -f "$TARGET/.gitignore" ]] || cp "$ROOT_TPL/gitignore" "$TARGET/.gitignore"
 [[ -f "$TARGET/.agentbase-state.json" ]] || cp "$ROOT_TPL/agentbase-state.json" "$TARGET/.agentbase-state.json"
@@ -62,7 +75,7 @@ fi
 
 # Thay placeholder
 find "$TARGET" -type f \( -name '*.py' -o -name '*.md' -o -name '*.toml' -o -name '*.json' \
-  -o -name '*.ts' -o -name '*.tsx' -o -name '*.example' -o -name 'Makefile' -o -name 'Dockerfile' \) \
+  -o -name '*.ts' -o -name '*.tsx' -o -name '*.example' -o -name 'Makefile' -o -name 'Makefile.agentbase' -o -name 'Dockerfile' \) \
   -not -path '*/node_modules/*' -not -path '*/.venv/*' -print0 |
   while IFS= read -r -d '' f; do
     sed -i.bak "s/__PROJECT_NAME__/$NAME/g" "$f" && rm -f "$f.bak"
@@ -71,9 +84,12 @@ find "$TARGET" -type f \( -name '*.py' -o -name '*.md' -o -name '*.toml' -o -nam
 [[ -f "$TARGET/src/backend/.env" ]] || cp "$TARGET/src/backend/.env.example" "$TARGET/src/backend/.env"
 
 if [[ $SYNC -eq 1 ]]; then
-  command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/" >&2; exit 1; }
   (cd "$TARGET/src/backend" && uv sync && uv run pytest -q -p no:warnings)
 fi
 
 echo "✔ Scaffolded '$NAME' at $TARGET"
-echo "  Next: fill in src/backend/.env (LLM_API_KEY, LLM_MODEL, MEMORY_ID...) → make dev → make invoke"
+if [[ $SYNC -eq 0 ]]; then
+  echo "  ⚠ --no-sync: no uv.lock yet — run 'cd src/backend && uv lock && uv sync' before make test / docker-build."
+fi
+echo "  Next: YOU fill in src/backend/.env (LLM_API_KEY, LLM_MODEL…) and src/backend/.greennode.json"
+echo "        (copy .greennode.json.example) — never paste secrets into a chat — then: make check-creds → make dev"

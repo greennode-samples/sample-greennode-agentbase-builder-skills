@@ -117,7 +117,7 @@ def build_graph(
     builder.add_node("compress", compress)
     builder.add_node("recall", recall)
     builder.add_node("agent", agent)
-    builder.add_node("approval", build_approval_node(settings))
+    builder.add_node("approval", build_approval_node(settings, tools))
     builder.add_node("tools", build_tools_node(tools))
     builder.add_node("reflect", build_reflect_node(settings))
 

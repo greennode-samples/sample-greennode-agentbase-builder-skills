@@ -95,3 +95,9 @@ Read `references/oauth.md` — 2LO / 3LO / inbound forward flows, registering th
 - `tests/test_auth.py`: public health · 401 + `WWW-Authenticate resource_metadata` · wrong key · API key has no user identity · missing scope · invalid JWT (wrong audience / issuer / expired) · protected resource metadata · settings defaults (`local`/`none`, refused elsewhere) · **local quickstart** (`.env.example` + `python server.py` + `scripts/call_tool.py` as a real process).
 - `tests/test_tools.py`: per-user isolation · idempotent write · pagination · can't delete another user's note · internal system OK / 404 / timeout / 500 without leaking details (fake backend via `httpx.MockTransport`) · input validation · scope · annotations & output schema.
 - Tests run in a temp dir (own SQLite file, no developer `.env`). Fixtures are documented at the top of `tests/conftest.py`.
+
+## Official docs
+
+- [connect-a-connector](https://docs.greennode.ai/ai-stack/agent-base/mcp-connectors/connect-a-connector) — adding a Custom Connector and its outbound auth (what your server receives)
+- [runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference) — runtime contract when deploying the MCP server
+- [private-networking](https://docs.greennode.ai/ai-stack/agent-base/private-networking) — reaching internal systems / private MCP servers

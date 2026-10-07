@@ -71,6 +71,7 @@ export function ChatScreen() {
           finish(replyId, await invoke(body, ctx));
           return true;
         }
+        let ended = false; // done / interrupt / error received
         await invokeStream(body, ctx, (e) => {
           switch (e.event) {
             case 'token':
@@ -84,15 +85,26 @@ export function ChatScreen() {
               break;
             case 'interrupt':
             case 'done':
+              ended = true;
               finish(replyId, e as unknown as ChatResult);
               break;
             case 'error':
+              ended = true;
               ok = false;
               if (e.status === 401) void signOut();
               patch(replyId, (m) => ({ ...m, text: `⚠️ ${e.message}`, pending: false }));
               break;
           }
         });
+        if (!ended) {
+          // Stream closed without a final event (network drop, proxy timeout) — never leave the bubble pending
+          ok = false;
+          patch(replyId, (m) => ({
+            ...m,
+            text: `${m.text}\n⚠️ Connection closed before the answer completed.`,
+            pending: false,
+          }));
+        }
       } catch (err) {
         ok = false;
         if (err instanceof AgentError && err.status === 401) await signOut();

@@ -17,7 +17,7 @@ AgentBase has **no** dedicated A2A gateway/registry (docs 2026-10) ⇒ A2A runs 
 
 ## A2A server (this agent is called)
 
-Enable: `A2A_ENABLED=true`, `A2A_PUBLIC_URL` (empty ⇒ runtime-injected `GREENNODE_ENDPOINT_URL`), `A2A_DESCRIPTION`, `A2A_SKILLS` (JSON list `{id,name,description,tags,examples}` — written per the Agent Spec).
+Enable: `A2A_ENABLED=true`, `A2A_PUBLIC_URL` (**set it explicitly** to the runtime endpoint; the empty fallback `GREENNODE_ENDPOINT_URL` is not in the official list of injected variables, so it may be absent ⇒ the Agent Card would advertise localhost), `A2A_DESCRIPTION`, `A2A_SKILLS` (JSON list `{id,name,description,tags,examples}` — written per the Agent Spec).
 
 | Route | Auth | Notes |
 |---|---|---|
@@ -35,7 +35,7 @@ Standard mapping (verified by tests):
 | answer | artifact `response` + `TASK_STATE_COMPLETED` |
 | auth/validation error | `TASK_STATE_FAILED` |
 
-Note: the executor must **enqueue the Task before** any status update (A2A v1 — otherwise `InvalidAgentResponseError`). The default task store is `InMemoryTaskStore` (lost on restart, not shared across replicas) ⇒ multi-replica prod uses a2a-sdk's `DatabaseTaskStore` (Postgres) — conversation history stays durable in AgentBase Memory.
+Note: the executor must **enqueue the Task before** any status update (A2A v1 — otherwise `InvalidAgentResponseError`). The default task store is `InMemoryTaskStore` (lost on restart, not shared across replicas, and it **never evicts** — every message without a taskId adds a task, so memory grows for the container's lifetime; fine for demos only) ⇒ multi-replica prod uses a2a-sdk's `DatabaseTaskStore` (Postgres) — conversation history stays durable in AgentBase Memory.
 
 ## A2A client (this agent calls other agents)
 
@@ -48,7 +48,8 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 
 - Each agent ⇒ tool `ask_<name>(message)` (already included in `collect_tools`, trace `tools.collect.output.a2a`).
 - **Per-user isolation across agents**: the tool takes `actor_id`/`thread_id` from `RunnableConfig` (not from the LLM) ⇒ sends `X-GreenNode-AgentBase-User-Id` + `contextId=session` ⇒ the target agent keeps memory for the correct user (tested by `test_client_tool_propagates_user`).
-- `auth`: `api_key` (target agent built from this template) · `user_jwt` (forward the end-user JWT, same IdP) · `none` (local).
+- `auth`: `api_key` (target agent built from this template) · `user_jwt` (forward the end-user JWT, same IdP) · `none` (local). Outside `APP_ENV=local` the `url` must be `https://` (entries with http are skipped with an error log).
+- `user_jwt` replays the user's token at the target, so the target must accept this agent's `AUTH_AUDIENCE`. Only use it for agents you trust with that token; otherwise use `api_key` (identity still propagates via `X-GreenNode-AgentBase-User-Id`).
 - Target agent returns `INPUT_REQUIRED` ⇒ the tool returns `[<agent> needs confirmation] ...` so the current agent asks the user.
 - **Only a human may confirm another agent's action.** `ask_<agent>` refuses to relay a decision (`approve`, `yes`, `đồng ý`, `reject: …`) unless `ask_<agent>` is in `HITL_TOOLS` — then the user approves that exact call in the approval card. ⇒ For target agents that take actions, **add `ask_<agent>` to `HITL_TOOLS`** (otherwise their confirmations cannot be completed). Tested by `test_llm_cannot_relay_decision_without_hitl`.
 - Trace: span `a2a.call` {agent, url, message, state, text}.
@@ -66,3 +67,8 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 - Streaming (`capabilities.streaming=false`) and push notifications not enabled yet.
 - No platform registry/discovery ⇒ the agent list is managed in `a2a_agents.json`.
 - api_key mode trusts the caller's User-Id header ⇒ only issue keys to trusted agents/systems; public agents use JWT.
+
+## Official docs
+
+- [runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference) — endpoints and injected env vars (set `A2A_PUBLIC_URL` explicitly)
+- [create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime) — Inbound Auth / IP Access Control for agent-to-agent callers

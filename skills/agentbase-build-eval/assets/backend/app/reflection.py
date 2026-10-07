@@ -3,10 +3,10 @@
     agent (final answer) -> reflect --pass--> END
                               └--fail & retries left--> agent (with critique) -> reflect ...
 
-- The judge uses a summary/cheap model and returns JSON {"pass": bool, "score": 0..1, "critique": "..."}.
+- The judge uses the `judge` task (default tier: large) and returns JSON {"pass": bool, "score": 0..1, "critique": "..."}.
 - A rejected answer is REMOVED from history (RemoveMessage) so it doesn't pollute short-term memory.
 - Each judgment writes a `self_eval` score to the Langfuse trace => see the online quality distribution.
-- Costs 1 extra LLM call per turn (+1 per retry): enable only for use cases that need high accuracy.
+- Costs 1 extra LLM call per turn (+2 per retry: agent + judge): enable only for use cases that need high accuracy.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from app.observability import tracing
 JUDGE_PROMPT = """You are a judge of the quality of an AI agent's answers.
 Criteria: {criteria}
 Return JSON only: {{"pass": true|false, "score": <0..1>, "critique": "<short feedback for fixing it>"}}"""
+DEFAULT_CRITIQUE = "The answer did not meet the criteria. Make it accurate, complete and on point."
 
 
 def _as_bool(v, default: bool) -> bool:
@@ -87,9 +88,12 @@ def build_reflect_node(settings: Settings):
         tracing.score_trace("self_eval", verdict["score"], comment=verdict["critique"])
         if verdict["pass"] or rounds >= settings.reflection_max_retries:
             return {"critique": "", "reflection_round": 0}
+        # The answer is removed below, so a retry MUST follow: routing keys on a non-empty critique, and a
+        # judge that says "fail" without one would otherwise end the turn with an empty reply.
+        critique = verdict["critique"] or DEFAULT_CRITIQUE
         return {
             "messages": [RemoveMessage(id=answer.id)],
-            "critique": verdict["critique"],
+            "critique": critique,
             "reflection_round": rounds + 1,
         }
 

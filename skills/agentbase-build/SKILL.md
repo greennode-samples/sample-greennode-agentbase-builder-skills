@@ -124,3 +124,13 @@ For an existing project: compare against the standard structure + run `reference
 - `references/checklist.md` — Definition of Done / review checklist.
 - `references/security.md` — attack surface, prompt injection, personal data.
 - `references/platform-coverage.md` — per-feature AgentBase ↔ skill mapping, platform bugs encountered, open items.
+
+## Official docs
+
+- [agent-base](https://docs.greennode.ai/ai-stack/agent-base) — AgentBase overview and modules
+- [getting-started](https://docs.greennode.ai/ai-stack/agent-base/getting-started) — service account (AgentBaseFullAccess, vcrFullAccess, AiPlatformFullAccess), IAM token, `.greennode.json`
+- [reference](https://docs.greennode.ai/ai-stack/agent-base/reference) — every REST path, pagination rules, env vars, SDK imports, platform limits
+- [faq](https://docs.greennode.ai/ai-stack/agent-base/faq) — troubleshooting and resource teardown order
+- [runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference) — runtime contract: port 8080, `/health`, injected env vars, headers
+
+Tip for coding agents: append `.md` to any docs URL for clean Markdown, and use https://docs.greennode.ai/llms.txt as the index of every page. When a skill and the docs disagree, trust the docs for platform behavior and flag the difference to the user.

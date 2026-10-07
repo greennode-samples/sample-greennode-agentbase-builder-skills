@@ -117,15 +117,23 @@ def test_api_key_mode_requires_hashes(monkeypatch):
 
 
 # --- APP_ENV must never default to local on the Runtime (local allows AUTH_MODE=none ⇒ User-Id spoofing)
-@pytest.mark.parametrize("var", ["GREENNODE_AGENT_IDENTITY", "GREENNODE_ENDPOINT_URL"])
-def test_local_app_env_refused_on_runtime(monkeypatch, var):
-    monkeypatch.delenv(
-        "APP_ENV", raising=False
-    )  # deploy env file that forgot APP_ENV ⇒ default "local"
-    monkeypatch.setenv(var, "injected-by-runtime")
+def test_local_app_env_refused_on_runtime(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # Runtime image: no .greennode.json
+    # Deploy env file that forgot APP_ENV ⇒ default "local"
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("GREENNODE_AGENT_IDENTITY", "injected-by-runtime")
     get_settings.cache_clear()
     with pytest.raises(ValueError, match="APP_ENV=local is not allowed on AgentBase Runtime"):
         get_settings()
+
+
+def test_local_dev_with_identity_env_still_allowed(monkeypatch, tmp_path):
+    """A developer may export GREENNODE_AGENT_IDENTITY locally (Identity decorators); .greennode.json marks local."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".greennode.json").write_text('{"client_id": "c", "client_secret": "s"}')
+    monkeypatch.setenv("GREENNODE_AGENT_IDENTITY", "my-agent")
+    get_settings.cache_clear()
+    assert get_settings().is_local
 
 
 # --- No-audience IdPs (e.g. Cognito access tokens): the client allowlist replaces `aud`
@@ -164,6 +172,7 @@ def test_no_audience_outside_local_requires_client_allowlist(monkeypatch):
         "AUTH_ALLOW_NO_AUDIENCE": "true",
         "MEMORY_BACKEND": "agentbase",
         "MEMORY_ID": "mem-1",
+        "MEMORY_STRATEGY_ID": "strat-1",  # valid memory config: isolate the auth check
     }.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("AUTH_AUDIENCE", raising=False)
