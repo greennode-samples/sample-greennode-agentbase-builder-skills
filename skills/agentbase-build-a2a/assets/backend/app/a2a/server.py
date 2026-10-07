@@ -41,13 +41,13 @@ from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Mount
 
+from app.a2a.decisions import parse_decision
 from app.auth.inbound import authenticate_async, validate_session_id
 from app.config import Settings, get_settings
 
 log = logging.getLogger(__name__)
 
 RPC_PATH = "/a2a"
-APPROVE_WORDS = {"approve", "approved", "yes", "ok", "đồng ý", "duyệt"}
 
 
 # --------------------------------------------------------------------------- auth
@@ -73,17 +73,6 @@ def _auth_error(_conn: HTTPConnection, exc: Exception) -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- executor
-def _decision_of(text: str) -> tuple[bool, str] | None:
-    """'approve' / 'reject: reason' ⇒ (approve?, reason); anything else ⇒ None (normal chat)."""
-    t = text.strip()
-    if t.lower() in APPROVE_WORDS:
-        return True, ""
-    head, _, reason = t.partition(":")
-    if head.strip().lower() in {"reject", "rejected", "no", "từ chối", "không"}:
-        return False, reason.strip()
-    return None
-
-
 def _text_of(message: pb.Message | None) -> str:
     return "\n".join(p.text for p in (message.parts if message else []) if p.text).strip()
 
@@ -96,7 +85,9 @@ class AgentBaseExecutor(AgentExecutor):
 
         user_id = context.call_context.user.user_name
         session_id = f"a2a-{context.context_id}"
-        if context.current_task is None:  # A2A v1: the Task must be enqueued before any status update
+        if (
+            context.current_task is None
+        ):  # A2A v1: the Task must be enqueued before any status update
             await event_queue.enqueue_event(
                 new_task(
                     context.task_id,
@@ -109,8 +100,10 @@ class AgentBaseExecutor(AgentExecutor):
         text = _text_of(context.message)
         await updater.start_work()
         try:
-            validate_session_id(session_id)  # contextId ends up in the Memory path (prevent traversal)
-            decision = _decision_of(text)
+            validate_session_id(
+                session_id
+            )  # contextId ends up in the Memory path (prevent traversal)
+            decision = parse_decision(text)
             pending = (
                 await service.pending_tool_calls(user_id=user_id, session_id=session_id)
                 if decision

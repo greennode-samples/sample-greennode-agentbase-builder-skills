@@ -46,7 +46,7 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
    | Auth mode | Credential | Note |
    |---|---|---|
    | OAuth 2LO / 3LO | Secret Provider (Managed / Custom) in Access Control | 3LO needs a Return URL + user consent |
-   | API Key 2LO / 3LO | Secret Provider or pasted key | |
+   | API Key 2LO / 3LO | Secret Provider (the user enters the key in the Console/Identity — never in chat) | |
    | Inbound forward | The agent's own inbound credential | Gateway inbound ≠ NONE |
    | No authorization | — | |
 
@@ -77,7 +77,8 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 | Field | Meaning |
 |---|---|
 | `url` | The connector's `connectUrl` (`${MCP_GATEWAY_URL}` = gateway endpoint, set in `.env.<env>`) |
-| `auth` | `iam` (agent IAM token, auto-refresh — `IAMBearerAuth`) · `user_jwt` (forwards end-user JWT, per request) · `none` |
+| `auth` | **Required, no default** (an entry without it is skipped with an error log). `iam` (agent IAM token, auto-refresh — `IAMBearerAuth`; only for the AgentBase MCP Gateway, other hosts log a warning) · `user_jwt` (forwards end-user JWT, per request) · `none` |
+| `headers` | Static headers, `${ENV}` expanded. A static key for a self-built MCP server: `"auth": "none", "headers": {"Authorization": "Bearer ${MY_KEY}"}` — `Authorization` together with `iam`/`user_jwt` is rejected (it would be overwritten) |
 | `allow_tools` | Whitelist of the MCP server's **original** tool names (e.g. `tavily_search`). Empty = all |
 | `envs`, `enabled` | Load per `APP_ENV`, temporarily disable |
 

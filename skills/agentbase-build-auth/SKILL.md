@@ -16,9 +16,9 @@ description: "Authentication standard for AI agents on GreenNode AgentBase: inbo
 ## Inbound — workflow
 
 1. Ask the user for the IdP and its details: issuer, JWKS URL (usually `<issuer>/.well-known/jwks.json` or from discovery), audience, identity claim (default `sub`).
-2. Env (`.env.<env>`): `AUTH_MODE=jwt`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_USER_CLAIM`, `AUTH_TOKEN_HEADER`. Outside `local`, missing `AUTH_ISSUER`/`AUTH_AUDIENCE` ⇒ app refuses to start (IdP without `aud`, like Cognito ⇒ `AUTH_ALLOW_NO_AUDIENCE=true` and check `client_id` in claims). `AUTH_FORWARD_CLAIMS` = claims passed to tools via `RunnableConfig` (default empty). `sub` containing characters outside `[A-Za-z0-9._@+=-]` ⇒ `user_id = u-<sha256(iss|sub)>` (stable, no traversal). JWKS is prefetched at startup; IdP unreachable ⇒ 503 (not 401).
+2. Env (`.env.<env>`): `AUTH_MODE=jwt`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_USER_CLAIM`, `AUTH_TOKEN_HEADER`. Outside `local`, missing `AUTH_ISSUER`/`AUTH_AUDIENCE` ⇒ app refuses to start (IdP without `aud`, like Cognito ⇒ `AUTH_ALLOW_NO_AUDIENCE=true` **plus** `AUTH_ALLOWED_CLIENT_IDS=["<app client id>"]`, required outside local — checked against `azp`/`client_id`; tokens with `token_use` ≠ `access` (ID tokens) are always rejected). `AUTH_FORWARD_CLAIMS` = claims passed to tools via `RunnableConfig` (default empty). `sub` containing characters outside `[A-Za-z0-9._@+=-]` ⇒ `user_id = u-<sha256(iss|sub)>` (stable, no traversal). JWKS is prefetched at startup; IdP unreachable ⇒ 503 (not 401).
 3. Frontend: OIDC Authorization Code + PKCE (public client, no client secret) — `/agentbase-build-frontend`.
-4. Test: `tests/test_auth.py` (valid token, missing token, expired, wrong audience, spoofed user header).
+4. Test: `tests/test_auth.py` (valid token, missing token, expired, wrong audience, spoofed user header, client allowlist / ID token without `aud`, `APP_ENV=local` refused on the Runtime).
 
 `authenticate()` behavior:
 - Missing/invalid token ⇒ 401; `X-GreenNode-AgentBase-User-Id` differs from `sub` ⇒ 403.
@@ -49,7 +49,7 @@ Verify with the platform how the runtime endpoint authenticates before choosing 
 
 ## Outbound — workflow
 
-1. Store credentials with `/agentbase-identity` (API key provider / OAuth2 provider / delegated key). **Do not** let the user paste secrets into chat.
+1. Store credentials with `/agentbase-identity` (API key provider / OAuth2 provider / delegated key). **Do not** let the user paste secrets into chat (same for IAM and LLM keys: the user fills `.greennode.json` / `.env` themselves, then `make check-creds`).
 2. In the tool:
 
 ```python

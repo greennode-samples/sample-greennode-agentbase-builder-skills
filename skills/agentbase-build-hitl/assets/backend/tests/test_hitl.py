@@ -21,7 +21,8 @@ def ctx(session="hitl-1"):
 
 def _call(fact="Likes tea"):
     return AIMessage(
-        "I will remember that.", tool_calls=[{"name": "remember", "args": {"fact": fact}, "id": "c1"}]
+        "I will remember that.",
+        tool_calls=[{"name": "remember", "args": {"fact": fact}, "id": "c1"}],
     )
 
 

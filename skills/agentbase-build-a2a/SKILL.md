@@ -49,7 +49,8 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 - Each agent ⇒ tool `ask_<name>(message)` (already included in `collect_tools`, trace `tools.collect.output.a2a`).
 - **Per-user isolation across agents**: the tool takes `actor_id`/`thread_id` from `RunnableConfig` (not from the LLM) ⇒ sends `X-GreenNode-AgentBase-User-Id` + `contextId=session` ⇒ the target agent keeps memory for the correct user (tested by `test_client_tool_propagates_user`).
 - `auth`: `api_key` (target agent built from this template) · `user_jwt` (forward the end-user JWT, same IdP) · `none` (local).
-- Target agent returns `INPUT_REQUIRED` ⇒ the tool returns `[<agent> needs confirmation] ...` so the current agent asks the user. Consider adding `ask_<agent>` to `HITL_TOOLS` if the target agent can take actions.
+- Target agent returns `INPUT_REQUIRED` ⇒ the tool returns `[<agent> needs confirmation] ...` so the current agent asks the user.
+- **Only a human may confirm another agent's action.** `ask_<agent>` refuses to relay a decision (`approve`, `yes`, `đồng ý`, `reject: …`) unless `ask_<agent>` is in `HITL_TOOLS` — then the user approves that exact call in the approval card. ⇒ For target agents that take actions, **add `ask_<agent>` to `HITL_TOOLS`** (otherwise their confirmations cannot be completed). Tested by `test_llm_cannot_relay_decision_without_hitl`.
 - Trace: span `a2a.call` {agent, url, message, state, text}.
 
 ## Workflow

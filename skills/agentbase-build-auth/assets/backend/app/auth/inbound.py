@@ -49,7 +49,8 @@ def validate_user_id(user_id: str) -> str:
 def validate_session_id(session_id: str | None) -> str:
     if not session_id or not SESSION_ID_RE.fullmatch(session_id):
         raise GreenNodeRequestError(
-            "Invalid session id (letters, digits, '-' only; max 128 chars — use a UUID)", status_code=400
+            "Invalid session id (letters, digits, '-' only; max 128 chars — use a UUID)",
+            status_code=400,
         )
     return session_id
 
@@ -94,7 +95,7 @@ def _extract_bearer(raw: str | None) -> str | None:
 def verify_jwt(token: str, settings: Settings) -> dict[str, Any]:
     try:
         key = _jwks_client(settings.auth_jwks_url).get_signing_key_from_jwt(token)
-        return jwt.decode(
+        claims = jwt.decode(
             token,
             key.key,
             algorithms=settings.auth_algorithms,
@@ -108,6 +109,14 @@ def verify_jwt(token: str, settings: Settings) -> dict[str, Any]:
         raise _unauthorized("Identity provider unavailable", status=503) from e
     except jwt.PyJWTError as e:
         raise _unauthorized(f"Invalid token: {type(e).__name__}") from e
+    # Only access tokens are accepted (Cognito-style IdPs mark ID tokens with token_use=id)
+    if claims.get("token_use", "access") != "access":
+        raise _unauthorized("Invalid token: not an access token")
+    if settings.auth_allowed_client_ids:
+        client = claims.get("azp") or claims.get("client_id")
+        if client not in settings.auth_allowed_client_ids:
+            raise _unauthorized("Invalid token: client not allowed")
+    return claims
 
 
 def _jwt_token(context: RequestContext, settings: Settings) -> str:

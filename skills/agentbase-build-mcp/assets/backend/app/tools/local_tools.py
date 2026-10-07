@@ -81,7 +81,9 @@ def search_knowledge(query: str) -> str:
         top = sorted(scored, key=lambda x: -x[0])[: s.knowledge_top_k]
         st.set(output={"hits": [(f, h, sc) for sc, f, h, _ in top]})
     if not top:
-        return "Not found in internal documents. Tell the user this information is not available yet."
+        return (
+            "Not found in internal documents. Tell the user this information is not available yet."
+        )
     return "\n\n".join(
         f"[Source: {f} — {h}]\n{t[: s.knowledge_snippet_chars]}" for _, f, h, t in top
     )

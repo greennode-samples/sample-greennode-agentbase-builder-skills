@@ -24,9 +24,9 @@ Create `src/backend/.env.<env>` (not committed) from `.env.example`. To review p
 
 | Variable | dev | prod |
 |---|---|---|
-| `APP_ENV` | `dev` | `prod` |
+| `APP_ENV` | `dev` | `prod` — **required**: `local` is refused on the Runtime |
 | `MEMORY_BACKEND` / `MEMORY_ID` | `agentbase` / dev memory | `agentbase` / prod memory (separate) |
-| `AUTH_MODE` | `jwt` | `jwt` |
+| `AUTH_MODE` | `jwt` | `jwt` + `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE` (or `AUTH_ALLOW_NO_AUDIENCE=true` + `AUTH_ALLOWED_CLIENT_IDS`) |
 | `LLM_*` | dev key | prod key |
 | `LANGFUSE_*` | dev project/env | prod project, `LANGFUSE_SAMPLE_RATE` per load |
 | `MCP_GATEWAY_URL`, `HITL_TOOLS` | per environment | |

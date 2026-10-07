@@ -51,6 +51,18 @@ bash skills/agentbase-build-scaffold/scripts/scaffold.sh my-agent ./my-agent --w
 cd my-agent && make test && make dev && make invoke MSG="hello"
 ```
 
+## Prerequisites
+
+To build and run an agent you need these values. **Never paste secrets into the chat with your coding agent.** It creates the files from `.example` templates, you fill them in your editor, then you run `make check-creds`, which prints only OK/FAIL and non-secret IDs.
+
+| Value | Get it with | Put it in |
+|---|---|---|
+| IAM service account `client_id` + `client_secret` (Memory, Identity, MCP Gateway) | `/agentbase` (IAM setup) | `src/backend/.greennode.json` |
+| `LLM_API_KEY` + `LLM_MODEL` | `/agentbase-llm` | `src/backend/.env` |
+| Langfuse public/secret key (optional) | Langfuse project settings | `src/backend/.env` |
+
+Tools: Python 3.13 + [uv](https://docs.astral.sh/uv/), Docker (deploy), Node.js + npm (frontend only).
+
 ## Installation
 
 The skills follow the open [Agent Skills](https://agentskills.io) format (`skills/<name>/SKILL.md`), so any coding agent that reads `SKILL.md` can use them. Pick the method for your agent:
@@ -138,7 +150,7 @@ Agents load a skill automatically when your request matches its description. You
 
 ## Verified
 
-- **Offline**: a freshly scaffolded project passes 62 tests (agent, per-user isolation, streaming, compression, JWT/api_key, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard, A2A e2e); MCP server template passes 21 e2e tests (auth, per-user isolation, tools, local quickstart); Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
+- **Offline**: a freshly scaffolded project passes 109 tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets); MCP server template passes 21 e2e tests (auth, per-user isolation, tools, local quickstart); Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
 - **Real GreenNode** (runtime `test-agent`, v1→v6): api_key auth (401), short/long-term memory on AgentBase Memory, per-user isolation (memory, HITL, feedback, A2A tasks), HITL on real memory, MCP Connector via Gateway + Policy (ALLOW/DENY), A2A Agent Card + task isolation, real model tiers + fallback on MaaS (10 models), prompt cache.
 - **Self-hosted Langfuse v4.49**: full trace tree, cost/cache/reasoning/TTFT, prompt versions, scores, dataset + experiment. Traces were used to find and fix a 55s → 11s slowdown (parallel MCP + negative cache, skipping reflection for simple questions, Memory timeouts).
 - Per-feature details, platform bugs encountered and open items: `skills/agentbase-build/references/platform-coverage.md`.

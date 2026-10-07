@@ -125,3 +125,53 @@ async def test_policy_text_in_successful_result_is_not_a_deny():
         _tool(lambda q: ("Article: what is Request denied by policy?", None)), "web"
     ).ainvoke({"query": "x"})
     assert out.startswith("Article")
+
+
+# --- mcp_servers.json `auth` fails closed: the agent's IAM token is never sent by accident
+def _load(monkeypatch, tmp_path, servers: dict) -> dict:
+    import json
+
+    import app.tools.mcp as mcp_mod
+    from app.config import get_settings
+
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"servers": servers}))
+    monkeypatch.setenv("MCP_CONFIG_FILE", str(cfg))
+    get_settings.cache_clear()
+    return mcp_mod.load_mcp_config(get_settings())
+
+
+def test_server_without_auth_is_skipped_not_given_iam(monkeypatch, tmp_path, caplog):
+    loaded = _load(monkeypatch, tmp_path, {"thirdparty": {"url": "https://mcp.example.com/mcp"}})
+    assert loaded == {}
+    assert '"auth" is required' in caplog.text
+
+
+def test_authorization_header_conflicts_with_iam(monkeypatch, tmp_path, caplog):
+    entry = {"url": "https://x/mcp", "auth": "iam", "headers": {"Authorization": "Bearer k"}}
+    assert _load(monkeypatch, tmp_path, {"notes": entry}) == {}
+    assert "conflicts with auth" in caplog.text
+
+
+def test_static_key_with_auth_none_is_sent_and_no_iam(monkeypatch, tmp_path):
+    import app.tools.mcp as mcp_mod
+    from app.auth.inbound import Principal
+    from app.config import get_settings
+
+    monkeypatch.setenv("NOTES_MCP_KEY", "k-123")
+    entry = {"url": "http://localhost:8080/mcp", "auth": "none"}
+    entry["headers"] = {"Authorization": "Bearer ${NOTES_MCP_KEY}"}
+    cfg = _load(monkeypatch, tmp_path, {"notes": entry})["notes"]
+    conn = mcp_mod._connection(cfg, Principal(user_id="u"), get_settings())
+    assert conn["headers"]["Authorization"] == "Bearer k-123"
+    assert "auth" not in conn  # no IAMBearerAuth attached
+
+
+def test_stdio_needs_no_auth_and_iam_to_non_gateway_warns(monkeypatch, tmp_path, caplog):
+    servers = {
+        "fetch": {"transport": "stdio", "command": "uvx", "args": ["mcp-server-fetch"]},
+        "odd": {"url": "https://mcp.example.com/mcp", "auth": "iam"},
+        "gw": {"url": "https://gw-a-b.agentbase-gateway.aiplatform.vngcloud.vn/x", "auth": "iam"},
+    }
+    assert set(_load(monkeypatch, tmp_path, servers)) == {"fetch", "odd", "gw"}
+    assert "'odd' uses auth=iam" in caplog.text and "'gw' uses auth=iam" not in caplog.text

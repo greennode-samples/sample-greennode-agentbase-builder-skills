@@ -26,8 +26,10 @@ from a2a.types import a2a_pb2 as pb
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 
+from app.a2a.decisions import parse_decision
 from app.auth.inbound import Principal
 from app.config import Settings
+from app.hitl import requires_approval
 from app.observability import tracing
 
 log = logging.getLogger(__name__)
@@ -48,7 +50,9 @@ def _headers(cfg: dict, settings: Settings, principal: Principal, user_id: str) 
         h[cfg.get("api_key_header", settings.auth_api_key_header)] = cfg["api_key"]
     elif cfg["auth"] == "user_jwt":
         if not principal.token:
-            raise PermissionError("Target agent requires the user's JWT but the request has no token")
+            raise PermissionError(
+                "Target agent requires the user's JWT but the request has no token"
+            )
         h["Authorization"] = f"Bearer {principal.token}"
     return h
 
@@ -73,7 +77,17 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
     for name, cfg in load_a2a_agents(settings).items():
         tool_name = f"ask_{_NAME_RE.sub('_', name.lower())}"
 
-        async def _call(message: str, config: RunnableConfig, _n=name, _c=cfg) -> str:
+        async def _call(message: str, config: RunnableConfig, _n=name, _c=cfg, _t=tool_name) -> str:
+            # The target's HITL accepts "approve"/"reject" as a decision. Only a HUMAN may send it: the LLM
+            # could otherwise confirm the other agent's side effects by itself (prompt injection, overeager
+            # model). With `_t` in HITL_TOOLS the user approves this exact call first ⇒ relaying is allowed.
+            if parse_decision(message) and not requires_approval(_t, settings):
+                log.warning("A2A decision %r to %s blocked: add %r to HITL_TOOLS", message, _n, _t)
+                return (
+                    f"[{_n}] NOT SENT: confirming or rejecting an action of agent '{_n}' requires the "
+                    "user's explicit approval, which is not configured for this agent. Tell the user the "
+                    "action was not confirmed."
+                )
             conf = config.get("configurable") or {}
             user_id, session_id = conf["actor_id"], conf["thread_id"]
             with tracing.step(
@@ -99,7 +113,10 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
                         state, text = _collect_text(resp)
                 st.set(output={"state": state, "text": text[:2000]})
             if state == "TASK_STATE_INPUT_REQUIRED":
-                return f"[{_n} needs confirmation] {text}"
+                return (
+                    f"[{_n} needs confirmation] {text}\n(Ask the user. Only send 'approve' / "
+                    "'reject: <reason>' after the user explicitly decides.)"
+                )
             if state in ("TASK_STATE_FAILED", "TASK_STATE_REJECTED"):
                 return f"[{_n} error] {text}"
             return text

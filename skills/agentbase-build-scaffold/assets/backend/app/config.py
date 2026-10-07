@@ -71,9 +71,7 @@ class Settings(BaseSettings):
     # AgentBase Memory: timeout/retry per call (seen in practice: a checkpoint read hung ~7 minutes when the platform
     # was flaky with the default 30s × 5 retries). Search query max 1000 chars (API limit).
     memory_timeout_s: float = 10.0
-    memory_max_retries: int = (
-        3  # 429 is common on bursts ⇒ needs a few attempts; per-request timeout is capped separately
-    )
+    memory_max_retries: int = 3  # 429 is common on bursts ⇒ needs a few attempts; per-request timeout is capped separately
     memory_retry_backoff_s: float = 0.3
     memory_query_max_chars: int = 1000
     # The platform limits concurrent Memory requests to 10 per IAM account (429 "Too many concurrent ...
@@ -119,6 +117,9 @@ class Settings(BaseSettings):
     auth_audience: str = ""
     auth_user_claim: str = "sub"
     auth_allow_no_audience: bool = False
+    # Allowed OAuth clients (`azp` / `client_id` claim), JSON list. REQUIRED with AUTH_ALLOW_NO_AUDIENCE outside
+    # local: without `aud`, this is what stops tokens issued to other apps of the same IdP/user pool.
+    auth_allowed_client_ids: list[str] = Field(default_factory=list)
     # JWT claims passed to tools via config["configurable"]["user_claims"] (allowlist, JSON
     # list) — e.g. ["employee_id","roles","email"]. Tools do NOT read the token directly.
     auth_forward_claims: list[str] = Field(default_factory=list)
@@ -164,6 +165,11 @@ class Settings(BaseSettings):
     def is_local(self) -> bool:
         return self.app_env == "local"
 
+    @staticmethod
+    def on_runtime() -> bool:
+        """True on AgentBase Runtime: these variables are injected by the platform, never set locally."""
+        return bool(os.getenv("GREENNODE_AGENT_IDENTITY") or os.getenv("GREENNODE_ENDPOINT_URL"))
+
     @property
     def signing_key(self) -> bytes:
         seed = self.feedback_signing_key or os.getenv("GREENNODE_CLIENT_SECRET") or self.llm_api_key
@@ -177,6 +183,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate(self) -> Settings:
+        # APP_ENV defaults to "local" (dev convenience). A deploy env file that forgets APP_ENV must NOT
+        # inherit local relaxations (AUTH_MODE=none ⇒ anyone can impersonate any user via the User-Id header).
+        if self.is_local and self.on_runtime():
+            raise ValueError(
+                "APP_ENV=local is not allowed on AgentBase Runtime (GREENNODE_AGENT_IDENTITY/"
+                "GREENNODE_ENDPOINT_URL are set). Set APP_ENV=dev|staging|prod in the deploy env file."
+            )
         if not self.llm_model or not self.llm_api_key:
             raise ValueError(
                 "LLM_MODEL and LLM_API_KEY are required (use /agentbase-llm to get a key)."
@@ -203,6 +216,16 @@ class Settings(BaseSettings):
                 "AUTH_MODE=jwt outside local requires AUTH_AUDIENCE (if empty, tokens for other APIs/clients of the "
                 "same IdP would be accepted). IdP doesn't issue `aud` (e.g. Cognito access token) ⇒ "
                 "AUTH_ALLOW_NO_AUDIENCE=true."
+            )
+        if (
+            self.auth_mode == "jwt"
+            and not self.is_local
+            and not self.auth_audience
+            and not self.auth_allowed_client_ids
+        ):
+            raise ValueError(
+                "AUTH_ALLOW_NO_AUDIENCE outside local requires AUTH_ALLOWED_CLIENT_IDS (JSON list of the app "
+                "client ids allowed to call this agent; checked against the `azp`/`client_id` claim)."
             )
         if self.auth_mode == "api_key" and not self.auth_api_key_sha256:
             raise ValueError(

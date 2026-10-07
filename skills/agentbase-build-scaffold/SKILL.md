@@ -55,7 +55,12 @@ Rules: **every Python command runs via `uv run`** (including one-liners: `uv run
 | `.env.example` | Full template of every `Settings` variable | ✔ |
 | `.env` | Local dev (`APP_ENV=local`, may use `AUTH_MODE=none`, `MEMORY_BACKEND=inmemory`) | ✖ |
 | `.env.dev` / `.env.staging` / `.env.prod` | Passed to the runtime on deploy (`/agentbase-deploy --env-file`) | ✖ |
-| `.greennode.json` | IAM credentials for local dev (read by the SDK) | ✖ |
+| `.greennode.json` | IAM credentials for local dev (read by the SDK). The **user** creates it from `.greennode.json.example` — never via chat | ✖ |
+| `.greennode.json.example` | Template `{client_id, client_secret}` | ✔ |
+
+`make check-creds` (`scripts/check_creds.py`) verifies IAM, LLM key/model and Langfuse keys and prints only `OK/FAIL` + non-secret IDs (IAM principal `iam:<sub>`). Run it after the user fills the files.
+
+`APP_ENV=local` (the default) is **refused on the Runtime** (detected via `GREENNODE_AGENT_IDENTITY`/`GREENNODE_ENDPOINT_URL`), so a deploy env file that forgets `APP_ENV` cannot fall back to `AUTH_MODE=none`.
 
 Deploy env files **must not contain** `GREENNODE_CLIENT_ID`, `GREENNODE_CLIENT_SECRET`, `GREENNODE_AGENT_IDENTITY`, `GREENNODE_ENDPOINT_URL` (the runtime injects them).
 

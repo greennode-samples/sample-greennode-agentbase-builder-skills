@@ -41,6 +41,7 @@ def jwt_env(monkeypatch):
             "exp": now + 300,
             **over,
         }
+        claims = {k: v for k, v in claims.items() if v is not None}  # aud=None ⇒ no `aud` claim
         return jwt.encode(claims, key, algorithm="RS256")
 
     return make
@@ -112,4 +113,61 @@ def test_api_key_mode_requires_hashes(monkeypatch):
     monkeypatch.delenv("AUTH_API_KEY_SHA256", raising=False)
     get_settings.cache_clear()
     with pytest.raises(ValueError, match="AUTH_API_KEY_SHA256"):
+        get_settings()
+
+
+# --- APP_ENV must never default to local on the Runtime (local allows AUTH_MODE=none ⇒ User-Id spoofing)
+@pytest.mark.parametrize("var", ["GREENNODE_AGENT_IDENTITY", "GREENNODE_ENDPOINT_URL"])
+def test_local_app_env_refused_on_runtime(monkeypatch, var):
+    monkeypatch.delenv(
+        "APP_ENV", raising=False
+    )  # deploy env file that forgot APP_ENV ⇒ default "local"
+    monkeypatch.setenv(var, "injected-by-runtime")
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="APP_ENV=local is not allowed on AgentBase Runtime"):
+        get_settings()
+
+
+# --- No-audience IdPs (e.g. Cognito access tokens): the client allowlist replaces `aud`
+@pytest.fixture
+def no_aud_env(jwt_env, monkeypatch):
+    monkeypatch.delenv("AUTH_AUDIENCE", raising=False)
+    monkeypatch.setenv("AUTH_ALLOW_NO_AUDIENCE", "true")
+    monkeypatch.setenv("AUTH_ALLOWED_CLIENT_IDS", '["app-1"]')
+    get_settings.cache_clear()
+    return jwt_env
+
+
+def test_no_audience_accepts_allowed_client(no_aud_env):
+    for claim in ("client_id", "azp"):
+        token = no_aud_env(aud=None, **{claim: "app-1"}, token_use="access")
+        assert inbound.authenticate(_ctx(token), get_settings()).user_id == "user-1"
+
+
+def test_no_audience_rejects_other_client_and_id_tokens(no_aud_env):
+    for token in (
+        no_aud_env(aud=None, client_id="other-app"),  # another app of the same user pool
+        no_aud_env(aud=None),  # no client claim at all
+        no_aud_env(aud=None, client_id="app-1", token_use="id"),  # ID token, not access token
+    ):
+        with pytest.raises(GreenNodeRequestError) as e:
+            inbound.authenticate(_ctx(token), get_settings())
+        assert e.value.status_code == 401
+
+
+def test_no_audience_outside_local_requires_client_allowlist(monkeypatch):
+    for k, v in {
+        "APP_ENV": "prod",
+        "AUTH_MODE": "jwt",
+        "AUTH_JWKS_URL": "https://issuer.test/jwks.json",
+        "AUTH_ISSUER": "https://issuer.test",
+        "AUTH_ALLOW_NO_AUDIENCE": "true",
+        "MEMORY_BACKEND": "agentbase",
+        "MEMORY_ID": "mem-1",
+    }.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("AUTH_AUDIENCE", raising=False)
+    monkeypatch.delenv("AUTH_ALLOWED_CLIENT_IDS", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="AUTH_ALLOWED_CLIENT_IDS"):
         get_settings()

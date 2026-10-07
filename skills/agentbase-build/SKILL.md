@@ -62,12 +62,24 @@ Goal: **every agent, whatever its business requirements, has the same structure,
 
 Per-module responsibilities and the request flow: read **`references/architecture.md`**.
 
+## Credentials the user provides
+
+| Value | Used for | How to get it | Where it goes (user fills it in their editor) |
+|---|---|---|---|
+| IAM service account `client_id` + `client_secret` | Memory, Identity, MCP Gateway (agent → platform) | `/agentbase` (IAM setup) | `src/backend/.greennode.json` (from `.greennode.json.example`) |
+| `LLM_API_KEY` + `LLM_MODEL` (model `path`) | MaaS LLM | `/agentbase-llm` | `src/backend/.env` |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (optional) | Tracing, eval | Langfuse project settings | `src/backend/.env` |
+| `JWKS_URL` / `ISSUER` / `AUDIENCE` (non-secret) | Inbound JWT | The app's IdP | `.env` (`AUTH_*`) |
+
+- **Never ask the user to paste a secret into the chat**, and never `cat`/print `.greennode.json`, `.env*` or keys. Create the file from its `.example`, tell the user which keys to fill, then let them run **`make check-creds`**: it prints only `OK/FAIL` + non-secret IDs (incl. the agent's IAM principal `iam:<sub>` for Policy Groups). If the user pasted a secret anyway: write it only into the git-ignored file and advise rotating it.
+- On AgentBase Runtime the IAM pair is injected — deploy env files never contain `GREENNODE_CLIENT_*`.
+
 ## Build process (the coding agent MUST follow this order)
 
 Show progress as `Step X/9`. Each step checks whether it is already done (idempotent) and writes resource IDs to `.agentbase-state.json`.
 
 1. **Analyze requirements → Agent Spec.** Read `references/requirements-to-spec.md` **and `references/decision-guide.md`**, fill in the Agent Spec template. For **each** optional component (long-term memory, reflection, HITL, MCP server, A2A, frontend), state *on/off + reason* based on the decision guide. Principle: **minimal by default** — do not enable anything "because it might be needed later". Present the spec to the user and **wait for confirmation** before coding.
-2. **Scaffold** — `/agentbase-build-scaffold`: create `src/backend` (+ `src/frontend` if the spec needs a UI) via the script, `uv sync`, `make test` must be green.
+2. **Scaffold** — `/agentbase-build-scaffold`: create `src/backend` (+ `src/frontend` if the spec needs a UI) via the script, `uv sync`, `make test` must be green. Then the user fills `.greennode.json` + `.env` (see *Credentials*) and `make check-creds` shows OK for IAM and LLM.
 3. **LLM** — `/agentbase-build-llm`: get an API key via `/agentbase-llm`; the user picks a model for each tier (reasoning/large/small) + fallback; map flows → tiers; decide on adaptive routing.
 4. **Memory** — `/agentbase-build-memory`: create a memory store via `/agentbase-memory`, set `MEMORY_ID`, tune strategy/namespace and the context-compression threshold.
 5. **Tools / MCP / A2A** — if a new MCP server is needed for an internal system: `/agentbase-build-mcp-server` (deploy it first). If another agent is needed (decision guide §5): `/agentbase-build-a2a`. Then `/agentbase-build-mcp`: write local tools; create/select an MCP Gateway (`/agentbase-gateway`), connect MCP Connectors (catalog or custom), create a Policy Group for the agent's principal (`/agentbase-policy`), declare each `connectUrl` in `mcp_servers.json`. Mark side-effect tools in `HITL_TOOLS` (`/agentbase-build-hitl`).
@@ -84,7 +96,7 @@ Finish: run **`references/checklist.md`** (Definition of Done) and report PASS/F
 2. **Do not read `os.environ` all over the place.** All config goes through `app/config.py::Settings`. New variables must be added to `Settings` **and** `.env.example`.
 3. **Every LLM call goes through `get_llm("<task>")`** (`app/llm`): flow → tier → model + fallback. Do not construct `ChatOpenAI` yourself; new flows go into `DEFAULT_TASK_TIERS`.
 4. **user_id always comes from the verified token** (`Principal`), never from a tool parameter or request body. Memory actor_id/namespace are never tool parameters.
-5. **No hardcoded secrets.** IAM is injected by the runtime; external-service secrets are stored in AgentBase Identity; `.env` is never committed.
+5. **No hardcoded secrets, no secrets in chat.** IAM is injected by the runtime (locally `.greennode.json`); external-service secrets are stored in AgentBase Identity; `.env`/`.greennode.json` are never committed, printed or requested in chat.
 6. **Every important step must have a Langfuse trace** (use `tracing.step()` / `tracing.event()` for non-LangChain code). Never log tokens/API keys.
 7. **Side-effect tools must be in `HITL_TOOLS`** unless the user explicitly confirms it is not needed. MCP tools must go through an **MCP Gateway with a Policy Group** granting least privilege to the agent's principal.
 8. **New feature ⇒ new test + eval item.** `make test` and `make eval` must pass before deploy.

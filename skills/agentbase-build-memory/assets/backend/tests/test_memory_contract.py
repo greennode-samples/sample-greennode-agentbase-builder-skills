@@ -56,7 +56,9 @@ async def test_search_parses_dicts_and_min_score(monkeypatch):
         "Likes green tea",
         "Unrelated",
     ]
-    assert await _ltm(monkeypatch, min_score=0.5).search("u1", "what to drink", 5) == ["Likes green tea"]
+    assert await _ltm(monkeypatch, min_score=0.5).search("u1", "what to drink", 5) == [
+        "Likes green tea"
+    ]
 
 
 async def test_long_query_truncated_to_api_limit(monkeypatch):

@@ -5,10 +5,13 @@ Connection standard (declared in mcp_servers.json, supports ${ENV_VAR}):
     outbound credentials (Identity providerName) and Policy Group. Create with /agentbase-gateway.
   - Local: may connect directly to an MCP server (streamable_http or stdio) via "envs": ["local"].
 
-Auth type per server (`auth`):
+Auth type per server (`auth`) — REQUIRED for HTTP servers, there is no default (a default of "iam" would send the
+agent's platform credential to any URL that forgot it):
   - "iam"      : the agent's IAM Bearer token (gateway inboundAuth.mode = IAM). Token auto-refreshes.
+                 Only for the AgentBase MCP Gateway (*.agentbase-gateway.aiplatform.vngcloud.vn).
   - "user_jwt" : forwards the end-user's JWT (gateway inboundAuth.mode = JWT) => per-request.
-  - "none"     : no header (local / internal network only).
+  - "none"     : no auth from the agent; a static key for a self-built MCP server goes in
+                 "headers": {"Authorization": "Bearer ${MY_KEY}"} (only allowed with "none").
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from collections.abc import AsyncGenerator, Generator
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from langchain_core.tools import BaseTool
@@ -87,10 +91,14 @@ class IAMBearerAuth(httpx.Auth):
     def _basic(self) -> httpx.BasicAuth:
         return httpx.BasicAuth(self._creds.client_id or "", self._creds.client_secret or "")
 
+    def refresh(self) -> None:
+        """Fetch a new token now (sync). Raises httpx.HTTPStatusError if IAM rejects the credentials."""
+        with httpx.Client(auth=self._basic(), timeout=30) as c:
+            self._store(c.send(self._request_token()))
+
     def sync_auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response]:
         if not self._valid():
-            with httpx.Client(auth=self._basic(), timeout=30) as c:
-                self._store(c.send(self._request_token()))
+            self.refresh()
         request.headers["Authorization"] = f"Bearer {self._token}"
         yield request
 
@@ -114,6 +122,22 @@ def _get_iam_auth() -> IAMBearerAuth:
     return _iam_auth
 
 
+_AUTH_MODES = ("iam", "user_jwt", "none")
+_GATEWAY_HOST_SUFFIX = ".agentbase-gateway.aiplatform.vngcloud.vn"
+
+
+def mcp_config_error(cfg: dict[str, Any]) -> str | None:
+    """Why this server entry must not be loaded (None = OK). Fails closed: never guess an auth mode."""
+    if cfg.get("transport") == "stdio":
+        return None  # local process, no HTTP auth
+    auth = cfg.get("auth")
+    if auth not in _AUTH_MODES:
+        return f'"auth" is required, one of {list(_AUTH_MODES)} (got {auth!r})'
+    if auth != "none" and any(k.lower() == "authorization" for k in cfg.get("headers") or {}):
+        return f'headers.Authorization conflicts with auth="{auth}" (it would be overwritten); use auth="none"'
+    return None
+
+
 def load_mcp_config(settings: Settings) -> dict[str, dict[str, Any]]:
     path = Path(settings.mcp_config_file)
     if not path.exists():
@@ -126,6 +150,17 @@ def load_mcp_config(settings: Settings) -> dict[str, dict[str, Any]]:
             continue
         if cfg.get("enabled", True) is False:
             continue
+        if err := mcp_config_error(cfg):
+            log.error("MCP server %r skipped — invalid mcp_servers.json entry: %s", name, err)
+            continue
+        host = urlparse(cfg.get("url", "")).hostname or ""
+        if cfg.get("auth") == "iam" and not host.endswith(_GATEWAY_HOST_SUFFIX):
+            log.warning(
+                "MCP server %r uses auth=iam but %r is not an AgentBase MCP Gateway — the agent's IAM token "
+                "is sent there. Use auth=none (+ headers) for other servers.",
+                name,
+                host,
+            )
         servers[name] = cfg
     return servers
 
@@ -147,7 +182,7 @@ def _connection(cfg: dict[str, Any], principal: Principal, settings: Settings) -
         # The adapter default is very long ⇒ a "silent" MCP stream holds the request for minutes
         "sse_read_timeout": settings.mcp_tool_timeout_s,
     }
-    auth = cfg.get("auth", "iam")
+    auth = cfg.get("auth", "none")
     if auth == "iam":
         conn["auth"] = _get_iam_auth()
     elif auth == "user_jwt":
@@ -249,7 +284,7 @@ def _is_auth_error(e: BaseException) -> bool:
 async def _load_server(
     name: str, cfg: dict, settings: Settings, principal: Principal, errors: dict[str, str] | None
 ) -> list[BaseTool]:
-    auth = cfg.get("auth", "iam")
+    auth = cfg.get("auth", "none")
     per_user = auth == "user_jwt"
     cached = _static_tools.get(name)
     hit = not per_user and cached is not None and time.time() - cached[0] < _STATIC_TTL_S

@@ -324,7 +324,8 @@ class _Run:
             # the bridge may not see the __interrupt__ write yet (visible empty) ⇒ can't block, let it through
             if visible and self.interrupt_id not in visible:
                 raise _error(
-                    "This approval request has already been handled (interrupt_id is no longer valid)", 409
+                    "This approval request has already been handled (interrupt_id is no longer valid)",
+                    409,
                 )
         return graph, config
 
@@ -414,7 +415,11 @@ class _Run:
             yield {"event": "error", "message": mapped.message, "status": mapped.status_code}
         except Exception:  # noqa: BLE001 — stream already open, must return the error as an event
             log.exception("stream failed")
-            yield {"event": "error", "message": "Agent failed to process the request.", "status": 500}
+            yield {
+                "event": "error",
+                "message": "Agent failed to process the request.",
+                "status": 500,
+            }
         finally:
             if it is not None:
                 with contextlib.suppress(Exception):

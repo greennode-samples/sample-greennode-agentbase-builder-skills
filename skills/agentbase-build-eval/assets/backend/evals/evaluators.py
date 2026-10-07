@@ -31,7 +31,9 @@ def must_contain(*, output, metadata=None, **_) -> Evaluation | None:
     text = _answer(output).lower()
     hit = sum(n.lower() in text for n in needles)
     return Evaluation(
-        name="must_contain", value=hit / len(needles), comment=f"{hit}/{len(needles)} required phrases"
+        name="must_contain",
+        value=hit / len(needles),
+        comment=f"{hit}/{len(needles)} required phrases",
     )
 
 
@@ -114,7 +116,9 @@ def item_passed(evaluations: list[Evaluation]) -> bool:
 def pass_rate(*, item_results, **_) -> Evaluation:
     passed = sum(item_passed([e for e in r.evaluations if e]) for r in item_results)
     total = len(item_results) or 1
-    return Evaluation(name="pass_rate", value=passed / total, comment=f"{passed}/{total} items passed")
+    return Evaluation(
+        name="pass_rate", value=passed / total, comment=f"{passed}/{total} items passed"
+    )
 
 
 def avg(name: str):

@@ -4,11 +4,14 @@ FRONTEND := src/frontend
 IMAGE ?= __PROJECT_NAME__
 TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
-.PHONY: setup dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev invoke
+.PHONY: setup check-creds dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev invoke
 
 setup:            ## Install backend deps (+ frontend if present)
 	cd $(BACKEND) && uv sync
 	@if [ -d $(FRONTEND) ]; then cd $(FRONTEND) && npm install; fi
+
+check-creds:      ## Verify IAM / LLM / Langfuse credentials (prints OK/FAIL only, never secrets)
+	cd $(BACKEND) && uv run python -m scripts.check_creds
 
 dev:              ## Run the agent locally on :8080
 	cd $(BACKEND) && uv run python main.py

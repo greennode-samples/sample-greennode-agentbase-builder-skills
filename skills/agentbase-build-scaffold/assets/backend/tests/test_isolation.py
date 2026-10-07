@@ -27,7 +27,10 @@ async def test_short_term_same_session_id_different_users(fake_llm):
 async def test_long_term_facts_not_shared(fake_llm):
     fake_llm(
         AIMessage(
-            "", tool_calls=[{"name": "remember", "args": {"fact": "Alice is allergic to shrimp"}, "id": "r1"}]
+            "",
+            tool_calls=[
+                {"name": "remember", "args": {"fact": "Alice is allergic to shrimp"}, "id": "r1"}
+            ],
         ),
         AIMessage("noted"),
     )
@@ -105,7 +108,9 @@ def test_unsafe_idp_subject_mapped_not_rejected():
     mapped = user_id_from_subject("auth0|abc123", "https://tenant.auth0.com/")
     assert mapped.startswith("u-") and validate_user_id(mapped) == mapped
     assert mapped == user_id_from_subject("auth0|abc123", "https://tenant.auth0.com/")  # stable
-    assert mapped != user_id_from_subject("auth0|abc123", "https://other/")  # different IdP ⇒ different user
+    assert mapped != user_id_from_subject(
+        "auth0|abc123", "https://other/"
+    )  # different IdP ⇒ different user
     assert user_id_from_subject("alice", "x") == "alice"
 
 

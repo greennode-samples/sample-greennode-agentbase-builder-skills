@@ -111,7 +111,8 @@ async def test_tasks_isolated_per_user(a2a_server, fake_llm):
 async def test_hitl_over_a2a(a2a_server, fake_llm):
     fake_llm(
         AIMessage(
-            "", tool_calls=[{"name": "remember", "args": {"fact": "allergic to shrimp"}, "id": "c1"}]
+            "",
+            tool_calls=[{"name": "remember", "args": {"fact": "allergic to shrimp"}, "id": "c1"}],
         ),
         AIMessage("Remembered."),
     )
@@ -151,3 +152,50 @@ async def test_client_tool_propagates_user(a2a_server, fake_llm, tmp_path, monke
     )
     assert "answer from peer" in out
     assert seen["user"] == "alice"  # target agent gets the right user ⇒ per-user memory isolation
+
+
+async def _ask_peer(a2a_server, tmp_path, monkeypatch, message: str, hitl: str = "[]"):
+    """Call ask_peer(message); returns (tool output, number of requests that reached the target)."""
+    import app.a2a.server as srv_mod
+
+    hits = []
+    original = srv_mod.AgentBaseAuthBackend.authenticate
+
+    async def spy(self, conn):
+        if conn.url.path.startswith("/a2a"):
+            hits.append(conn.url.path)
+        return await original(self, conn)
+
+    monkeypatch.setattr(srv_mod.AgentBaseAuthBackend, "authenticate", spy)
+    cfg = tmp_path / "a2a_agents.json"
+    cfg.write_text(
+        f'{{"agents": {{"peer": {{"url": "{a2a_server}", "auth": "api_key", "api_key": "{KEY}"}}}}}}'
+    )
+    monkeypatch.setenv("A2A_AGENTS_FILE", str(cfg))
+    monkeypatch.setenv("HITL_TOOLS", hitl)
+    get_settings.cache_clear()
+    from app.a2a.client import build_a2a_tools
+    from app.auth.inbound import Principal
+
+    [tool] = build_a2a_tools(get_settings(), Principal(user_id="alice"))
+    out = await tool.ainvoke(
+        {"message": message}, config={"configurable": {"actor_id": "alice", "thread_id": "s-1"}}
+    )
+    return out, len(hits)
+
+
+@pytest.mark.parametrize("word", ["approve", "Yes", "đồng ý", "reject: too risky"])
+async def test_llm_cannot_relay_decision_without_hitl(
+    a2a_server, fake_llm, tmp_path, monkeypatch, word
+):
+    out, reached = await _ask_peer(a2a_server, tmp_path, monkeypatch, word)
+    assert reached == 0  # never sent: the LLM must not confirm the other agent's actions by itself
+    assert "NOT SENT" in out
+
+
+async def test_decision_relayed_when_tool_is_human_approved(
+    a2a_server, fake_llm, tmp_path, monkeypatch
+):
+    fake_llm(AIMessage("peer handled it"))
+    out, reached = await _ask_peer(a2a_server, tmp_path, monkeypatch, "approve", hitl='["ask_*"]')
+    assert reached >= 1 and "peer handled it" in out

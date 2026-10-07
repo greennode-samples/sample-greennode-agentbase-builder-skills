@@ -7,6 +7,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] `app/` structure follows the standard; no second graph/LLM factory (`grep -rn "ChatOpenAI(" app | grep -v app/llm` is empty).
 - [B] No `os.environ`/`os.getenv` reads outside `app/config.py`, `app/prompts`, `app/observability` (`grep -rn "os.getenv\|os.environ" app`).
 - [B] `.env`, `.greennode.json` are in `.gitignore` and `.dockerignore`.
+- [B] `make check-creds` prints OK for IAM and LLM (secrets were filled in by the user, never pasted into chat or printed).
 - Every variable in `Settings` is in `.env.example`.
 
 ## Runtime contract
@@ -68,4 +69,5 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Deploy
 - The deploy env file does not contain `GREENNODE_CLIENT_ID/SECRET/AGENT_IDENTITY/ENDPOINT_URL`.
+- [B] The deploy env file sets `APP_ENV` (dev/staging/prod) — `local` is refused on the Runtime.
 - After deploy: health OK, 1 real request has a trace in Langfuse, clean logs (`/agentbase-monitor`).
