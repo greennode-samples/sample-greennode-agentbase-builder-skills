@@ -293,6 +293,9 @@ class _Run:
 
     async def _prepare(self):
         reset_policy_denials()
+        # Identity SDK keys 3LO / delegated credentials by this context user id — set it from the VERIFIED
+        # principal on every path (HTTP, A2A, run_chat for eval/jobs), never leave it unset or header-derived.
+        GreenNodeAgentBaseContext.set_user_id(self.principal.user_id)
         _trace_auth(self.principal)
         tools = await collect_tools(self.settings, self.principal)
         graph = build_graph(

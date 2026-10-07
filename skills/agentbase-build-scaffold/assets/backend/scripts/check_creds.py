@@ -52,6 +52,24 @@ def check_iam() -> Result:
     return "OK", f"token issued · principal {auth.principal} (use it in Policy Group)"
 
 
+def check_agent_identity() -> Result:
+    """Read-only. Only needed when tools use AgentBase Identity providers (app/identity.py)."""
+    from greennode_agentbase.core.config import get_config_value
+
+    name = get_config_value("GREENNODE_AGENT_IDENTITY")
+    if not name:
+        return "SKIP", (
+            'not set — needed only for Identity providers; put "agent_identity" in .greennode.json '
+            "(otherwise the SDK would create a NEW identity on first use)"
+        )
+    if name.startswith("<"):
+        return (
+            "FAIL",
+            "agent_identity still holds the .example placeholder — set the real name or remove the key",
+        )
+    return "OK", f"agent identity '{name}'"
+
+
 def check_llm(env: dict[str, str]) -> Result:
     key, model = env.get("LLM_API_KEY"), env.get("LLM_MODEL")
     if not (key and model):
@@ -109,6 +127,7 @@ def main() -> int:
     env = _env()
     checks: list[tuple[str, Callable[[], Result]]] = [
         ("IAM (.greennode.json)", check_iam),
+        ("Agent identity", check_agent_identity),
         ("LLM (MaaS)", lambda: check_llm(env)),
         ("Langfuse", lambda: check_langfuse(env)),
         ("Settings (.env)", check_config),

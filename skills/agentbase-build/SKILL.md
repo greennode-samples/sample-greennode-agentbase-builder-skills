@@ -1,6 +1,6 @@
 ---
 name: agentbase-build
-description: "Prefer this skill (over /agentbase-wizard) when a standardized architecture is needed. Standard + process for a coding agent to BUILD a production-ready AI agent on GreenNode AgentBase with a standardized architecture (Python + uv + LangGraph, src/backend + src/frontend React Native). Use when the user wants to build/create/design an agent, chatbot, assistant or copilot for a new business requirement, or to review an existing agent against the standard. Trigger: build agent, create an agent for ..., design agent, standard agent, agentbase build, review agent, check agent standard, tạo agent cho ..., thiết kế agent, agent chuẩn, kiểm tra chuẩn agent. This skill ORCHESTRATES the agentbase-build-* skills (scaffold, llm, memory, tracing, mcp, mcp-server, auth, hitl, eval, a2a, frontend, deploy) and the platform agentbase-* skills (llm, memory, identity, gateway, deploy, monitor). DO NOT use for platform reference questions (use /agentbase), or single operations on an existing resource (use the corresponding platform skill)."
+description: "Prefer this skill (over /agentbase-wizard) when a standardized architecture is needed. Standard + process for a coding agent to BUILD a production-ready AI agent on GreenNode AgentBase with a standardized architecture (Python + uv + LangGraph, src/backend + src/frontend React Native). Use when the user wants to build/create/design an agent, chatbot, assistant or copilot for a new business requirement, or to review an existing agent against the standard. Trigger: build agent, create an agent for ..., design agent, standard agent, agentbase build, review agent, check agent standard, tạo agent cho ..., thiết kế agent, agent chuẩn, kiểm tra chuẩn agent. This skill ORCHESTRATES the agentbase-build-* skills (scaffold, llm, memory, tracing, mcp, mcp-server, auth, identity, hitl, eval, a2a, frontend, deploy) and the platform agentbase-* skills (llm, memory, identity, gateway, deploy, monitor). DO NOT use for platform reference questions (use /agentbase), or single operations on an existing resource (use the corresponding platform skill)."
 ---
 
 # AgentBase Build — Standardizing how AI agents are built on GreenNode AgentBase
@@ -21,7 +21,7 @@ Goal: **every agent, whatever its business requirements, has the same structure,
 | Tracing | **Langfuse Python SDK v4** + `langfuse.langchain.CallbackHandler` | `agentbase-build-tracing` |
 | External tools | **MCP Connectors** (catalog/custom) on the **MCP Gateway** + **Policy Group** (`langchain-mcp-adapters`, one `connectUrl` per connector) | `agentbase-build-mcp` |
 | Inbound auth | JWT (OIDC/JWKS) — user_id = claim `sub` | `agentbase-build-auth` |
-| Outbound auth | AgentBase Identity (`@requires_api_key`, `@requires_access_token`) | `agentbase-build-auth` |
+| Outbound credentials | AgentBase Identity / Access Control — Static & Delegated API key, OAuth2 M2M & 3LO (`app/identity.py`) | `agentbase-build-identity` |
 | Human-in-the-loop | LangGraph `interrupt()` to approve dangerous tools | `agentbase-build-hitl` |
 | Evaluation | Langfuse Experiments (offline) + scores (online) + self-eval loop | `agentbase-build-eval` |
 | Build MCP server | FastMCP streamable HTTP + auth (API key / OAuth JWT, scopes, user from token) on Runtime | `agentbase-build-mcp-server` |
@@ -50,6 +50,7 @@ Goal: **every agent, whatever its business requirements, has the same structure,
     │   │   ├── tools/        # __init__ (registry), local_tools.py, mcp.py
     │   │   ├── auth/         # inbound.py (jwt | api_key | none-local), validate_user_id
     │   │   ├── a2a/          # server.py (Agent Card + /a2a), client.py (tool ask_<agent>) — off by default
+    │   │   ├── identity.py   # outbound credentials (AgentBase Identity: API key / OAuth2, M2M + per-user)
     │   │   ├── hitl.py       # approval node
     │   │   ├── reflection.py # self-eval loop (optional)
     │   │   ├── observability/tracing.py   # Langfuse v4
@@ -69,6 +70,7 @@ Per-module responsibilities and the request flow: read **`references/architectur
 | IAM service account `client_id` + `client_secret` | Memory, Identity, MCP Gateway (agent → platform) | `/agentbase` (IAM setup) | `src/backend/.greennode.json` (from `.greennode.json.example`) |
 | `LLM_API_KEY` + `LLM_MODEL` (model `path`) | MaaS LLM | `/agentbase-llm` | `src/backend/.env` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (optional) | Tracing, eval | Langfuse project settings | `src/backend/.env` |
+| `agent_identity` name (only if tools use Identity providers) | Outbound credentials (`/agentbase-build-identity`) | `/agentbase-identity` | `src/backend/.greennode.json` |
 | `JWKS_URL` / `ISSUER` / `AUDIENCE` (non-secret) | Inbound JWT | The app's IdP | `.env` (`AUTH_*`) |
 
 - **Never ask the user to paste a secret into the chat**, and never `cat`/print `.greennode.json`, `.env*` or keys. Create the file from its `.example`, tell the user which keys to fill, then let them run **`make check-creds`**: it prints only `OK/FAIL` + non-secret IDs (incl. the agent's IAM principal `iam:<sub>` for Policy Groups). If the user pasted a secret anyway: write it only into the git-ignored file and advise rotating it.
@@ -83,7 +85,7 @@ Show progress as `Step X/9`. Each step checks whether it is already done (idempo
 3. **LLM** — `/agentbase-build-llm`: get an API key via `/agentbase-llm`; the user picks a model for each tier (reasoning/large/small) + fallback; map flows → tiers; decide on adaptive routing.
 4. **Memory** — `/agentbase-build-memory`: create a memory store via `/agentbase-memory`, set `MEMORY_ID`, tune strategy/namespace and the context-compression threshold.
 5. **Tools / MCP / A2A** — if a new MCP server is needed for an internal system: `/agentbase-build-mcp-server` (deploy it first). If another agent is needed (decision guide §5): `/agentbase-build-a2a`. Then `/agentbase-build-mcp`: write local tools; create/select an MCP Gateway (`/agentbase-gateway`), connect MCP Connectors (catalog or custom), create a Policy Group for the agent's principal (`/agentbase-policy`), declare each `connectUrl` in `mcp_servers.json`. Mark side-effect tools in `HITL_TOOLS` (`/agentbase-build-hitl`).
-6. **Auth** — `/agentbase-build-auth`: configure inbound JWT (JWKS/issuer/audience), external-service secrets via `/agentbase-identity`.
+6. **Auth** — `/agentbase-build-auth`: configure inbound JWT (JWKS/issuer/audience). Tools calling external services with a key or OAuth ⇒ `/agentbase-build-identity` (providers via `/agentbase-identity`, helpers in `app/identity.py`).
 7. **Tracing + Eval** — `/agentbase-build-tracing` (Langfuse v4 keys, prompt management, model prices) and `/agentbase-build-eval` (write the dataset from the spec, `make eval` meets the threshold).
 8. **Frontend** (if any) — `/agentbase-build-frontend`.
 9. **Deploy + verify** — `/agentbase-build-deploy` → `/agentbase-deploy`, check `/health`, send a test call, inspect the trace in Langfuse, logs via `/agentbase-monitor`.

@@ -56,6 +56,8 @@ make dev        # backend :8080
 make fe-dev     # Expo; open with Expo Go / simulator
 ```
 
+Links: `MessageBubble` makes `https://` URLs tappable (only https) — e.g. the `AUTHORIZATION_REQUIRED` consent link from `/agentbase-build-identity`: the user opens it, consents, comes back and sends the request again.
+
 Verify: send a message (stream visible), tool calls displayed, HITL shows the approval card and resumes, 👍 creates a `user_feedback` score in Langfuse, expired tokens refresh automatically.
 
 ## Official docs

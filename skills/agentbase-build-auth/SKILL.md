@@ -53,25 +53,9 @@ Read `references/patterns.md`. Summary:
 
 Choose the pattern from the Runtime's **Inbound Auth type** (above); verify by calling `<endpoint>/health` and `/invocations` without a token.
 
-## Outbound — workflow
+## Outbound — calling external services
 
-1. Store credentials with `/agentbase-identity` (API key provider / OAuth2 provider / delegated key). **Do not** let the user paste secrets into chat (same for IAM and LLM keys: the user fills `.greennode.json` / `.env` themselves, then `make check-creds`).
-2. In the tool:
-
-```python
-from greennode_agentbase import requires_api_key, requires_access_token
-
-@requires_api_key(provider_name="weather-api-key", auth_flow="M2M")
-async def _call_weather(city: str, *, api_key: str) -> dict: ...
-
-@requires_access_token(provider_name="google-oauth", scopes=["https://www.googleapis.com/auth/calendar.readonly"],
-                       auth_flow="USER_FEDERATION", callback_url="https://app.example.com/oauth/callback",
-                       on_auth_url=lambda url: ...)
-async def _read_calendar(*, access_token: str) -> dict: ...
-```
-
-3. First 3LO call returns `authorization_url` ⇒ the tool returns a message asking the user to open the link (frontend displays it); `callback_url` must be in the agent identity's `allowedReturnUrls`.
-4. MCP via Gateway: credentials are configured in the target's `outboundAuth` (no decorator needed in the agent).
+Moved to **`/agentbase-build-identity`** (Access Control): Static / Delegated API Key and OAuth2 providers, `app/identity.py` helpers (`agent_api_key`, `agent_access_token`, `user_access_token`, `user_api_key`), non-blocking 3LO consent links, per-user isolation, tests. MCP via Gateway: credentials live in the connector's outbound auth (`/agentbase-build-mcp`). **Do not** let the user paste secrets into chat.
 
 ## Per-user isolation (verified on runtime)
 

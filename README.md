@@ -16,7 +16,8 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 | `/agentbase-build-mcp` | Local tools + **MCP Connectors** (catalog/custom) on the **MCP Gateway** + **Policy Group** (principal `iam:<sub>`, action `connector__tool`), policy-deny guard |
 | `/agentbase-build-mcp-server` | **Build an MCP server** with auth: API key / OAuth JWT (2LO, 3LO, inbound forward), scopes, user from token, Protected Resource Metadata |
 | `/agentbase-build-a2a` | **A2A**: expose the agent (Agent Card + JSON-RPC) and call other agents as tools, isolate tasks/memory per user — only when decision guide §5 is satisfied |
-| `/agentbase-build-auth` | Inbound JWT (OIDC/JWKS), user-spoofing prevention, outbound Identity, Direct/BFF models |
+| `/agentbase-build-auth` | Inbound JWT (OIDC/JWKS), user-spoofing prevention, Runtime inbound auth, Direct/BFF models |
+| `/agentbase-build-identity` | **Access Control** (Identity): Static/Delegated API key and OAuth2 providers, agent-wide (M2M) and per-user (3LO consent link, non-blocking) credentials in tools, no secrets in schemas/traces |
 | `/agentbase-build-hitl` | **Human-in-the-loop**: `interrupt()` to approve / edit / reject tool calls, resume |
 | `/agentbase-build-eval` | **Evaluation loop**: Langfuse Datasets/Experiments, LLM judge, CI gate, online scores, self-eval loop |
 | `/agentbase-build-frontend` | **Expo React Native**: OIDC PKCE, SSE streaming, HITL approval cards, 👍👎 feedback |
@@ -105,7 +106,7 @@ Update: `codex plugin marketplace upgrade`. Remove: `codex plugin remove agentba
 [`skills`](https://github.com/vercel-labs/skills) detects the agents you have installed and links the skills into each agent's folder.
 
 ```bash
-npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --list                       # show the 13 skills
+npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --list                       # show the 14 skills
 npx skills add greennode-samples/sample-greennode-agentbase-builder-skills                              # interactive: choose skills + agents (project scope)
 npx skills add greennode-samples/sample-greennode-agentbase-builder-skills -g -a cursor -a gemini-cli -y   # all skills, user scope, specific agents
 npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --skill agentbase-build-mcp-server -a github-copilot   # a single skill

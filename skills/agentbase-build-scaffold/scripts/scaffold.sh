@@ -10,6 +10,7 @@
 #   agentbase-build-tracing  : app/observability, app/prompts/__init__.py (Langfuse v4)
 #   agentbase-build-mcp      : app/tools, mcp_servers.json, tests/test_mcp.py
 #   agentbase-build-auth     : app/auth, tests/test_auth.py
+#   agentbase-build-identity : app/identity.py (outbound credentials: Static/Delegated API key, OAuth2 M2M/3LO)
 #   agentbase-build-hitl     : app/hitl.py, tests/test_hitl.py
 #   agentbase-build-eval     : app/reflection.py, evals/, tests/test_reflection.py
 #   agentbase-build-a2a      : app/a2a (A2A server + client tools), a2a_agents.json, tests/test_a2a.py
@@ -18,7 +19,7 @@ set -euo pipefail
 
 SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKEND_SKILLS=(agentbase-build-scaffold agentbase-build-llm agentbase-build-memory agentbase-build-tracing
-  agentbase-build-mcp agentbase-build-auth agentbase-build-hitl agentbase-build-eval agentbase-build-a2a)
+  agentbase-build-mcp agentbase-build-auth agentbase-build-identity agentbase-build-hitl agentbase-build-eval agentbase-build-a2a)
 
 USAGE="Usage: scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]"
 if [[ $# -lt 2 ]]; then

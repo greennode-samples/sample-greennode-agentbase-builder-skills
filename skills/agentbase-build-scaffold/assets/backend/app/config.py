@@ -128,6 +128,11 @@ class Settings(BaseSettings):
     auth_api_key_header: str = "X-GreenNode-AgentBase-Custom-Api-Key"
     auth_api_key_sha256: list[str] = Field(default_factory=list)
 
+    # --- AgentBase Identity (outbound credentials, see app/identity.py) ---
+    # App page the user lands on after OAuth2 3LO / delegated-key consent. MUST be in the agent identity's
+    # allowedReturnUrls (/agentbase-identity). Empty ⇒ per-user (USER_FEDERATION) credentials are disabled.
+    identity_callback_url: str = ""
+
     # --- Human-in-the-loop: globs on tool names that need human approval, JSON list ---
     # e.g. HITL_TOOLS=["gateway_*_delete","gateway_*_create","send_email"]
     hitl_tools: list[str] = Field(default_factory=list)

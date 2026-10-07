@@ -53,6 +53,7 @@ START → compress → recall → [route] → agent ─┬─ no tool call ─�
 | `app/memory/` | Checkpointer, LTM, compression | Tune strategy/namespace/thresholds |
 | `app/tools/` | Registry + local tools + MCP loader | **Add business tools here** |
 | `app/auth/` | JWT verification | Change IdP via env, code rarely changes |
+| `app/identity.py` | Outbound credentials from AgentBase Identity | Decorate inner functions of tools (`/agentbase-build-identity`) |
 | `app/hitl.py` | Approval node | Configure via `HITL_TOOLS` |
 | `app/reflection.py` | Self-eval loop | Tune criteria via env |
 | `app/observability/` | Langfuse v4 | Add project-specific PII masking |

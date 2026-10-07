@@ -24,11 +24,15 @@ def workdir(tmp_path, monkeypatch):
     for k in (
         "GREENNODE_CLIENT_ID",
         "GREENNODE_CLIENT_SECRET",
+        "GREENNODE_AGENT_IDENTITY",
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
     ):
         monkeypatch.setenv(k, "x")  # registers the original value so teardown restores it…
         monkeypatch.delenv(k)  # …even though normalize_iam_env() writes GREENNODE_* during the test
+    import greennode_agentbase.core.config as sdk_config
+
+    monkeypatch.setattr(sdk_config, "_config_cache", None)  # SDK caches .greennode.json per process
     return tmp_path
 
 
@@ -88,3 +92,18 @@ def test_langfuse_optional(workdir, monkeypatch, capsys):
     _fake_http(monkeypatch)
     assert check_creds.main() == 0
     assert "SKIP  Langfuse" in capsys.readouterr().out
+
+
+def test_agent_identity_placeholder_fails(workdir, monkeypatch, capsys):
+    import greennode_agentbase.core.config as sdk_config
+
+    (workdir / ".greennode.json").write_text(
+        json.dumps(
+            {"client_id": "c", "client_secret": "s", "agent_identity": "<agent identity name>"}
+        )
+    )
+    monkeypatch.setattr(sdk_config, "_config_cache", None)
+    monkeypatch.delenv("GREENNODE_AGENT_IDENTITY", raising=False)
+    _fake_http(monkeypatch)
+    assert check_creds.main() == 1
+    assert "placeholder" in capsys.readouterr().out
