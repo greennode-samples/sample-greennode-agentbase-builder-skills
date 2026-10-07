@@ -1,0 +1,23 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace-v1.schema.json",
+  "name": "agentbase-build",
+  "description": "AgentBase Build — the standard for building AI agents on GreenNode AgentBase",
+  "owner": {
+    "name": "GreenNode MSS"
+  },
+  "plugins": [
+    {
+      "name": "agentbase-build",
+      "source": "./",
+      "description": "Skills that standardize agent building: scaffold, llm, memory, tracing, mcp, auth, hitl, eval, frontend, deploy.",
+      "version": "0.2.0",
+      "keywords": [
+        "agentbase",
+        "greennode",
+        "agent",
+        "langgraph"
+      ],
+      "category": "development"
+    }
+  ]
+}

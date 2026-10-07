@@ -1,0 +1,26 @@
+{
+  "name": "agentbase-build",
+  "version": "0.2.0",
+  "description": "Standardizes how coding agents build AI agents on GreenNode AgentBase: Python 3.13 + uv + LangGraph; MaaS LLMs by capability tier + fallback; AgentBase Memory; Langfuse v4; MCP Connectors/Gateway/Policy + building MCP servers with OAuth; JWT/API key auth with per-user isolation; HITL; eval loop; A2A; React Native. 13 skills, orchestrated by /agentbase-build.",
+  "author": {
+    "name": "GreenNode MSS"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agentbase",
+    "greennode",
+    "agent",
+    "langgraph",
+    "langfuse",
+    "mcp",
+    "uv",
+    "react-native"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AgentBase Build",
+    "shortDescription": "Standard for building AI agents on GreenNode AgentBase",
+    "developerName": "GreenNode MSS",
+    "category": "Development"
+  }
+}

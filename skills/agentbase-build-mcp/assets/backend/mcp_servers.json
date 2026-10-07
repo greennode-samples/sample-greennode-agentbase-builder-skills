@@ -1,0 +1,42 @@
+{
+  "servers": {
+    "tavily": {
+      "transport": "streamable_http",
+      "url": "${MCP_GATEWAY_URL}/tavily",
+      "auth": "iam",
+      "envs": [
+        "dev",
+        "staging",
+        "prod"
+      ],
+      "allow_tools": [
+        "tavily_search",
+        "tavily_extract"
+      ],
+      "enabled": false
+    },
+    "github": {
+      "transport": "streamable_http",
+      "url": "${MCP_GATEWAY_URL}/github",
+      "auth": "user_jwt",
+      "envs": [
+        "dev",
+        "staging",
+        "prod"
+      ],
+      "enabled": false
+    },
+    "fetch-local": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "auth": "none",
+      "envs": [
+        "local"
+      ],
+      "enabled": false
+    }
+  }
+}

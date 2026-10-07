@@ -1,0 +1,2 @@
+{"id": "greeting-vi", "input": {"message": "Hi, what can you help me with?"}, "expected_output": "A friendly greeting in the user's language and a short description of the agent's capabilities.", "metadata": {"must_contain": [], "expected_tools": [], "tags": ["smoke"]}}
+{"id": "time-tool", "input": {"message": "What time is it in Hanoi right now?"}, "expected_output": "The current time in Asia/Ho_Chi_Minh, taken from the tool.", "metadata": {"expected_tools": ["get_current_time"], "tags": ["tool"]}}

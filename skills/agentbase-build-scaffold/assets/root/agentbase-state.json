@@ -1,0 +1,13 @@
+{
+  "wizard_step": 0,
+  "project_name": "__PROJECT_NAME__",
+  "framework": "langgraph",
+  "agent_identity": null,
+  "auth_configured": false,
+  "runtime_id": null,
+  "memory_id": null,
+  "aip_key_name": null,
+  "cr_repo_name": null,
+  "gateway_name": null,
+  "langfuse_project": null
+}
