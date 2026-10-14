@@ -28,7 +28,7 @@ Pick the most specific type ([Langfuse observation types](https://langfuse.com/d
 | `metadata` | request_id, llm_model, memory_backend, memory_id, auth_mode, hitl_tools, reflection_enabled | Filter by configuration |
 | `environment` / `release` | `APP_ENV` / `AGENT_VERSION` (constructor) | Separate dev/prod |
 
-Root observation `agent.invoke` (the trace's input/output — shown in the tracing table, read by evaluators, compared by dataset experiments): input = the user message (`{"resume": decisions, "interrupt_id"}` on a resume turn), output = the answer **text** (`{"interrupt": …}` when waiting for approval; `{"error", "status"}` — exactly what the caller received — when the turn failed), metadata `tools_used`. The Langfuse session view does not read it (it replays generations, see SKILL.md → Session view).
+Root observation `agent.invoke` (the trace's input/output — shown in the tracing table, read by evaluators, compared by dataset experiments): input = the user message (resume turn: `[Approval decision] - Approved|Rejected|Edited <tool>(<args>)…`), output = the answer **text** (waiting for approval: `[Awaiting approval] - <tool>(<args>)`; failure: `{"error", "status"}` — exactly what the caller received), metadata `tools_used`, `interrupt`, `resume`. It is the conversation line of the session page's **Conversation** view (`Is Root Observation = true`, see SKILL.md → Session view).
 
 ## Debug playbook
 

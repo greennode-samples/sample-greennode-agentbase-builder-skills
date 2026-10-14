@@ -50,6 +50,8 @@ from app.auth.inbound import (
 from app.config import get_settings
 from app.graph.builder import build_graph, recursion_limit
 from app.hitl import (
+    describe_decisions,
+    describe_interrupt,
     interrupt_payload,
     is_placeholder_tool_message,
     is_rejected_tool_message,
@@ -103,7 +105,8 @@ async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
         except ValueError as e:
             raise _error(str(e)) from e
         graph_input = Command(resume=decisions)
-        trace_input = {"resume": decisions, "interrupt_id": payload.get("interrupt_id")}
+        # readable in the session view; tool names are added once the checkpoint is loaded (_prepare)
+        trace_input = describe_decisions(decisions)
 
     run = _Run(
         principal,
@@ -317,6 +320,7 @@ class _Run:
         interrupt_id: str | None = None,
     ):
         self.interrupt_id = interrupt_id
+        self.root: Any = None  # root observation of this request (set by invoke/stream), None when tracing is off
         self.settings = get_settings()
         self.principal = principal
         self.session_id = session_id
@@ -375,6 +379,13 @@ class _Run:
             raise _error("Awaiting tool approval — send {type: resume} before chatting again", 409)
         if self.kind == "resume" and not pending:
             raise _error("No approval request is pending in this session", 409)
+        if self.kind == "resume" and self.root is not None:
+            ai = last_ai((snapshot.values or {}).get("messages", []))
+            decisions = getattr(self.graph_input, "resume", None) or []
+            self.root.update(
+                input=describe_decisions(decisions, ai.tool_calls if ai else []),
+                metadata={"resume": decisions, "interrupt_id": self.interrupt_id},
+            )
         if self.kind == "resume" and self.interrupt_id:
             visible = [i.id for i in (getattr(snapshot, "interrupts", None) or ())]
             # the bridge may not see the __interrupt__ write yet (visible empty) ⇒ can't block, let it through
@@ -393,7 +404,8 @@ class _Run:
         trace_id = tracing.current_trace_id()
         if interrupt := interrupt_payload(interrupts):
             if root is not None:
-                root.update(output={"interrupt": interrupt})
+                # readable in the session view; the raw payload stays in metadata
+                root.update(output=describe_interrupt(interrupt), metadata={"interrupt": interrupt})
             tracing.score_trace("hitl_requested", 1)
             return {
                 "status": "interrupted",
@@ -420,6 +432,7 @@ class _Run:
             with self._trace([]) as root:
                 try:
                     async with asyncio.timeout(self.settings.request_timeout_s):
+                        self.root = root
                         graph, config = await self._prepare()
                         out = await graph.ainvoke(self.graph_input, config)
                 except (
@@ -444,6 +457,7 @@ class _Run:
                 _deadline(self.settings.request_timeout_s) as left,
             ):
                 async with asyncio.timeout(max(left(), 0.001)):
+                    self.root = root
                     graph, config = await self._prepare()
                 interrupts, final = None, None
                 # langgraph_step → (id of the agent message being streamed, text already sent?)

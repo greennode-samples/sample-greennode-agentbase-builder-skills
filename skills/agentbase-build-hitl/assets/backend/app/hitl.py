@@ -21,6 +21,7 @@ Rules:
 
 from __future__ import annotations
 
+import json
 from fnmatch import fnmatch
 from typing import Any
 
@@ -163,6 +164,37 @@ def interrupt_payload(interrupts: Any) -> dict | None:
         return None
     first = interrupts[0]
     return {"id": getattr(first, "id", None), **(getattr(first, "value", None) or {})}
+
+
+def _call_text(tool_call: dict) -> str:
+    return f"{tool_call.get('name')}({json.dumps(tool_call.get('args') or {}, ensure_ascii=False)})"
+
+
+def describe_interrupt(interrupt: dict) -> str:
+    """Root trace OUTPUT of a turn that stops for approval: readable in the Langfuse session view (the raw
+    payload goes to metadata), e.g. "[Awaiting approval]\n- remember({"fact": "…"})"."""
+    calls = "\n".join(f"- {_call_text(tc)}" for tc in interrupt.get("tool_calls") or [])
+    text = (interrupt.get("message") or "").strip()
+    return (f"{text}\n\n" if text else "") + f"[Awaiting approval]\n{calls}"
+
+
+def describe_decisions(decisions: list[dict], tool_calls: list | None = None) -> str:
+    """Root trace INPUT of a resume turn — what the user decided, per tool call (names from the pending
+    AIMessage when known), e.g. "[Approval decision]\n- Rejected remember({…}) — reason"."""
+    by_id = {tc["id"]: tc for tc in tool_calls or [] if isinstance(tc, dict) and tc.get("id")}
+    lines = []
+    for d in decisions:
+        tc = by_id.get(d["tool_call_id"])
+        call = _call_text(tc) if tc else d["tool_call_id"]
+        if d["action"] == "approve":
+            lines.append(f"Approved {call}")
+        elif d["action"] == "edit":
+            name = tc.get("name") if tc else d["tool_call_id"]
+            lines.append(f"Edited {name} → {json.dumps(d.get('args') or {}, ensure_ascii=False)}")
+        else:
+            reason = (d.get("reason") or "").strip()
+            lines.append(f"Rejected {call}" + (f" — {reason}" if reason else ""))
+    return "[Approval decision]\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def is_waiting_approval(snapshot: Any) -> bool:

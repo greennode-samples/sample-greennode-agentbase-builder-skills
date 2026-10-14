@@ -37,7 +37,7 @@ Source: [What does a good trace look like?](https://langfuse.com/docs/observabil
 | Best practice | Here |
 |---|---|
 | Trace = one unit of work, session = the conversation | 1 trace per `/invocations` turn; `session_id` = conversation, including HITL resume turns |
-| Root input/output = what a reviewer needs | Root `agent.invoke`: input = user message (or resume decisions), output = **answer text** (or the interrupt; on failure **the error the caller received** `{error, status}`); `tools_used` in root metadata |
+| Root input/output = what a reviewer needs | Root `agent.invoke` = the conversation line: input = user message (resume turn: `describe_decisions` text), output = **answer text** (approval request: `describe_interrupt` text; failure: **the error the caller received** `{error, status}`); raw payloads (`interrupt`, `resume`, `tools_used`) in root metadata |
 | Session view = a readable conversation replay | Langfuse builds it from **generations**, shallowest per trace; see "Session view" below — conversation LLM calls (`CONVERSATION_TASKS`) at the top, internal LLM calls one level deeper, static system prompt + a per-turn context message |
 | Generation input/output as role-labeled OpenAI chat messages | `_AgentBaseCallbackHandler` records input = the OpenAI request `{"messages": [...], "tools": [...]}`, output = the assistant message `{role, content, tool_calls, thinking}`; tool calls `{id, type: "function", function: {name, arguments: "<JSON string>"}}` (rendered as cards), tool results `{role: "tool", tool_call_id}` |
 | Each LLM call is its own `generation`, interleaved with its tools | CallbackHandler: one generation per call of the agent loop, tool observations as siblings |
@@ -160,19 +160,28 @@ Field details, debug playbook, dashboards: `references/trace-schema.md`.
 2. Env: `LANGFUSE_PROMPT_NAME`, `LANGFUSE_PROMPT_LABEL`, `LANGFUSE_PROMPT_CACHE_TTL` (seconds, default 300; blank or not an integer ⇒ 300 with a warning). `LANGFUSE_PROMPT_CACHE_TTL` is read with `os.getenv` in `app/prompts/__init__.py` (not a `Settings` field) — `.env.example` lists it with the default.
 3. `app/prompts/__init__.py::get_system_prompt()` fetches the prompt (SDK cache), falling back to `system.md` on error; `graph/builder.py` passes `metadata.langfuse_prompt` at call time to the agent's `llm.<task>` chain ⇒ the agent generations link to the prompt version ⇒ compare latency/cost/score per version, change prompts without redeploying.
 
-## Session view (conversation replay) — rules for every new LLM call
+## Session view — the conversation; the trace — every step
 
-How Langfuse 4.x builds it (source: `packages/shared/src/server/transcript` in langfuse/langfuse — re-check on upgrades):
-- One **thread** per conversation, assembled from **GENERATION** observations (+ TOOL observations matched to tool
-  calls by id). Root input/output is only a fallback. A generation continues a thread when all the thread's
-  non-system messages appear in its input; otherwise it starts a new thread.
-- Per trace, the session shows only the **current turn**: the replayed input up to the previous turn's last
-  `assistant`/`tool` message is history and is hidden — so the input must be faithful role-labeled history, with
-  nothing after the user's message that looks like an assistant/tool message.
-- The session UI shows, per trace, only the threads whose first generation is at the **shallowest tree depth**;
-  deeper ones are hidden. System messages are not used for matching; a **changed** system message is shown again.
-- Result: **session = the conversation** (per turn: user message, tool calls/results, answer); **trace = every
-  step** (spans, retrievers, router, judge, thinking, usage, cost).
+Goal for every reviewer (support, QA, product, developers): **a session reads as the user's conversation** (one
+user → assistant line per turn), **a trace holds every step** (spans, retrievers, router, judge, thinking, usage,
+cost). Langfuse 4.58 has two session renderings; the template is correct for both:
+
+1. **Session page (default)** — per trace, a card per observation, filtered by a *view* (`Filter observations`,
+   `My Views`). Default view = "All observations with I/O" (every observation with input and output ⇒ long cards,
+   every generation replaying the history). **Conversation view = filter `Is Root Observation = true`** ⇒ only
+   `agent.invoke` per trace, whose input/output are the conversation line:
+   user message → answer · approval request `[Awaiting approval] - remember({...})` · decision
+   `[Approval decision] - Rejected remember({...}) — reason` · failure `{error, status}` as the user got it.
+   - Link: `<LANGFUSE_BASE_URL>/project/<project>/sessions/<session_id>?filter=isRootObservation%3Bboolean%3B%3B%3D%3Btrue`
+     (`lf_trace.py --session <id>` prints it next to the every-step link).
+   - **Once per Langfuse project** (project owner): open any session → `Filter observations` → `Is Root Observation`
+     = true → save as view **"Conversation"** → set it as the default view. Keep "All observations with I/O" for
+     debugging.
+2. **Conversation timeline** (newer renderer, source `packages/shared/src/server/transcript` in langfuse/langfuse —
+   re-check on upgrades): assembled from **GENERATION** observations (+ TOOL observations matched by tool-call id).
+   Per trace it shows the **current turn** only (input after the previous turn's last `assistant`/`tool` message)
+   and only threads whose first generation is at the **shallowest depth** — so generation I/O must be faithful
+   OpenAI chat messages and internal LLM calls must sit deeper (rules below).
 
 Rules (all enforced by the template; keep them when adding code):
 
@@ -200,7 +209,7 @@ Instrumentation is not done when the code compiles. Loop until the trace is clea
 
 ## Step 7 — Explore the traces with the user
 
-Point them to what they now have — **Traces** (one per turn, filter by `type:` tags / `environment`), **Sessions** (conversation replay incl. HITL), **Users** (cost per user), **Scores** (`user_feedback`, `self_eval`), the **Agent Graph** of a trace, the dashboards of `references/trace-schema.md` — and ask what is still missing to judge an answer at a glance. Explain *why* each addition helps (e.g. a `feature:` tag ⇒ cost/latency per feature).
+Point them to what they now have — **Traces** (one per turn, filter by `type:` tags / `environment`), **Sessions** — the **Conversation** view (`Is Root Observation = true`, link from `lf_trace.py --session`) to read what the user lived, the default view to see every step, **Users** (cost per user), **Scores** (`user_feedback`, `self_eval`), the **Agent Graph** of a trace, the dashboards of `references/trace-schema.md` — and ask what is still missing to judge an answer at a glance. Explain *why* each addition helps (e.g. a `feature:` tag ⇒ cost/latency per feature).
 
 ## Reading traces via API / CLI / script (Langfuse v4 events_only)
 

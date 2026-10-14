@@ -88,8 +88,11 @@ def audit(obs: list[dict]) -> list[tuple[str, str]]:
         out.append(("FAIL", f"root {root['name']}: no input — set it to the user message"))
     if _empty(root.get("output")):
         out.append(("WARN", f"root {root['name']}: no output — set it to the answer (or the interrupt)"))
-    elif isinstance(root.get("output"), dict) and "response" in root["output"]:
-        out.append(("WARN", "root output is a JSON blob — set it to the answer text, details in metadata"))
+    elif isinstance(root.get("output"), dict) and {"response", "interrupt"} & set(root["output"]):
+        out.append(("WARN", "root output is a JSON blob — the session's conversation line must be text "
+                            "(answer / describe_interrupt), details in metadata"))
+    if isinstance(root.get("input"), dict) and "resume" in root["input"]:
+        out.append(("WARN", "root input is a JSON blob — use describe_decisions for resume turns"))
     for key in ("userId", "sessionId"):
         if not root.get(key):
             out.append(("WARN", f"root has no {key} — propagate_attributes(...) in trace_request"))
@@ -135,6 +138,19 @@ def audit(obs: list[dict]) -> list[tuple[str, str]]:
                 out.append(("FAIL", f"{name}: unmasked {what} exported — extend _mask_text in tracing.py"))
                 break
     return list(dict.fromkeys(out))  # same finding on a repeated step (agent loop) ⇒ once
+
+
+# Langfuse table filter encoding (`column;type;key;operator;value`, URL-encoded): only the root observation of each
+# trace ⇒ the session page reads as the conversation (one user → assistant line per turn)
+CONVERSATION_FILTER = "isRootObservation%3Bboolean%3B%3B%3D%3Btrue"
+
+
+def session_links(c: httpx.Client, session_id: str) -> None:
+    r = c.get("/api/public/projects")
+    if r.status_code != 200 or not r.json().get("data"):
+        return
+    base = f"{c.base_url}".rstrip("/") + f"/project/{r.json()['data'][0]['id']}/sessions/{session_id}"
+    print(f"session {session_id}\n  conversation: {base}?filter={CONVERSATION_FILTER}\n  every step:   {base}")
 
 
 def print_tree(c: httpx.Client, trace_id: str, *, do_audit: bool = False) -> int:
@@ -208,6 +224,7 @@ def main() -> None:
     roots = observations(c, name="agent.invoke", limit=100)
     if a.session:
         roots = [o for o in roots if o.get("sessionId") == a.session]
+        session_links(c, a.session)
     fails = 0
     for o in sorted(roots, key=lambda o: o["startTime"], reverse=True)[: a.latest or 3]:
         fails += print_tree(c, o["traceId"], do_audit=a.audit)
