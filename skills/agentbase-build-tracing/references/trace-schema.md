@@ -34,7 +34,7 @@ Root observation `agent.invoke` (the trace's input/output — shown in the traci
 
 | Question | Where to look |
 |---|---|
-| "Why did the agent answer wrong?" | Last generation: input messages (does the system prompt have the right memories/summary?), prior tool outputs, its thinking (`output.additional_kwargs.reasoning_content`) |
+| "Why did the agent answer wrong?" | Last generation: input messages (does the system prompt have the right memories/summary?), prior tool outputs, its thinking (`output.thinking`, the trace view's thinking block) |
 | "Why did it pick that tool / those args?" | Thinking of the generation that requested the call, then the tool's input |
 | "Why didn't it call the tool?" | Generation: does the input include tool schemas? Does `tools.collect.output` include that tool? Did `mcp.list_tools` fail? |
 | "Why did it forget information?" | `memory.recall` (query, namespace, count), `context.compress` (did summarization lose details?) |

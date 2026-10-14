@@ -112,8 +112,16 @@ def audit(obs: list[dict]) -> list[tuple[str, str]]:
                 out.append(("WARN", f"{name}: no input/output usage (LLM_STREAM_USAGE=true when streaming)"))
             if model and not failed and not o.get("totalCost"):
                 out.append(("WARN", f"{name}: no cost — declare the price of {model} in Langfuse (Models)"))
-            if u.get("output_reasoning") and "reasoning_content" not in _text(o.get("output")):
+            if u.get("output_reasoning") and '"thinking"' not in _text(o.get("output")):
                 out.append(("WARN", f"{name}: {u['output_reasoning']} reasoning tokens but no thinking text"))
+            inp = o.get("input")
+            inp = json.loads(inp) if isinstance(inp, str) and inp[:1] in "[{" else inp
+            msgs = inp.get("messages") if isinstance(inp, dict) else inp
+            if isinstance(msgs, list) and any(
+                isinstance(m, dict) and m.get("role") == "tool" and not m.get("tool_call_id") for m in msgs
+            ):
+                out.append(("WARN", f"{name}: tool definitions recorded as messages — the session view replays "
+                                    "the history every turn; use tracing.langchain_callbacks()"))
         elif (
             kind not in ("EVENT", "AGENT")
             and o.get("level") != "DEBUG"  # LangGraph internals the CallbackHandler marks as hidden
