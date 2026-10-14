@@ -88,7 +88,7 @@ Read `references/compression.md` to pick thresholds. Mechanism:
 - `make test` (isolation, summarize, cut index, Memory limiter fairness/cancellation, LTM 429/5xx retry, search limit range).
 - On dev with real memory: chat 2 turns in the same session ⇒ turn 2 remembers turn 1; switch session ⇒ no history but **still** recalls facts saved via `remember`.
 - On dev: check whether records appear **without** `remember` (Step 3, automatic extraction). Report the result, and don't promise it in the system prompt until it is confirmed.
-- On Langfuse: span `memory.recall` has `namespace`, `facts`, `count`; `context.compress` has `tokens_before/after`, `decision`.
+- On Langfuse: `memory.recall` (type `retriever`) has `namespace`, `facts`, `count`; `context.compress` has `tokens_before/after`, `decision`.
 
 ## SDK bugs hit during real deploys (greennode-agentbase 1.0.3) — fixed in assets
 

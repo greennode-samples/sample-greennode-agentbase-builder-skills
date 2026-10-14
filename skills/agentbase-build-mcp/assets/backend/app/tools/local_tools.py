@@ -72,7 +72,7 @@ def search_knowledge(query: str) -> str:
     """
     s = get_settings()
     words = {w for w in _WORD_RE.findall(query.lower()) if len(w) > 1}
-    with tracing.step("knowledge.search", input={"query": query}) as st:
+    with tracing.step("knowledge.search", input={"query": query}, as_type="retriever") as st:
         scored = []
         for file, heading, text in _knowledge_chunks(s.knowledge_dir):
             low = text.lower()

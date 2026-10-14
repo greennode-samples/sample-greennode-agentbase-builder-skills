@@ -38,7 +38,8 @@ Empty tier ⇒ uses `large`, so a single model (`LLM_MODEL`) still works.
 
 - Override with `LLM_TASK_TIERS='{"agent": "reasoning"}'` (e.g. a financial-analysis agent always needs reasoning).
 - **Adding a new flow** (planner, sql, extractor…): add it to `DEFAULT_TASK_TIERS`, then call `get_llm("<task>", tools)` — do **not** create `ChatOpenAI` yourself.
-- Trace: chain `llm.<task>` (metadata `llm_task`, `llm_tier`) contains a generation **named after the model** (`qwen/qwen3.8-flash`, `… (fallback)`), tag `llm.<tier>` ⇒ cost/latency can be filtered per flow and per model.
+- Trace: chain `llm.<task>` (metadata `llm_task`, `llm_tier`) contains the generation `llm.<task>.generate` — a stable name per flow, **never the model** (Langfuse best practice: a model swap must not break filters, evaluators or dashboards). The model is the generation's `model` attribute; a fallback generation has the same name with metadata `llm_role=fallback`; tag `llm.<tier>` ⇒ cost/latency can be filtered per flow (name) and per model (`model`).
+- Thinking: MaaS reasoning models return their thinking in the non-standard `reasoning_content`/`reasoning` field, which `ChatOpenAI` drops. `_chat` builds a `_ChatMaaS` (ChatOpenAI subclass) that keeps it in `generation_info` only ⇒ Langfuse shows it on the generation (`/agentbase-build-tracing`), the message/checkpoint/next request are unchanged.
 
 ## 3. Adaptive routing (`LLM_ADAPTIVE_ROUTING`, off by default)
 
@@ -112,7 +113,7 @@ Reference numbers, measured on GreenNode MaaS on 2026-10-02 (1 tool-calling requ
 
 **Quality warning (seen on a real runtime):** with adaptive routing, a greeting was routed to `agent_simple` using `qwen/qwen3.8-flash`, and the Vietnamese reply got mixed with Indonesian words ("beberapa"). Models for flows that **answer the user directly** (`agent_simple`, `agent`, `agent_complex`) must pass evals on language/tone; internal flows (`router`, `summarize`, `eval_judge`) are lower risk. Add eval items in the user's language for simple messages (greetings, thanks) when enabling adaptive routing.
 
-Note: most models on MaaS emit reasoning tokens, even flash variants. Langfuse v4 **does separate** `output_reasoning` (verified), so check it directly on the generation.
+Note: most models on MaaS emit reasoning tokens, even flash variants. Langfuse v4 **does separate** `output_reasoning` (verified), so check it directly on the generation — together with the thinking text in its output (captured by `_ChatMaaS`; not yet confirmed on MaaS which field name it uses — extend `_reasoning_text` if `output_reasoning > 0` but no text shows).
 
 **Judge burns reasoning tokens**: on real Langfuse, `reflection.judge` running `qwen3.8-max` used **939–1395 reasoning tokens per grading** (longer than the answer itself). The `judge` flow (within the chat turn) should use a fast, low-reasoning model (`LLM_TASK_TIERS='{"judge":"small"}'` with an evaluated small model), keeping `eval_judge` (offline) on reasoning. Re-measure on Langfuse before settling.
 
@@ -120,9 +121,9 @@ Note: most models on MaaS emit reasoning tokens, even flash variants. Langfuse v
 
 ## Standard code (assets of this skill)
 
-- `app/llm/__init__.py`: `get_llm(task, tools)` is the **only entry point**; `tier_for`, `model_for`, `fallbacks_for`, `FALLBACK_ERRORS`, `ProviderStreamError`, `worst_case_s`. `_chat` caches by (model, tier, role); the small tier uses temperature 0, the reasoning tier timeout ×2.
+- `app/llm/__init__.py`: `get_llm(task, tools)` is the **only entry point**; `tier_for`, `model_for`, `fallbacks_for`, `FALLBACK_ERRORS`, `ProviderStreamError`, `worst_case_s`. `_chat` caches by (model, tier, role) and returns `_ChatMaaS` (keeps the thinking text for tracing); the small tier uses temperature 0, the reasoning tier timeout ×2.
 - `app/llm/routing.py`: `classify()` for adaptive routing.
-- `tests/test_llm.py`: default/overridden tiers, flow table, fallback on infrastructure errors (no fallback on 400), each flow uses the right model, adaptive routing picks the right flow. Against a local OpenAI-compatible mock HTTP server: an SSE error chunk before or after the first token falls back (`ainvoke`, `invoke`, `abatch`, and the streamed service turn with `reset`), while HTTP 400/401/422 do not. Time budget: the backoff constants match the openai SDK, `worst_case_s` per setup, and the warning fires for the defaults and stays quiet for every row of the §4 table.
+- `tests/test_llm.py`: default/overridden tiers, flow table, fallback on infrastructure errors (no fallback on 400), each flow uses the right model, adaptive routing picks the right flow. Against a local OpenAI-compatible mock HTTP server: an SSE error chunk before or after the first token falls back (`ainvoke`, `invoke`, `abatch`, and the streamed service turn with `reset`), while HTTP 400/401/422 do not; streamed `reasoning_content` reaches the callbacks but not the message. Generation names stay `llm.<task>.generate` whatever the model, the fallback or the caller's `run_name`. Time budget: the backoff constants match the openai SDK, `worst_case_s` per setup, and the warning fires for the defaults and stays quiet for every row of the §4 table.
 - `streaming=True` + `stream_usage=True` ⇒ Langfuse gets TTFT and usage when streaming (MaaS returns usage when streaming).
 
 ## Prompt caching

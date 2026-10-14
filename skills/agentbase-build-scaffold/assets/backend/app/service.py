@@ -384,7 +384,8 @@ class _Run:
             }
         answer, tools_used = _final_text(messages), _tools_used(messages)
         if root is not None:
-            root.update(output={"response": answer, "tools_used": tools_used})
+            # trace output = what a reviewer / evaluator / experiment compares: the answer text itself
+            root.update(output=answer, metadata={"tools_used": tools_used})
         return {
             "status": "success",
             "response": answer,
