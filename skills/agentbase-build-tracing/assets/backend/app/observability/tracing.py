@@ -17,8 +17,8 @@ dashboards, saved views target them): stable, `<domain>.<action>`, never a model
       │   ├─ context.hard_trim [event, WARNING] when a hard cut is needed
       │   └─ llm.<task>    [chain]  metadata={llm_task, llm_tier} · linked to the Langfuse prompt version
       │       │                     (Prompt Management) — app/llm get_llm() names this chain
-      │       └─ llm.<task>.generate [generation] model attribute · input=messages+tool schemas · output (+ the
-      │                    model's thinking in additional_kwargs.reasoning_content) · model_parameters ·
+      │       └─ llm.<task>.generate [generation] model attribute · input={messages, tools} (OpenAI chat) · output
+      │                    {role, content, tool_calls, thinking} · model_parameters ·
       │                    usage{input, output, input_cache_read, cache_creation_*, output_reasoning} · cost · TTFT
       │                    (+ a second one with metadata llm_role=fallback when the primary fails)
       ├─ tools             [chain]
@@ -399,6 +399,45 @@ def _callback_handler_class() -> type:
             except Exception:  # noqa: BLE001 — tracing must never break the LLM call
                 log.warning("could not attach the reasoning text to the trace", exc_info=True)
             return super().on_llm_end(response, **kwargs)
+
+        def _convert_message_to_dict(self, message: Any) -> dict[str, Any]:  # SDK-internal (4.x)
+            """Every traced message (generation input AND output) in OpenAI chat format — what Langfuse renders
+            as a conversation (tool calls as cards with JSON-string arguments, tool results matched by id) — not
+            LangChain's (args dicts + additional_kwargs). Thinking ⇒ message-level `thinking` (trace view thinking
+            block); the session view ignores it and stays a clean user/assistant conversation."""
+            try:
+                from langchain_core.messages import convert_to_openai_messages
+
+                out: dict[str, Any] = convert_to_openai_messages(message)
+            except Exception:  # noqa: BLE001
+                return super()._convert_message_to_dict(message)
+            text = (getattr(message, "additional_kwargs", None) or {}).get(REASONING_KEY)
+            if isinstance(text, str) and text:
+                out["thinking"] = [{"type": "thinking", "content": text}]
+            return out
+
+        def on_chat_model_start(
+            self, serialized: Any, messages: Any, *, run_id: Any, **kwargs: Any
+        ) -> Any:
+            result = super().on_chat_model_start(serialized, messages, run_id=run_id, **kwargs)
+            # The SDK appends the tool definitions to the input as fake `{"role": "tool", "content": <schema>}`
+            # messages, after the user's question: Langfuse's session view then mistakes them for the turn's last
+            # tool message and replays the whole history every turn. Record the OpenAI request shape instead.
+            try:
+                generation = (getattr(self, "_runs", None) or {}).get(run_id)
+                if generation is not None:
+                    chat: dict[str, Any] = {
+                        "messages": [
+                            self._convert_message_to_dict(m) for batch in messages for m in batch
+                        ]
+                    }
+                    tools = (kwargs.get("invocation_params") or {}).get("tools")
+                    if isinstance(tools, list) and tools:
+                        chat["tools"] = tools
+                    generation.update(input=chat)
+            except Exception:  # noqa: BLE001 — tracing must never break the LLM call
+                log.warning("could not record the generation input", exc_info=True)
+            return result
 
         def _get_error_level_and_status_message(self, error: BaseException) -> tuple[Any, str]:
             if isinstance(

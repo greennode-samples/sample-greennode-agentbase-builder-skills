@@ -117,11 +117,14 @@ async def test_chat_turn_trace_follows_best_practices(spans, monkeypatch):
     assert _type(gen) == "generation"
     assert gen.get("langfuse.observation.model.name") == MODEL
     output = json.loads(gen["langfuse.observation.output"])
-    assert output["content"] == "Paris is the capital of France."
-    assert output["additional_kwargs"][tracing.REASONING_KEY].startswith(
-        "The user asks for a capital"
-    )
+    # OpenAI chat format (Langfuse renders it as a conversation); thinking ⇒ message-level `thinking` block
+    assert output["role"] == "assistant" and output["content"] == "Paris is the capital of France."
+    assert "additional_kwargs" not in output
+    assert output["thinking"][0]["type"] == "thinking"
+    assert output["thinking"][0]["content"].startswith("The user asks for a capital")
     assert "hunter2" not in gen["langfuse.observation.output"]  # thinking goes through `mask` too
+    chat = json.loads(gen["langfuse.observation.input"])
+    assert [m["role"] for m in chat["messages"]] == ["system", "user"]
 
     # long-term recall is a lookup ⇒ retriever (filterable as such, drives the Agent Graph)
     assert {_type(a) for a in got["memory.recall"]} == {"retriever"}
@@ -247,3 +250,59 @@ def test_status_text_is_readable():
     handler = tracing._callback_handler_class()()
     level, text = handler._get_error_level_and_status_message(asyncio.CancelledError())
     assert level == "WARNING" and text.startswith("Cancelled:")
+
+
+async def test_generation_io_is_openai_chat_format(spans, monkeypatch):
+    """The SDK appended tool definitions to the input as fake {"role": "tool", "content": <schema>} messages after
+    the user's question: Langfuse's session view then replayed the whole history every turn (seen on a real
+    10-turn session). Input must be the OpenAI request shape {"messages", "tools"}; tool calls OpenAI-style."""
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from app import llm, service
+
+    class _ToolThenAnswer(BaseChatModel):
+        calls: int = 0
+
+        @property
+        def _llm_type(self) -> str:
+            return "fake-tools"
+
+        def bind_tools(self, tools: Any, **kwargs: Any):  # type: ignore[override]
+            return self.bind(tools=[convert_to_openai_tool(t) for t in tools])
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                call = {
+                    "name": "get_current_time",
+                    "args": {"timezone": "Asia/Ho_Chi_Minh"},
+                    "id": "call_1",
+                }
+                msg = AIMessage("", tool_calls=[call])
+            else:
+                msg = AIMessage("It is noon.")
+            return ChatResult(
+                generations=[ChatGeneration(message=msg)], llm_output={"model_name": MODEL}
+            )
+
+    model = _ToolThenAnswer()
+    monkeypatch.setattr(llm, "_chat", lambda m, t, r: model)
+    out = await service.handle(
+        {"message": "What time is it?"}, RequestContext(session_id="s-io", user_id="u-io")
+    )
+    assert out["response"] == "It is noon."
+    first, second = spans()["llm.agent.generate"]
+    for gen in (first, second):
+        chat = json.loads(gen["langfuse.observation.input"])
+        assert set(chat) == {"messages", "tools"}
+        assert {t["function"]["name"] for t in chat["tools"]} >= {"get_current_time"}
+        # no tool definition disguised as a message
+        assert all(m["role"] != "tool" or m.get("tool_call_id") for m in chat["messages"])
+    call = json.loads(first["langfuse.observation.output"])["tool_calls"][0]
+    assert call["type"] == "function" and call["id"] == "call_1"
+    assert json.loads(call["function"]["arguments"]) == {
+        "timezone": "Asia/Ho_Chi_Minh"
+    }  # JSON string
+    replay = json.loads(second["langfuse.observation.input"])["messages"]
+    assert [m["role"] for m in replay] == ["system", "user", "assistant", "tool"]
+    assert replay[2]["tool_calls"][0]["id"] == replay[3]["tool_call_id"] == "call_1"

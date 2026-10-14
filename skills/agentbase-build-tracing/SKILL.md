@@ -39,9 +39,10 @@ Source: [What does a good trace look like?](https://langfuse.com/docs/observabil
 | Trace = one unit of work, session = the conversation | 1 trace per `/invocations` turn; `session_id` = conversation, including HITL resume turns |
 | Root input/output = what a reviewer needs | Root `agent.invoke`: input = user message (or resume decisions), output = **answer text** (or the interrupt; on failure **the error the caller received** `{error, status}`); `tools_used` in root metadata |
 | Session view = a readable conversation replay | Langfuse builds it from **generations**, shallowest per trace; see "Session view" below — conversation LLM calls (`CONVERSATION_TASKS`) at the top, internal LLM calls one level deeper, static system prompt + a per-turn context message |
+| Generation input/output as role-labeled OpenAI chat messages | `_AgentBaseCallbackHandler` records input = the OpenAI request `{"messages": [...], "tools": [...]}`, output = the assistant message `{role, content, tool_calls, thinking}`; tool calls `{id, type: "function", function: {name, arguments: "<JSON string>"}}` (rendered as cards), tool results `{role: "tool", tool_call_id}` |
 | Each LLM call is its own `generation`, interleaved with its tools | CallbackHandler: one generation per call of the agent loop, tool observations as siblings |
 | Most specific observation type | `generation` LLM call · `tool` tool · `retriever` lookups (`memory.recall`, `knowledge.search`) · `evaluator` judges (`reflection.judge`, `eval.judge`) · `agent` **only** the root, remote A2A agents (`a2a.<agent>`) and in-graph sub-agents (`subagent.<role>`) · `chain` LangGraph nodes · `span` other I/O · `event` milestones |
-| Capture thinking | `app/llm` keeps the provider's `reasoning_content`/`reasoning` (ChatOpenAI drops it) ⇒ generation output `additional_kwargs.reasoning_content` (masked, capped at 20k chars); never stored in the message/checkpoint |
+| Capture thinking | `app/llm` keeps the provider's `reasoning_content`/`reasoning` (ChatOpenAI drops it) ⇒ generation output `thinking: [{"type": "thinking", "content": …}]` — the thinking block of Langfuse's trace view (masked, capped at 20k chars); never stored in the message/checkpoint |
 | Names: stable, low-cardinality, verb/action, never the model | `<domain>.<action>`; generations `llm.<task>.generate`; no ids, counters, retries or model names in a name (→ metadata). Renaming breaks evaluators, dashboards and saved views |
 | Model + usage (+ cost) on generations | model from `ChatOpenAI`; usage incl. `input_cache_read`, `output_reasoning`; cost needs MaaS prices declared (Step 1.4) |
 | Metadata for context, tags for dimensions known upfront | trace metadata = config (request id, models per tier, memory backend…); tags `[agent, env, type:chat|resume, stream]` + your `feature:`/`tenant:` tags via `trace_request(tags=…)`; things learned later ⇒ scores |
@@ -96,8 +97,8 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     ├─ agent [chain]
     │   ├─ context.hard_trim [event, WARNING]
     │   └─ llm.<task> [chain]        metadata{llm_task, llm_tier} · links prompt version (agent flow only)
-    │       ├─ llm.<task>.generate [generation]  model attribute (e.g. qwen/qwen3.8-flash) · input = messages +
-    │       │                        tool schemas · output (+ thinking: additional_kwargs.reasoning_content) ·
+    │       ├─ llm.<task>.generate [generation]  model attribute (e.g. qwen/qwen3.8-flash) · input = {messages,
+    │       │                        tools} (OpenAI chat request) · output = {role, content, tool_calls, thinking} ·
     │       │                        model_parameters · usage{input, output, total, input_cache_read,
     │       │                        cache_creation_*, output_reasoning} · cost · completion_start_time (TTFT)
     │       └─ llm.<task>.generate   2nd generation only when the primary fails: metadata llm_role=fallback, other
@@ -165,18 +166,24 @@ How Langfuse 4.x builds it (source: `packages/shared/src/server/transcript` in l
 - One **thread** per conversation, assembled from **GENERATION** observations (+ TOOL observations matched to tool
   calls by id). Root input/output is only a fallback. A generation continues a thread when all the thread's
   non-system messages appear in its input; otherwise it starts a new thread.
+- Per trace, the session shows only the **current turn**: the replayed input up to the previous turn's last
+  `assistant`/`tool` message is history and is hidden — so the input must be faithful role-labeled history, with
+  nothing after the user's message that looks like an assistant/tool message.
 - The session UI shows, per trace, only the threads whose first generation is at the **shallowest tree depth**;
   deeper ones are hidden. System messages are not used for matching; a **changed** system message is shown again.
+- Result: **session = the conversation** (per turn: user message, tool calls/results, answer); **trace = every
+  step** (spans, retrievers, router, judge, thinking, usage, cost).
 
 Rules (all enforced by the template; keep them when adding code):
 
 | Rule | Why (seen on a real 10-turn session) | How |
 |---|---|---|
+| Generation I/O in the OpenAI chat format | the SDK's LangChain handler appends the tool definitions to the input as fake `{"role": "tool", "content": <schema>}` messages AFTER the user's question ⇒ the session view treated the whole input as the current turn and showed "User: chào bạn…" (turn 1) again in every turn; LangChain tool calls (`args` dicts) were not rendered as cards | `_AgentBaseCallbackHandler` (`tracing.langchain_callbacks()`): input `{"messages", "tools"}`, messages via `convert_to_openai_messages`, tool-call `arguments` as JSON strings, no `additional_kwargs`. `lf_trace.py --audit` flags tool definitions recorded as messages |
 | Only user-facing LLM calls are at the top | router JSON (`{"complexity": …}`) and judge critiques showed up as threads "3.1 / 3.2 / 3.3" between the user's messages | `get_llm(task)`: tasks in `CONVERSATION_TASKS` (`agent`, `agent_simple`, `agent_complex`) are returned as is; **every other task is wrapped one level deeper** (`<run_name>` or `<task>.call`). A new internal flow (planner, classifier, extractor…) needs nothing; a new user-facing flow must be added to `CONVERSATION_TASKS` |
 | Static system prompt, per-turn context separate | the full system prompt was repeated every turn the recalled facts changed; the changing prefix also cost prompt cache | `[SystemMessage(system_prompt), *history, Human, SystemMessage(context)…]` — summary, recalled facts and the self-eval critique go in `build_context_message`, inserted right after the latest user message (`with_turn_context`). Measured: agent `cache_read` 1,024–2,048 ⇒ 5,120 tokens |
 | Don't rewrite history | an edited/removed message breaks the thread match | expected splits: a reflection retry (the rejected answer is removed), context compression (history replaced by a summary), HITL `edit` (arguments changed) — the session shows a new thread for that turn |
 | A failed turn reads like the user saw it | the root showed `TimeoutError: ` with no output; cancelled children showed `<object object at 0x…>` | `trace_request(error_output=_user_error)` ⇒ root output `{error, status}` = the HTTP error / SSE `error` event; `_describe()` names empty errors; cancellations are `WARNING` "Cancelled: …" |
-| Thinking | the session view reads reasoning only from content parts (`{"type": "reasoning"|"thinking", …}`), the trace detail from a message-level `thinking` field — `additional_kwargs.reasoning_content` is in the output JSON but rendered by neither | **open item**: confirm the rendering on the Langfuse UI before changing the format |
+| Thinking in the trace, not in the session | thinking text in `additional_kwargs.reasoning_content` was rendered nowhere (raw JSON only) | output message-level `thinking: [{"type": "thinking", "content": …}]` ⇒ the trace view's thinking block (`ThinkingBlock`); the session view ignores it, so the conversation stays clean |
 
 ## Step 6 — Run and self-audit the traces (required, before every deploy)
 
@@ -226,6 +233,7 @@ Real example (a "Hello" message took 55s); the trace showed it immediately: `mcp
 | Generation missing cost | Model prices not declared | Step 1.4 |
 | HTTP/DB spans in the tree | `should_export_span` overridden to export everything | Back to the SDK default filter |
 | Session view shows several threads per turn (router JSON, judge critique) | An internal LLM call at the same depth as the agent's generation | Call it through `get_llm(<task>)` with a task not in `CONVERSATION_TASKS` |
+| Session view repeats the first user message / whole history every turn | Generation input not in the OpenAI chat format (tool definitions recorded as `role: tool` messages) — a plain `langfuse.langchain.CallbackHandler` | Use `tracing.langchain_callbacks()`; `lf_trace.py --audit` |
 | Session view repeats the system prompt every turn | Per-turn data (facts, summary, critique) written into the system prompt | Put it in `build_context_message` |
 | Status `<object object at 0x…>` / `TimeoutError: ` | Cancelled or message-less errors | Already handled by `_describe` / `_AgentBaseCallbackHandler` — use `tracing.step`/`trace_request` |
 | Traces missing for the last requests when the container stops | Not flushed | lifespan already calls `shutdown_tracing()`; don't kill -9 |
