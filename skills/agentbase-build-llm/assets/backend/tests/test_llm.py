@@ -10,6 +10,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableLambda
 
 from app import llm, service
 from app.config import get_settings
@@ -93,15 +94,26 @@ async def test_falls_back_on_infra_errors(monkeypatch, models, err):
 
 
 class _RunNames(BaseCallbackHandler):
-    """Records (run name, kind) of every chain / chat model run, as Langfuse would name the observations."""
+    """Records (run name, kind) of every chain / chat model run, as Langfuse would name the observations, and the
+    tree depth of each run (Langfuse's session view only shows the shallowest generations as the conversation)."""
 
     def __init__(self) -> None:
         self.runs: list[tuple[str, str]] = []
+        self.depth: dict = {}
+        self.gen_depth: list[tuple[str, int]] = []
 
-    def on_chain_start(self, serialized, inputs, *, name=None, **kw):
+    def _track(self, run_id, parent_run_id) -> int:
+        self.depth[run_id] = self.depth.get(parent_run_id, -1) + 1
+        return self.depth[run_id]
+
+    def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, name=None, **kw):
+        self._track(run_id, parent_run_id)
         self.runs.append((name or "", "chain"))
 
-    def on_chat_model_start(self, serialized, messages, *, name=None, **kw):
+    def on_chat_model_start(
+        self, serialized, messages, *, run_id, parent_run_id=None, name=None, **kw
+    ):
+        self.gen_depth.append((name or "", self._track(run_id, parent_run_id)))
         self.runs.append((name or "", "generation"))
 
 
@@ -119,10 +131,22 @@ async def test_generation_names_are_stable_never_the_model(monkeypatch, models):
         ("llm.agent", "chain"),
         ("llm.agent.generate", "generation"),  # primary (fails ⇒ ERROR)
         ("llm.agent.generate", "generation"),  # fallback: same name, metadata llm_role=fallback
-        ("reflection.judge", "chain"),  # caller's run_name renames the chain only
+        (
+            "reflection.judge",
+            "chain",
+        ),  # internal task: caller's run_name names the extra outer level…
+        ("llm.judge", "chain"),  # …the task chain keeps its name
         ("llm.judge.generate", "generation"),  # judge = large tier too ⇒ same failing primary…
         ("llm.judge.generate", "generation"),  # …then its fallback
     ]
+    # internal generations sit exactly one level deeper than the conversation's (same caller depth)
+    assert dict(rec.gen_depth) == {"llm.agent.generate": 1, "llm.judge.generate": 2}
+
+
+@pytest.mark.parametrize("task", sorted(llm.CONVERSATION_TASKS))
+def test_conversation_tasks_are_not_wrapped(models, task):
+    assert not isinstance(llm.get_llm(task), RunnableLambda)
+    assert isinstance(llm.get_llm("summarize"), RunnableLambda)
 
 
 def test_thinking_kept_in_generation_info_not_in_message():

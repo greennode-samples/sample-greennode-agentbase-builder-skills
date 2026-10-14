@@ -278,6 +278,16 @@ def _session_lock(user_id: str, session_id: str) -> asyncio.Lock:
     return lock
 
 
+def _user_error(e: BaseException) -> dict:
+    """The error the caller receives (HTTP error / SSE `error` event) — the root trace output of a failed turn.
+    `invoke` raises the already-mapped error (`raise mapped from e`): keep it, mapping it again would turn a 504
+    timeout into the generic 503 "overloaded" message."""
+    mapped = (
+        e if isinstance(e, GreenNodeRequestError) and e.__cause__ is not None else _map_error(e)
+    )
+    return {"error": mapped.message, "status": getattr(mapped, "status_code", 500)}
+
+
 def _map_error(e: BaseException) -> GreenNodeRequestError:
     """Infrastructure errors ⇒ meaningful HTTP codes instead of a generic 500."""
     if isinstance(e, GreenNodeRequestError):
@@ -322,6 +332,7 @@ class _Run:
             input=self.trace_input,
             metadata=_trace_meta(self.kind),
             tags=[f"type:{self.kind}", *tags],
+            error_output=_user_error,
         )
 
     async def _prepare(self):

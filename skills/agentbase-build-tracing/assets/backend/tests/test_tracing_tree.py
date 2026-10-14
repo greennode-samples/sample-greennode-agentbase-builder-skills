@@ -193,3 +193,57 @@ async def test_event_in_a_node_lands_under_that_node(_lf, monkeypatch):
     (event,) = [s for s in finished if s.name == "hitl.request"]
     assert by_id[event.parent.span_id].name == "approval"
     assert _type(dict(event.attributes)) == "event"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_failed_turn_root_shows_what_the_user_got(spans, monkeypatch, stream):
+    """A timed-out turn read "TimeoutError: " with no output on a real server. The root output is now the error
+    the caller received (HTTP error / SSE error event), and child observations cancelled by the timeout say so."""
+    import asyncio
+
+    from greennode_agentbase import GreenNodeRequestError
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    from app import llm, service
+
+    class _Slow(GenericFakeChatModel):
+        def bind_tools(self, tools, **kw):  # type: ignore[override]
+            return self
+
+        async def _agenerate(self, *a, **k):
+            await asyncio.sleep(5)
+
+        async def _astream(self, *a, **k):  # the streamed turn takes this path
+            await asyncio.sleep(5)
+            if False:  # pragma: no cover — makes this an async generator
+                yield
+
+    monkeypatch.setenv("REQUEST_TIMEOUT_S", "0.3")
+    get_settings.cache_clear()
+    monkeypatch.setattr(llm, "_chat", lambda m, t, r: _Slow(messages=iter([AIMessage("late")])))
+    ctx = RequestContext(session_id=f"s-timeout-{stream}", user_id="u")
+    if stream:
+        events = [e async for e in await service.handle({"message": "hi", "stream": True}, ctx)]
+        assert events[-1]["event"] == "error" and events[-1]["status"] == 504
+    else:
+        with pytest.raises(GreenNodeRequestError):
+            await service.handle({"message": "hi"}, ctx)
+    got = spans()
+    (root,) = got["agent.invoke"]
+    assert json.loads(root["langfuse.observation.output"]) == {
+        "error": "Agent timed out (0s)",
+        "status": 504,
+    }
+    statuses = [a.get("langfuse.observation.status_message", "") for v in got.values() for a in v]
+    assert not any("<object object" in s for s in statuses), statuses
+    assert any(s.startswith("Cancelled: the request was cancelled") for s in statuses), statuses
+
+
+def test_status_text_is_readable():
+    import asyncio
+
+    assert tracing._describe(TimeoutError()) == "TimeoutError"
+    assert tracing._describe(ValueError("bad")) == "ValueError: bad"
+    handler = tracing._callback_handler_class()()
+    level, text = handler._get_error_level_and_status_message(asyncio.CancelledError())
+    assert level == "WARNING" and text.startswith("Cancelled:")

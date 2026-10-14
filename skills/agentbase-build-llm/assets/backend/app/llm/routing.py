@@ -42,7 +42,7 @@ async def classify(text: str, summary: str = "") -> Complexity:
         try:
             out = await get_llm("router").ainvoke(
                 [SystemMessage(ROUTER_PROMPT), HumanMessage(f"{context}Request: {text}")],
-                config={"run_name": "llm.router"},
+                config={"run_name": "router.call"},
             )
             match = re.search(r"\{.*\}", str(out.content), re.S)
             data = json.loads(match.group(0)) if match else {}
