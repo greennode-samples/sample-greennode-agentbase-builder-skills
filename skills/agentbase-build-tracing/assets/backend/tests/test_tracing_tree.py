@@ -102,6 +102,10 @@ async def test_chat_turn_trace_follows_best_practices(spans, monkeypatch):
     assert agents == ["agent.invoke"], agents
     for name in ("agent.graph", "agent", "llm.agent"):
         assert {_type(a) for a in got[name]} == {"chain"}, name
+        # no LangGraph state blobs (the whole history on every node) — the session page's I/O view stays short
+        for attrs in got[name]:
+            assert "langfuse.observation.input" not in attrs, name
+            assert "langfuse.observation.output" not in attrs, name
 
     # root input/output = what a reviewer, an evaluator and a dataset experiment compare
     (root,) = got["agent.invoke"]

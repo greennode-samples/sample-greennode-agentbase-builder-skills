@@ -126,7 +126,7 @@ def audit(obs: list[dict]) -> list[tuple[str, str]]:
                 out.append(("WARN", f"{name}: tool definitions recorded as messages — the session view replays "
                                     "the history every turn; use tracing.langchain_callbacks()"))
         elif (
-            kind not in ("EVENT", "AGENT")
+            kind not in ("EVENT", "AGENT", "CHAIN")  # chains carry no I/O by design (LangGraph state)
             and o.get("level") != "DEBUG"  # LangGraph internals the CallbackHandler marks as hidden
             and _empty(o.get("input"))
             and _empty(o.get("output"))
