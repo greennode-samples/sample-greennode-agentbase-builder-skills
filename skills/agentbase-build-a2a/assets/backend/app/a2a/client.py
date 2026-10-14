@@ -179,8 +179,12 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
                 )
             conf = config.get("configurable") or {}
             user_id, session_id = conf["actor_id"], conf["thread_id"]
+            # `agent` observation named per target (a2a.<agent>): each remote agent is its own node in the Langfuse
+            # Agent Graph instead of one generic span shared by every target
             with tracing.step(
-                "a2a.call", input={"agent": _n, "url": _c["url"], "message": message}
+                f"a2a.{_t.removeprefix('ask_')}",
+                input={"agent": _n, "url": _c["url"], "message": message},
+                as_type="agent",
             ) as st:
                 headers = _headers(_c, settings, principal, user_id)
                 async with httpx.AsyncClient(

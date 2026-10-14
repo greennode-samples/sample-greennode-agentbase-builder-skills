@@ -12,7 +12,7 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 | `/agentbase-build-scaffold` | Creates `src/backend` (+ `src/frontend`), env managed with **uv**, Makefile, Dockerfile |
 | `/agentbase-build-llm` | LLMs from GreenNode MaaS: **capability tiers** (reasoning/large/small), **flow → tier**, adaptive routing, **fallback model**, streaming/usage, prompt cache |
 | `/agentbase-build-memory` | Short-term (`AgentBaseMemoryEvents`), long-term (records + auto-recall + tools), **context compression** |
-| `/agentbase-build-tracing` | **[Langfuse](https://github.com/langfuse/langfuse) v4**: detailed per-step trace tree, model/usage/cost/cache/TTFT, masking, Prompt Management, feedback |
+| `/agentbase-build-tracing` | **[Langfuse](https://github.com/langfuse/langfuse) v4**, aligned with the Langfuse best practices and the official [Langfuse skill](https://github.com/langfuse/skills): per-step trace tree with specific observation types, model/usage/cost/cache/TTFT/thinking, masking, Prompt Management, feedback, run-and-audit loop |
 | `/agentbase-build-mcp` | Local tools + **MCP Connectors** (catalog/custom) on the **MCP Gateway** + **Policy Group** (principal `iam:<sub>`, action `connector__tool`), policy-deny guard |
 | `/agentbase-build-mcp-server` | **Build an MCP server** with auth: API key / OAuth JWT (2LO, 3LO, inbound forward), scopes, user from token, Protected Resource Metadata |
 | `/agentbase-build-a2a` | **A2A**: expose the agent (Agent Card + JSON-RPC) and call other agents as tools, isolate tasks/memory per user — only when decision guide §5 is satisfied |
@@ -84,6 +84,8 @@ The skills follow the open [Agent Skills](https://agentskills.io) format (`skill
 | Anything else | [Manual copy](#manual) |
 
 > Install the platform skill set [`vngcloud/greennode-agentbase-skills`](https://github.com/vngcloud/greennode-agentbase-skills) alongside it, using the same method. The `agentbase-build-*` skills call those skills (`/agentbase-deploy`, `/agentbase-gateway`, `/agentbase-identity`…) for platform operations.
+>
+> Also install the official [Langfuse skill](https://github.com/langfuse/skills) (`npx skills add langfuse/skills --skill langfuse`). `agentbase-build-tracing` uses it for up-to-date Langfuse docs, `langfuse-cli` and its playbooks, and keeps the AgentBase-specific rules (names, types, masking, MaaS) itself.
 
 ### Claude Code
 

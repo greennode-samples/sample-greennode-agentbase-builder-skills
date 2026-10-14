@@ -48,7 +48,9 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Tracing (Langfuse v4)
 - [B] One request creates exactly 1 `agent.invoke` trace with user_id, session_id, tags, version.
-- Complete trace tree: `auth`, `tools.collect`, `mcp.list_tools`, `compress/context.compress`, `recall/memory.recall`, generation (model, usage, cost), tool spans, `hitl.*` when present.
+- Complete trace tree: `auth`, `tools.collect`, `mcp.list_tools`, `compress/context.compress`, `recall/memory.recall` (retriever), generations `llm.<task>.generate` (model attribute, usage, cost, thinking when the model reasons), tool observations, `hitl.*` when present.
+- Root `agent.invoke` input = user message, output = answer text; the only `agent` observations are the root and `a2a.<agent>`/`subagent.*`; no observation is named after a model or a per-request value.
+- `lf_trace.py --latest 3 --audit` (skill `agentbase-build-tracing`) reports no FAIL; WARNs are fixed or explained.
 - Generations have cost (GreenNode model prices declared in Langfuse) and `input_cache_read` if the provider returns it.
 - No tokens/API keys in traces (check 1 real trace).
 

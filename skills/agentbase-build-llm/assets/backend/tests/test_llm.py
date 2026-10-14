@@ -6,12 +6,14 @@ import httpx
 import openai
 import pytest
 from greennode_agentbase import RequestContext
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app import llm, service
 from app.config import get_settings
+from app.observability.tracing import REASONING_KEY
 
 
 class _Model(BaseChatModel):
@@ -88,6 +90,64 @@ async def test_falls_back_on_infra_errors(monkeypatch, models, err):
     _env(monkeypatch, LLM_MODEL="primary", LLM_FALLBACK_MODELS='["backup"]')
     models["primary"] = _Model(name_="primary", error=err)
     assert (await llm.get_llm("agent", tools=[]).ainvoke("hi")).content == "backup"
+
+
+class _RunNames(BaseCallbackHandler):
+    """Records (run name, kind) of every chain / chat model run, as Langfuse would name the observations."""
+
+    def __init__(self) -> None:
+        self.runs: list[tuple[str, str]] = []
+
+    def on_chain_start(self, serialized, inputs, *, name=None, **kw):
+        self.runs.append((name or "", "chain"))
+
+    def on_chat_model_start(self, serialized, messages, *, name=None, **kw):
+        self.runs.append((name or "", "generation"))
+
+
+async def test_generation_names_are_stable_never_the_model(monkeypatch, models):
+    """Langfuse best practice: names are an API (evaluators/dashboards target them) ⇒ swapping or falling back to
+    another model must not rename the generation; the model is the generation's `model` attribute."""
+    _env(monkeypatch, LLM_MODEL="qwen/qwen3.8-flash", LLM_FALLBACK_MODELS='["glm/glm-5"]')
+    models["qwen/qwen3.8-flash"] = _Model(name_="primary", error="connection")
+    rec = _RunNames()
+    await llm.get_llm("agent").ainvoke("hi", config={"callbacks": [rec]})
+    await llm.get_llm("judge").ainvoke(
+        "hi", config={"callbacks": [rec], "run_name": "reflection.judge"}
+    )
+    assert rec.runs == [
+        ("llm.agent", "chain"),
+        ("llm.agent.generate", "generation"),  # primary (fails ⇒ ERROR)
+        ("llm.agent.generate", "generation"),  # fallback: same name, metadata llm_role=fallback
+        ("reflection.judge", "chain"),  # caller's run_name renames the chain only
+        ("llm.judge.generate", "generation"),  # judge = large tier too ⇒ same failing primary…
+        ("llm.judge.generate", "generation"),  # …then its fallback
+    ]
+
+
+def test_thinking_kept_in_generation_info_not_in_message():
+    """MaaS reasoning models return `reasoning_content` (or `reasoning`): ChatOpenAI drops it; _ChatMaaS keeps it
+    for tracing only."""
+    model = llm._ChatMaaS(model="m", api_key="k", base_url="http://127.0.0.1:9/v1")
+    for field in ("reasoning_content", "reasoning"):
+        result = model._create_chat_result(
+            {
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "42", field: "6 × 7"},
+                    }
+                ],
+            }
+        )
+        (gen,) = result.generations
+        assert gen.generation_info[REASONING_KEY] == "6 × 7"
+        assert gen.message.content == "42" and REASONING_KEY not in gen.message.additional_kwargs
 
 
 async def test_no_fallback_on_bad_request(monkeypatch, models):
@@ -268,8 +328,12 @@ def test_recommended_settings_fit_every_tier(monkeypatch, caplog):
 _DONE = object()
 
 
-def _chunk(content: str | None = None, finish: str | None = None) -> dict:
+def _chunk(
+    content: str | None = None, finish: str | None = None, reasoning: str | None = None
+) -> dict:
     delta = {"role": "assistant", "content": content} if content is not None else {}
+    if reasoning is not None:
+        delta = {"role": "assistant", "content": "", "reasoning_content": reasoning}
     return {
         "id": "chatcmpl-mock",
         "object": "chat.completion.chunk",
@@ -401,3 +465,23 @@ async def test_sse_error_mid_stream_resets_client_and_backup_answers(mock_llm_se
     after = events[kinds.index("reset") + 1 :]
     assert "".join(e["data"] for e in after if e["event"] == "token") == "Hello there"
     assert events[-1]["event"] == "done" and events[-1]["response"] == "Hello there"
+
+
+async def test_streamed_thinking_reaches_callbacks_only(mock_llm_server):
+    """Streamed `reasoning_content` deltas are concatenated into generation_info (what the tracing callback
+    reads); the answer the graph gets carries no thinking (no growth of the checkpoint / next request)."""
+    scripts, calls = mock_llm_server
+    scripts["primary"] = [
+        _chunk(reasoning="Greeting, "),
+        _chunk(reasoning="answer briefly."),
+        *_answer("Hello there"),
+    ]
+    seen: list[dict] = []
+
+    class _End(BaseCallbackHandler):
+        def on_llm_end(self, response, **kw):
+            seen.append(response.generations[0][0].generation_info or {})
+
+    out = await llm.get_llm("agent").ainvoke("hi", config={"callbacks": [_End()]})
+    assert out.content == "Hello there" and REASONING_KEY not in out.additional_kwargs
+    assert [g.get(REASONING_KEY) for g in seen] == ["Greeting, answer briefly."]

@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-a2a
-description: "A2A standard (Agent2Agent Protocol, a2a-sdk 1.x JSON-RPC) for AI agents on GreenNode AgentBase: expose the agent as an A2A server (Agent Card /.well-known/agent-card.json + POST /a2a, same container as /invocations), reuse inbound auth (api_key/JWT) and isolate tasks + memory per user, HITL via the INPUT_REQUIRED state; and an A2A client — call other agents as a LangGraph tool (a2a_agents.json), propagate user identity to the target agent, trace a2a.call. Use for multi-agent setups across independent agents (different teams/runtimes), agent-to-agent calls, publishing an agent for other systems. Trigger: A2A, agent2agent, agent calls agent, multi-agent, agent card, connect agent to agent, agent gọi agent, kết nối agent với agent. DO NOT use for sub-agents within the same graph (add a node/subgraph in app/graph/builder.py) or tool calls (use MCP)."
+description: "A2A standard (Agent2Agent Protocol, a2a-sdk 1.x JSON-RPC) for AI agents on GreenNode AgentBase: expose the agent as an A2A server (Agent Card /.well-known/agent-card.json + POST /a2a, same container as /invocations), reuse inbound auth (api_key/JWT) and isolate tasks + memory per user, HITL via the INPUT_REQUIRED state; and an A2A client — call other agents as a LangGraph tool (a2a_agents.json), propagate user identity to the target agent, trace a2a.<agent>. Use for multi-agent setups across independent agents (different teams/runtimes), agent-to-agent calls, publishing an agent for other systems. Trigger: A2A, agent2agent, agent calls agent, multi-agent, agent card, connect agent to agent, agent gọi agent, kết nối agent với agent. DO NOT use for sub-agents within the same graph (add a node/subgraph in app/graph/builder.py) or tool calls (use MCP)."
 ---
 
 # A2A — Agent2Agent Protocol
@@ -57,7 +57,7 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 - `user_jwt` replays the user's token at the target, so the target must accept this agent's `AUTH_AUDIENCE`. Only use it for agents you trust with that token; otherwise use `api_key` (identity still propagates via `X-GreenNode-AgentBase-User-Id`).
 - Target agent returns `INPUT_REQUIRED` ⇒ the tool returns `[<agent> needs confirmation] ...` so the current agent asks the user.
 - **Only a human may confirm another agent's action.** `ask_<agent>` refuses to relay a decision (`approve`, `yes`, `đồng ý`, `reject: …`) unless `ask_<agent>` is in `HITL_TOOLS` — then the user approves that exact call in the approval card. ⇒ For target agents that take actions, **add `ask_<agent>` to `HITL_TOOLS`** (otherwise their confirmations cannot be completed). Tested by `test_llm_cannot_relay_decision_without_hitl`.
-- Trace: span `a2a.call` {agent, url, message, state, text}.
+- Trace: `agent` observation `a2a.<agent>` {agent, url, message, state, text} under the tool `ask_<agent>` — one name per target, so each remote agent is its own node in the Langfuse Agent Graph (`/agentbase-build-tracing`).
 
 ## Workflow
 

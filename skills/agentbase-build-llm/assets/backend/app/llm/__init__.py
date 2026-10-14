@@ -15,7 +15,13 @@ agentbase-build-llm.
 3) Fallback: LLM_TIER_FALLBACKS {"large": [...], ...} or LLM_FALLBACK_MODELS (shared). Fall back only on
    INFRA/MODEL errors (connection lost, timeout, 429, 5xx, model removed/not permitted, provider error inside a
    streamed response); NOT on request errors (400, 401, 422...).
-   Langfuse: failed (ERROR) generation of the primary model → generation of the fallback model.
+   Langfuse: failed (ERROR) generation of the primary model → generation of the fallback model (same name
+   `llm.<task>.generate`, metadata llm_role=fallback, `model` attribute = the backup model).
+
+4) Thinking: MaaS reasoning models return their thinking in the non-standard `reasoning_content` (or
+   `reasoning`) field, which ChatOpenAI drops ⇒ `_ChatMaaS` keeps it in generation_info[REASONING_KEY]; the
+   tracing CallbackHandler shows it in the generation output. It never enters the message, the checkpoint or the
+   next request.
 """
 
 from __future__ import annotations
@@ -28,11 +34,13 @@ from typing import Any, Literal
 
 import openai
 from langchain_core.language_models import BaseChatModel
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable, RunnableBinding
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
+from app.observability.tracing import REASONING_KEY
 
 log = logging.getLogger(__name__)
 
@@ -149,10 +157,44 @@ def fallbacks_for(tier: Tier) -> list[str]:
     return out
 
 
+def _reasoning_text(message: Any) -> str:
+    """Thinking text of a response message / stream delta: `reasoning_content` (DeepSeek, SGLang, older vLLM) or
+    `reasoning` (newer vLLM, OpenRouter). Both are non-standard ⇒ ChatOpenAI drops them."""
+    if not isinstance(message, dict):
+        return ""
+    text = message.get("reasoning_content") or message.get("reasoning")
+    return text if isinstance(text, str) else ""
+
+
+class _ChatMaaS(ChatOpenAI):
+    """ChatOpenAI that keeps the provider's thinking text in generation_info[REASONING_KEY] (streamed deltas are
+    concatenated when LangChain merges the chunks). generation_info is only seen by callbacks — Langfuse shows it
+    on the generation; the AIMessage, the checkpoint and later requests stay unchanged."""
+
+    def _create_chat_result(self, response: Any, generation_info: dict | None = None) -> ChatResult:
+        result = super()._create_chat_result(response, generation_info)
+        raw = response if isinstance(response, dict) else response.model_dump()
+        for gen, choice in zip(result.generations, raw.get("choices") or [], strict=False):
+            if text := _reasoning_text((choice or {}).get("message")):
+                gen.generation_info = {**(gen.generation_info or {}), REASONING_KEY: text}
+        return result
+
+    def _convert_chunk_to_generation_chunk(
+        self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None
+    ) -> ChatGenerationChunk | None:
+        gen = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        choices = (chunk.get("choices") if isinstance(chunk, dict) else None) or []
+        if gen is not None and choices and (text := _reasoning_text(choices[0].get("delta"))):
+            gen.generation_info = {**(gen.generation_info or {}), REASONING_KEY: text}
+        return gen
+
+
 @lru_cache(maxsize=32)
 def _chat(model: str, tier: Tier, role: str) -> ChatOpenAI:
     s = get_settings()
-    return ChatOpenAI(
+    return _ChatMaaS(
         model=model,
         base_url=s.llm_base_url,
         api_key=s.llm_api_key,
@@ -235,29 +277,30 @@ def get_chat_model(task: str = "agent") -> BaseChatModel:
 def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnable:
     """Runnable for the task: the tier's primary model (+tools) with that tier's fallback chain.
 
-    Names on Langfuse (the trace tree shows which task called which model):
+    Names on Langfuse — stable like an API (evaluators, dashboards and saved views target them), never the model:
       llm.<task> | <caller run_name>    task chain (metadata llm_task, llm_tier, prompt link)
-        <model>                         primary model GENERATION (model, usage, cost, TTFT)
-        <model> (fallback)              backup model GENERATION — only when the primary fails
+        llm.<task>.generate             primary GENERATION (model attribute, usage, cost, TTFT, thinking)
+        llm.<task>.generate             backup GENERATION — only when the primary fails (metadata llm_role=fallback)
     """
     tier = tier_for(task)
     primary_model = model_for(tier)
     _warn_if_over_budget(tier)
+    gen_name = f"llm.{task}.generate"
 
     def _gen(model: str, role: str) -> Runnable:
         r: Runnable = _chat(model, tier, role)
         if tools:
             r = r.bind_tools(tools)
-        display = model if role == "primary" else f"{model} (fallback)"
         # RunnableWithFallbacks passes the chain's run_name down to child models (overriding with_config) ⇒ use
-        # config_factories (applied LAST) so the generation always carries the model name on Langfuse.
+        # config_factories (applied LAST) so the generation keeps its own stable name whatever the caller sets.
+        # The model is NOT part of the name (Langfuse best practice): it is the generation's `model` attribute.
         # _FallbackEligible: provider errors inside a streamed response fall back too (see ProviderStreamError).
-        return _FallbackEligible(bound=r, config_factories=[lambda _cfg: {"run_name": display}])
+        return _FallbackEligible(bound=r, config_factories=[lambda _cfg: {"run_name": gen_name}])
 
     primary = _gen(primary_model, "primary")
     backups = [_gen(m, "fallback") for m in fallbacks_for(tier)]
     # ALWAYS wrap in 1 chain (even without fallbacks) ⇒ a caller-set run_name only renames the chain,
-    # the inner generation always carries the model name; `langfuse_prompt` metadata passed at call time
+    # the inner generation keeps `llm.<task>.generate`; `langfuse_prompt` metadata passed at call time
     # attaches to this chain ⇒ only that call's generation gets linked to the prompt.
     return primary.with_fallbacks(backups, exceptions_to_handle=FALLBACK_ERRORS).with_config(
         run_name=f"llm.{task}", metadata={"llm_task": task, "llm_tier": tier}

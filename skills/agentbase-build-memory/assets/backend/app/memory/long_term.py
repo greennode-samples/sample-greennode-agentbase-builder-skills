@@ -193,6 +193,7 @@ def build_memory_tools(ltm: LongTermMemory, settings: Settings) -> list[BaseTool
                 "limit": settings.ltm_recall_limit,
                 "trigger": "tool",
             },
+            as_type="retriever",
         ) as st:
             facts = await ltm.search(user_id, query, settings.ltm_recall_limit)
             st.set(output={"facts": facts, "count": len(facts)})
@@ -213,6 +214,7 @@ async def auto_recall(ltm: LongTermMemory, user_id: str, query: str, limit: int)
             "limit": limit,
             "trigger": "auto",
         },
+        as_type="retriever",
     ) as st:
         try:
             facts = await ltm.search(user_id, query, limit)

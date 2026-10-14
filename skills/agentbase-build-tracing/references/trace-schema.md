@@ -2,14 +2,19 @@
 
 ## Observation types (Langfuse v4)
 
-| as_type | Used for |
-|---|---|
-| `agent` | Root `agent.invoke`, and chains LangGraph marks as agent |
-| `chain` | LangGraph nodes |
-| `generation` | Each LLM call (model, usage, cost, TTFT) |
-| `tool` | Each tool call |
-| `span` | Custom-instrumented steps (`tracing.step`) |
-| `event` | Instant milestones (`tracing.event`) |
+Pick the most specific type ([Langfuse observation types](https://langfuse.com/docs/observability/features/observation-types)): evaluators filter on it and every type except `span`/`event`/`generation` makes Langfuse treat the trace as agentic (Agent Graph).
+
+| as_type | Used for | Set by |
+|---|---|---|
+| `agent` | Root `agent.invoke`; remote A2A agents `a2a.<agent>`; in-graph sub-agents `subagent.<role>` — nothing else | `trace_request`, `step(as_type="agent")`, `_CHAIN_TYPES` |
+| `chain` | LangGraph root `agent.graph`, nodes (`agent`, `tools`, `recall`…), `llm.<task>` wrappers | `_AgentBaseCallbackHandler` (the SDK alone would type every chain named "*agent*" as `agent`) |
+| `generation` | Each LLM call `llm.<task>.generate` (model, usage, cost, TTFT, thinking) | CallbackHandler |
+| `tool` | Each tool call | CallbackHandler |
+| `retriever` | Read-only lookups: `memory.recall`, `knowledge.search` | `step(as_type="retriever")` |
+| `evaluator` | LLM judges: `reflection.judge`, `eval.judge` | `_CHAIN_TYPES` |
+| `span` | Other custom steps (`tracing.step`): `tools.collect`, `mcp.list_tools`, `memory.save`, `context.compress`… | `tracing.step` |
+| `event` | Instant milestones (`tracing.event`) | `tracing.event` |
+| `embedding`, `guardrail` | Not used by the template — use them if the agent embeds itself or runs a guardrail model | `step(as_type=…)` |
 
 ## Trace-level attributes (via `propagate_attributes`)
 
@@ -23,11 +28,14 @@
 | `metadata` | request_id, llm_model, memory_backend, memory_id, auth_mode, hitl_tools, reflection_enabled | Filter by configuration |
 | `environment` / `release` | `APP_ENV` / `AGENT_VERSION` (constructor) | Separate dev/prod |
 
+Root observation `agent.invoke` (the trace's input/output — shown in the tracing table, read by evaluators, compared by dataset experiments): input = the user message (`{"resume": decisions, "interrupt_id"}` on a resume turn), output = the answer **text** (`{"interrupt": …}` when waiting for approval), metadata `tools_used`.
+
 ## Debug playbook
 
 | Question | Where to look |
 |---|---|
-| "Why did the agent answer wrong?" | Last generation: input messages (does the system prompt have the right memories/summary?), prior tool outputs |
+| "Why did the agent answer wrong?" | Last generation: input messages (does the system prompt have the right memories/summary?), prior tool outputs, its thinking (`output.additional_kwargs.reasoning_content`) |
+| "Why did it pick that tool / those args?" | Thinking of the generation that requested the call, then the tool's input |
 | "Why didn't it call the tool?" | Generation: does the input include tool schemas? Does `tools.collect.output` include that tool? Did `mcp.list_tools` fail? |
 | "Why did it forget information?" | `memory.recall` (query, namespace, count), `context.compress` (did summarization lose details?) |
 | "Why is it slow?" | Timeline: generation TTFT, `mcp.list_tools` latency (cache hit?), `memory.recall`, tool spans |
@@ -39,15 +47,15 @@
 ## Suggested dashboards (Langfuse Custom Dashboards)
 
 1. Latency p50/p95 by `trace_name`, split by `version`.
-2. Cost per day, top 10 by `user_id`.
+2. Cost per day, top 10 by `user_id`; cost and latency per **model** — filter generations by the `model` attribute (never by name: names are per task, `llm.<task>.generate`).
 3. Rate of `level=ERROR` / `WARNING` observations by `name` (`mcp.list_tools`, tool spans).
 4. Distribution of `user_feedback`, `self_eval`.
 5. Count of `context.compress` with decision `summarized` / total traces.
 
 ## Sampling & tracing cost
 
-- `LANGFUSE_SAMPLE_RATE=1.0` for dev/staging; high-load prod can use 0.2–0.5. Feedback can still be attached to sampled traces.
-- Large input/output (tools returning big JSON): trim inside the tool before returning, or mask in `_mask`.
+- `LANGFUSE_SAMPLE_RATE=1.0` for dev/staging; high-load prod can use 0.2–0.5. Feedback on a sampled-out turn is still sent as a score but has no trace to open.
+- Large input/output (tools returning big JSON): trim inside the tool before returning, or mask in `_mask`. Thinking text is capped at 20k characters per generation (`_REASONING_MAX_CHARS`).
 
 ## Masking (what leaves the process)
 
@@ -55,8 +63,8 @@
 
 | Channel | Masked by |
 |---|---|
-| observation input / output / metadata | `Langfuse(mask=_mask)` — the SDK calls it with RAW objects (its media pass `model_dump()`s pydantic models unless `LANGFUSE_MEDIA_UPLOAD_ENABLED=false`, never dataclasses); `_mask` converts dataclasses and pydantic models (LangChain messages) like the SDK serializer (`asdict`/`model_dump`) before masking |
-| `status_message` (exception text) | NOT passed through `mask` by the SDK ⇒ `step`/`_Step.set`/`trace_request` mask it; `langchain_callbacks()` returns `_MaskingCallbackHandler` (LLM/tool/chain errors and `ToolMessage(status="error")`); `Langfuse(mask_otel_spans=_mask_otel_spans)` re-masks the `langfuse.observation.status_message` attribute on every exported span |
+| observation input / output / metadata (incl. the generation's thinking text) | `Langfuse(mask=_mask)` — the SDK calls it with RAW objects (its media pass `model_dump()`s pydantic models unless `LANGFUSE_MEDIA_UPLOAD_ENABLED=false`, never dataclasses); `_mask` converts dataclasses and pydantic models (LangChain messages) like the SDK serializer (`asdict`/`model_dump`) before masking |
+| `status_message` (exception text) | NOT passed through `mask` by the SDK ⇒ `step`/`_Step.set`/`trace_request` mask it; `langchain_callbacks()` returns `_AgentBaseCallbackHandler` (LLM/tool/chain errors and `ToolMessage(status="error")`); `Langfuse(mask_otel_spans=_mask_otel_spans)` re-masks the `langfuse.observation.status_message` attribute on every exported span |
 | OTel span status description / `exception` event | Same text as status_message: masked at the source by the helpers and the CallbackHandler subclass; exceptions are re-raised **outside** the span context manager so OpenTelemetry never records an `exception` event (message + stacktrace). `mask_otel_spans` can only patch attributes, not status/events |
 | score comments | `score_trace` / `record_feedback` mask them |
 | trace `user_id` | `trace_user_id` hashes email-shaped ids |
