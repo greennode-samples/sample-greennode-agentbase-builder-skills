@@ -35,7 +35,7 @@ from typing import Any, Literal
 import openai
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
-from langchain_core.runnables import Runnable, RunnableBinding
+from langchain_core.runnables import Runnable, RunnableBinding, RunnableLambda
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
@@ -57,6 +57,12 @@ DEFAULT_TASK_TIERS: dict[str, Tier] = {
     "judge": "large",  # in-turn self-eval (reflection) — must be fast
     "eval_judge": "reasoning",  # offline grading — accuracy first
 }
+
+# Tasks whose generations ARE the conversation the user sees (node `agent`). Langfuse's session view shows, per
+# trace, only the generations at the SHALLOWEST tree depth as the conversation; every other task (router, summarize,
+# judge, eval_judge, planner…) is an internal call nested one level deeper, so it stays in the trace tree but no
+# longer appears as an extra "thread" (router JSON, judge critique) between the user's messages.
+CONVERSATION_TASKS: frozenset[str] = frozenset({"agent", "agent_simple", "agent_complex"})
 
 
 class ProviderStreamError(openai.APIError):
@@ -281,6 +287,7 @@ def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnabl
       llm.<task> | <caller run_name>    task chain (metadata llm_task, llm_tier, prompt link)
         llm.<task>.generate             primary GENERATION (model attribute, usage, cost, TTFT, thinking)
         llm.<task>.generate             backup GENERATION — only when the primary fails (metadata llm_role=fallback)
+    Internal tasks (not in CONVERSATION_TASKS) get one more level: <caller run_name> | <task>.call → llm.<task> → …
     """
     tier = tier_for(task)
     primary_model = model_for(tier)
@@ -302,6 +309,18 @@ def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnabl
     # ALWAYS wrap in 1 chain (even without fallbacks) ⇒ a caller-set run_name only renames the chain,
     # the inner generation keeps `llm.<task>.generate`; `langfuse_prompt` metadata passed at call time
     # attaches to this chain ⇒ only that call's generation gets linked to the prompt.
-    return primary.with_fallbacks(backups, exceptions_to_handle=FALLBACK_ERRORS).with_config(
+    chain = primary.with_fallbacks(backups, exceptions_to_handle=FALLBACK_ERRORS).with_config(
         run_name=f"llm.{task}", metadata={"llm_task": task, "llm_tier": tier}
     )
+    if task in CONVERSATION_TASKS:
+        return chain
+
+    # Internal call: one more level (named by the caller's run_name, default `<task>.call`) — see CONVERSATION_TASKS.
+    # A RunnableLambda returning a Runnable invokes/streams it with the same input as a child run.
+    def _internal(_input: Any) -> Runnable:
+        return chain
+
+    async def _ainternal(_input: Any) -> Runnable:
+        return chain
+
+    return RunnableLambda(_internal, afunc=_ainternal, name=f"{task}.call")

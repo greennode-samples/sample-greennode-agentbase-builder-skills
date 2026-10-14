@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from greennode_agentbase import RequestContext
 from greennode_agentbase.exceptions import GreenNodeRequestError
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app import service
 from app.config import get_settings
@@ -25,11 +25,16 @@ async def test_chat_with_tool_call_and_memory(fake_llm):
     assert out["status"] == "success"
     assert out["response"] == "Noted that you like coffee."
 
-    # Next turn: auto-recall puts the fact in the system prompt, history is kept per session
+    # Next turn: auto-recall puts the fact in the per-turn context message (right after the latest user message),
+    # NOT in the static system prompt (stable prompt-cache prefix); history is kept per session
     model = fake_llm(AIMessage("You like coffee."))
     await service.handle({"message": "What do I like to drink? coffee or tea"}, ctx())
-    system = model.calls[-1][0].content
-    assert "Likes coffee" in system
+    call = model.calls[-1]
+    assert isinstance(call[0], SystemMessage) and "Likes coffee" not in call[0].content
+    last_h = max(i for i, m in enumerate(call) if isinstance(m, HumanMessage))
+    assert (
+        isinstance(call[last_h + 1], SystemMessage) and "Likes coffee" in call[last_h + 1].content
+    )
     assert any(
         isinstance(m, HumanMessage) and "I like coffee" in m.content for m in model.calls[-1]
     )

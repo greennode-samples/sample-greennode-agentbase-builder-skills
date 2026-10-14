@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from greennode_agentbase import RequestContext
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from app import service
 from app.config import get_settings
@@ -22,8 +22,11 @@ async def test_reflection_retries_and_removes_bad_answer(fake_llm, monkeypatch):
         {"message": "question"}, RequestContext(session_id="r1", user_id="u1")
     )
     assert out["response"] == "good answer"
-    # The 2nd agent call receives the critique in the system prompt
-    assert "missing figures" in model.calls[2][0].content
+    # The 2nd agent call receives the critique in the per-turn context message, not in the static system prompt
+    assert "missing figures" not in model.calls[2][0].content
+    assert any(
+        isinstance(m, SystemMessage) and "missing figures" in m.content for m in model.calls[2][1:]
+    )
     # The bad answer has been removed from history
     assert not any(getattr(m, "content", "") == "bad answer" for m in model.calls[-1])
 

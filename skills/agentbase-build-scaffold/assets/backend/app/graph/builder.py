@@ -46,16 +46,32 @@ def _last_human_text(messages: list[AnyMessage]) -> str:
     return ""
 
 
-def build_system_message(state: AgentState, system_prompt: str) -> SystemMessage:
-    # Stable order (static first, dynamic last) to maximize provider prompt-cache hits.
-    parts = [system_prompt]
+def build_context_message(state: AgentState) -> SystemMessage | None:
+    """Per-turn context (summary, recalled facts, self-eval critique) as its OWN system message, kept out of the
+    static system prompt so that (1) the prompt prefix — system prompt + earlier turns — stays byte-identical across
+    turns (provider prompt cache) and (2) Langfuse's session view does not repeat the whole system prompt every turn
+    the facts change. Accepted mid-conversation by the MaaS models (verified: qwen3.8-flash/max, deepseek-v4-pro)."""
+    parts = []
     if summary := state.get("summary"):
         parts.append(f"## Summary of the earlier conversation\n{summary}")
     if recalled := state.get("recalled"):
         parts.append("## Known facts about the user\n" + "\n".join(f"- {f}" for f in recalled))
     if critique := state.get("critique"):
         parts.append(f"## Feedback on the previous answer (answer again, better)\n{critique}")
-    return SystemMessage("\n\n".join(parts))
+    return SystemMessage("\n\n".join(parts)) if parts else None
+
+
+def with_turn_context(
+    messages: list[AnyMessage], context: SystemMessage | None
+) -> list[AnyMessage]:
+    """Insert the turn context right AFTER the last HumanMessage: inside the current turn, so fit_to_budget (which
+    keeps the first system message + a window starting at a human message) never trims it away and counts it."""
+    if context is None:
+        return messages
+    last_h = max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=None)
+    if last_h is None:
+        return [*messages, context]
+    return [*messages[: last_h + 1], context, *messages[last_h + 1 :]]
 
 
 def build_graph(
@@ -95,7 +111,10 @@ def build_graph(
 
     async def agent(state: AgentState) -> dict:
         messages = fit_to_budget(
-            [build_system_message(state, system_prompt), *state["messages"]], settings
+            with_turn_context(
+                [SystemMessage(system_prompt), *state["messages"]], build_context_message(state)
+            ),
+            settings,
         )
         task = state.get("llm_task") or "agent"
         response = await llm_for(task).ainvoke(messages, config={"metadata": prompt_meta})

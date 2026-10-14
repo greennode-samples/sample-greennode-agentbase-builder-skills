@@ -37,7 +37,8 @@ Source: [What does a good trace look like?](https://langfuse.com/docs/observabil
 | Best practice | Here |
 |---|---|
 | Trace = one unit of work, session = the conversation | 1 trace per `/invocations` turn; `session_id` = conversation, including HITL resume turns |
-| Root input/output = what a reviewer needs | Root `agent.invoke`: input = user message (or resume decisions), output = **answer text** (or the interrupt); `tools_used` in root metadata |
+| Root input/output = what a reviewer needs | Root `agent.invoke`: input = user message (or resume decisions), output = **answer text** (or the interrupt; on failure **the error the caller received** `{error, status}`); `tools_used` in root metadata |
+| Session view = a readable conversation replay | Langfuse builds it from **generations**, shallowest per trace; see "Session view" below — conversation LLM calls (`CONVERSATION_TASKS`) at the top, internal LLM calls one level deeper, static system prompt + a per-turn context message |
 | Each LLM call is its own `generation`, interleaved with its tools | CallbackHandler: one generation per call of the agent loop, tool observations as siblings |
 | Most specific observation type | `generation` LLM call · `tool` tool · `retriever` lookups (`memory.recall`, `knowledge.search`) · `evaluator` judges (`reflection.judge`, `eval.judge`) · `agent` **only** the root, remote A2A agents (`a2a.<agent>`) and in-graph sub-agents (`subagent.<role>`) · `chain` LangGraph nodes · `span` other I/O · `event` milestones |
 | Capture thinking | `app/llm` keeps the provider's `reasoning_content`/`reasoning` (ChatOpenAI drops it) ⇒ generation output `additional_kwargs.reasoning_content` (masked, capped at 20k chars); never stored in the message/checkpoint |
@@ -87,11 +88,11 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     ├─ compress [chain]
     │   ├─ context.compress [span]   metadata{tokens_before, threshold, keep_last, removed_messages,
     │   │                             tokens_after, compression_ratio, latency_ms} · output{decision, summary}
-    │   └─ context.summarize [chain] → llm.summarize.generate [generation]
+    │   └─ context.summarize [chain] → llm.summarize [chain] → llm.summarize.generate [generation]
     ├─ recall [chain]
     │   └─ memory.recall [retriever] input{query, namespace, limit, trigger:auto} · output{facts, count}
     ├─ route [chain]                 (LLM_ADAPTIVE_ROUTING) llm.route [span] output{complexity, task, reason}
-    │   └─ llm.router [chain] → llm.router.generate [generation]   (tier small)
+    │   └─ router.call [chain] → llm.router [chain] → llm.router.generate [generation]   (tier small)
     ├─ agent [chain]
     │   ├─ context.hard_trim [event, WARNING]
     │   └─ llm.<task> [chain]        metadata{llm_task, llm_tier} · links prompt version (agent flow only)
@@ -109,7 +110,8 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     │       ├─ knowledge.search [retriever] (tool search_knowledge) output{hits[file, heading, score]}
     │       ├─ a2a.<agent> [agent]   {agent, url, message, state, text} (tool ask_<agent>)
     │       └─ mcp.policy_denied [event, WARNING]  {server, tool} — blocked by the Gateway's Policy Group
-    └─ reflect [chain]               reflection.judge [evaluator] → llm.judge.generate [generation]
+    └─ reflect [chain]               reflection.judge [evaluator] → llm.judge [chain] → llm.judge.generate
+    (internal LLM calls — router, summarize, judge — sit one level deeper than the agent's llm.<task>.generate)
 scores: user_feedback (-1|0|1, from frontend) · self_eval (0..1) · hitl_requested
 ```
 
@@ -156,6 +158,25 @@ Field details, debug playbook, dashboards: `references/trace-schema.md`.
 1. Create a text prompt on Langfuse named `LANGFUSE_PROMPT_NAME`, with label `production`/`staging`. Moving more prompts (judge, router, summarizer…): follow the `langfuse` skill's prompt-migration playbook (`{{var}}` double-brace variables only, label `production`, text vs chat type).
 2. Env: `LANGFUSE_PROMPT_NAME`, `LANGFUSE_PROMPT_LABEL`, `LANGFUSE_PROMPT_CACHE_TTL` (seconds, default 300; blank or not an integer ⇒ 300 with a warning). `LANGFUSE_PROMPT_CACHE_TTL` is read with `os.getenv` in `app/prompts/__init__.py` (not a `Settings` field) — `.env.example` lists it with the default.
 3. `app/prompts/__init__.py::get_system_prompt()` fetches the prompt (SDK cache), falling back to `system.md` on error; `graph/builder.py` passes `metadata.langfuse_prompt` at call time to the agent's `llm.<task>` chain ⇒ the agent generations link to the prompt version ⇒ compare latency/cost/score per version, change prompts without redeploying.
+
+## Session view (conversation replay) — rules for every new LLM call
+
+How Langfuse 4.x builds it (source: `packages/shared/src/server/transcript` in langfuse/langfuse — re-check on upgrades):
+- One **thread** per conversation, assembled from **GENERATION** observations (+ TOOL observations matched to tool
+  calls by id). Root input/output is only a fallback. A generation continues a thread when all the thread's
+  non-system messages appear in its input; otherwise it starts a new thread.
+- The session UI shows, per trace, only the threads whose first generation is at the **shallowest tree depth**;
+  deeper ones are hidden. System messages are not used for matching; a **changed** system message is shown again.
+
+Rules (all enforced by the template; keep them when adding code):
+
+| Rule | Why (seen on a real 10-turn session) | How |
+|---|---|---|
+| Only user-facing LLM calls are at the top | router JSON (`{"complexity": …}`) and judge critiques showed up as threads "3.1 / 3.2 / 3.3" between the user's messages | `get_llm(task)`: tasks in `CONVERSATION_TASKS` (`agent`, `agent_simple`, `agent_complex`) are returned as is; **every other task is wrapped one level deeper** (`<run_name>` or `<task>.call`). A new internal flow (planner, classifier, extractor…) needs nothing; a new user-facing flow must be added to `CONVERSATION_TASKS` |
+| Static system prompt, per-turn context separate | the full system prompt was repeated every turn the recalled facts changed; the changing prefix also cost prompt cache | `[SystemMessage(system_prompt), *history, Human, SystemMessage(context)…]` — summary, recalled facts and the self-eval critique go in `build_context_message`, inserted right after the latest user message (`with_turn_context`). Measured: agent `cache_read` 1,024–2,048 ⇒ 5,120 tokens |
+| Don't rewrite history | an edited/removed message breaks the thread match | expected splits: a reflection retry (the rejected answer is removed), context compression (history replaced by a summary), HITL `edit` (arguments changed) — the session shows a new thread for that turn |
+| A failed turn reads like the user saw it | the root showed `TimeoutError: ` with no output; cancelled children showed `<object object at 0x…>` | `trace_request(error_output=_user_error)` ⇒ root output `{error, status}` = the HTTP error / SSE `error` event; `_describe()` names empty errors; cancellations are `WARNING` "Cancelled: …" |
+| Thinking | the session view reads reasoning only from content parts (`{"type": "reasoning"|"thinking", …}`), the trace detail from a message-level `thinking` field — `additional_kwargs.reasoning_content` is in the output JSON but rendered by neither | **open item**: confirm the rendering on the Langfuse UI before changing the format |
 
 ## Step 6 — Run and self-audit the traces (required, before every deploy)
 
@@ -204,6 +225,9 @@ Real example (a "Hello" message took 55s); the trace showed it immediately: `mcp
 | `output_reasoning > 0` but no thinking text | Provider uses another field / `_ChatMaaS` not used | Extend `_reasoning_text`; create models only via `get_llm` |
 | Generation missing cost | Model prices not declared | Step 1.4 |
 | HTTP/DB spans in the tree | `should_export_span` overridden to export everything | Back to the SDK default filter |
+| Session view shows several threads per turn (router JSON, judge critique) | An internal LLM call at the same depth as the agent's generation | Call it through `get_llm(<task>)` with a task not in `CONVERSATION_TASKS` |
+| Session view repeats the system prompt every turn | Per-turn data (facts, summary, critique) written into the system prompt | Put it in `build_context_message` |
+| Status `<object object at 0x…>` / `TimeoutError: ` | Cancelled or message-less errors | Already handled by `_describe` / `_AgentBaseCallbackHandler` — use `tracing.step`/`trace_request` |
 | Traces missing for the last requests when the container stops | Not flushed | lifespan already calls `shutdown_tracing()`; don't kill -9 |
 
 ## Official docs

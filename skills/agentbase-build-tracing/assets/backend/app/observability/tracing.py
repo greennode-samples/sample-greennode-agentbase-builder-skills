@@ -41,6 +41,7 @@ export the raw message as an `exception` event + span status).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import functools
@@ -49,7 +50,7 @@ import inspect
 import logging
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from pydantic import BaseModel
@@ -332,6 +333,14 @@ def trace_user_id(user_id: str) -> str:
     return user_id
 
 
+def _describe(error: BaseException) -> str:
+    """Readable status text: some errors have no message (`TimeoutError()` showed up as "TimeoutError: ")."""
+    if isinstance(error, asyncio.CancelledError):
+        return "Cancelled: the request was cancelled (REQUEST_TIMEOUT_S reached or client disconnected)"
+    text = str(error)
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
+
+
 # --------------------------------------------------------------------------- LangChain bridge
 def _chain_type(name: str) -> str:
     for prefix, as_type in _CHAIN_TYPES:
@@ -392,6 +401,10 @@ def _callback_handler_class() -> type:
             return super().on_llm_end(response, **kwargs)
 
         def _get_error_level_and_status_message(self, error: BaseException) -> tuple[Any, str]:
+            if isinstance(
+                error, asyncio.CancelledError
+            ):  # the SDK printed "<object object at 0x…>"
+                return "WARNING", _describe(error)
             level, message = super()._get_error_level_and_status_message(
                 error
             )  # SDK-internal (4.x)
@@ -426,8 +439,12 @@ def trace_request(
     input: Any,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
+    error_output: Callable[[BaseException], Any] | None = None,
 ) -> Iterator[Any]:
-    """Root observation + propagates user/session/tags/version to ALL child observations."""
+    """Root observation + propagates user/session/tags/version to ALL child observations.
+
+    error_output(exc) → the root's output when the request fails: what the caller actually received (HTTP error /
+    SSE error event), so a failed turn reads like the user saw it in the tracing table and the session view."""
     if _client is None:
         yield None
         return
@@ -448,7 +465,15 @@ def trace_request(
             try:
                 yield root
             except BaseException as e:
-                root.update(level="ERROR", status_message=_mask_status(f"{type(e).__name__}: {e}"))
+                output = None
+                if error_output is not None:
+                    with contextlib.suppress(Exception):  # tracing must never mask the real error
+                        output = error_output(e)
+                root.update(
+                    level="ERROR",
+                    status_message=_mask_status(_describe(e)),
+                    **({"output": output} if output is not None else {}),
+                )
                 error = e
     # Re-raise OUTSIDE the span context: an exception crossing it is exported by OpenTelemetry as an
     # `exception` event + span status carrying the RAW message (neither goes through any mask).
@@ -527,7 +552,7 @@ def step(
         try:
             yield handle
         except BaseException as e:
-            handle.set(level="ERROR", status_message=f"{type(e).__name__}: {e}")
+            handle.set(level="ERROR", status_message=_describe(e))
             raise
         finally:
             obs.end()
@@ -540,7 +565,7 @@ def step(
         try:
             yield handle
         except BaseException as e:
-            handle.set(level="ERROR", status_message=f"{type(e).__name__}: {e}")
+            handle.set(level="ERROR", status_message=_describe(e))
             error = e
     if error is not None:  # outside the span context — see trace_request
         raise error
