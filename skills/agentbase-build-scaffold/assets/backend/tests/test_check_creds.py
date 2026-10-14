@@ -42,7 +42,7 @@ def _creds_file(path, secret=SECRETS["client_secret"]):
     )
 
 
-def _fake_http(monkeypatch, llm=200, langfuse=200, iam=200):
+def _fake_http(monkeypatch, llm=200, langfuse=200, iam=200, llm_body=b""):
     def refresh(self):
         if iam != 200:
             req = httpx.Request("POST", "https://iam.test")
@@ -50,7 +50,9 @@ def _fake_http(monkeypatch, llm=200, langfuse=200, iam=200):
         self.principal = "iam:sa-123"
 
     monkeypatch.setattr(IAMBearerAuth, "refresh", refresh)
-    monkeypatch.setattr(check_creds.httpx, "post", lambda *a, **k: httpx.Response(llm))
+    monkeypatch.setattr(
+        check_creds.httpx, "post", lambda *a, **k: httpx.Response(llm, content=llm_body)
+    )
     monkeypatch.setattr(check_creds.httpx, "get", lambda *a, **k: httpx.Response(langfuse))
 
 
@@ -77,6 +79,10 @@ def test_missing_iam_file_fails(workdir, monkeypatch, capsys):
     [
         ({"iam": 401}, "rejected by IAM"),
         ({"llm": 401}, "LLM_API_KEY rejected"),
+        (  # MaaS answer when the key is valid but the model is not enabled for it
+            {"llm": 403, "llm_body": b'{"error":{"message":"model not allowed for this key"}}'},
+            "not allowed for this LLM_API_KEY",
+        ),
         ({"llm": 404}, "not usable"),
     ],
 )

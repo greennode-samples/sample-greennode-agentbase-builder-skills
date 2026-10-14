@@ -554,16 +554,21 @@ def event(
     metadata: dict | None = None,
     level: str | None = None,
 ) -> None:
-    """Instant marker (no duration)."""
+    """Instant marker (no duration), attached to the running LangGraph node/tool if any."""
     if _client is None:
         return
     parent = _langchain_parent()
-    if parent is not None:
-        parent.start_observation(
-            name=name, as_type="event", input=input, output=output, metadata=metadata, level=level
-        ).end()
+    parent_span = getattr(parent, "_otel_span", None)  # SDK-internal (4.x)
+    if parent_span is None:
+        _client.create_event(name=name, input=input, output=output, metadata=metadata, level=level)
         return
-    _client.create_event(name=name, input=input, output=output, metadata=metadata, level=level)
+    # NOT parent.start_observation(as_type="event"): in SDK 4.18 that creates the event in the CURRENT OTel
+    # context (seen on a real server: hitl.* events of the approval node landed under agent.invoke) and ends
+    # it already. Make the node's span current instead (tests/test_tracing_tree.py).
+    from opentelemetry import trace as otel_trace
+
+    with otel_trace.use_span(parent_span, end_on_exit=False):
+        _client.create_event(name=name, input=input, output=output, metadata=metadata, level=level)
 
 
 def current_trace_id() -> str | None:

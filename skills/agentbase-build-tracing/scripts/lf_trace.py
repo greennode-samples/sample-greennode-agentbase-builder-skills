@@ -46,9 +46,10 @@ _SECRET_RES = (  # (what, pattern) — the matched value itself is never printed
 
 def _load_env() -> None:
     try:
-        from dotenv import load_dotenv
+        from dotenv import find_dotenv, load_dotenv
 
-        load_dotenv()
+        # usecwd: the project's .env (run from src/backend), not one next to this script in the skill directory
+        load_dotenv(find_dotenv(usecwd=True))
     except ImportError:
         pass
 
@@ -106,9 +107,10 @@ def audit(obs: list[dict]) -> list[tuple[str, str]]:
                 out.append(("FAIL", f"{name}: generation without model — no cost, no model filter"))
             elif "/" in name or name == model:
                 out.append(("WARN", f"{name}: generation named after the model — use llm.<task>.generate"))
-            if not (u.get("input") and u.get("output")):
+            failed = o.get("level") == "ERROR"  # e.g. primary model 403/503 before a fallback: no usage, no cost
+            if not failed and not (u.get("input") and u.get("output")):
                 out.append(("WARN", f"{name}: no input/output usage (LLM_STREAM_USAGE=true when streaming)"))
-            if model and not o.get("totalCost"):
+            if model and not failed and not o.get("totalCost"):
                 out.append(("WARN", f"{name}: no cost — declare the price of {model} in Langfuse (Models)"))
             if u.get("output_reasoning") and "reasoning_content" not in _text(o.get("output")):
                 out.append(("WARN", f"{name}: {u['output_reasoning']} reasoning tokens but no thinking text"))
@@ -134,12 +136,15 @@ def print_tree(c: httpx.Client, trace_id: str, *, do_audit: bool = False) -> int
         print(f"(no observations for trace {trace_id} — ingestion may lag a few seconds)")
         return 0
     by = {o["id"]: o for o in obs}
+    children: dict[str | None, list[dict]] = {}
+    for o in obs:  # obs is sorted by start time ⇒ siblings stay in start order
+        parent = o.get("parentObservationId")
+        children.setdefault(parent if parent in by else None, []).append(o)
 
-    def depth(o: dict) -> int:
-        d = 0
-        while o.get("parentObservationId") in by:
-            o, d = by[o["parentObservationId"]], d + 1
-        return d
+    def walk(parent: str | None, depth: int):  # depth-first: every observation right under its parent
+        for o in children.get(parent, []):
+            yield o, depth
+            yield from walk(o["id"], depth + 1)
 
     t0 = _ts(obs[0]["startTime"])
     root = next((o for o in obs if o.get("isRootObservation")), obs[0])
@@ -150,11 +155,11 @@ def print_tree(c: httpx.Client, trace_id: str, *, do_audit: bool = False) -> int
           f"env={root.get('environment')} version={root.get('version')}")
     print(f"    generations={len(gens)} cost={cost:.6f} in={usage('input')} out={usage('output')} "
           f"reasoning={usage('output_reasoning')} cache_read={usage('input_cache_read')}")
-    for o in obs:
+    for o, d in walk(None, 0):
         st, en = _ts(o["startTime"]), _ts(o.get("endTime"))
         dur = f"{(en - st).total_seconds():.2f}s" if en else "OPEN"
         lvl = "" if o.get("level") in (None, "DEFAULT") else f" [{o['level']}]"
-        line = f"{'  ' * depth(o)}{o['name']} <{o['type']}> +{(st - t0).total_seconds():.1f}s {dur}{lvl}"
+        line = f"{'  ' * d}{o['name']} <{o['type']}> +{(st - t0).total_seconds():.1f}s {dur}{lvl}"
         if o["type"] == "GENERATION":
             u = o.get("usageDetails") or {}
             role = (o.get("metadata") or {}).get("llm_role") if isinstance(o.get("metadata"), dict) else None
@@ -164,11 +169,14 @@ def print_tree(c: httpx.Client, trace_id: str, *, do_audit: bool = False) -> int
             if o.get("promptName"):
                 line += f" prompt={o['promptName']}:{o.get('promptVersion')}"
         if lvl and o.get("statusMessage"):
-            line += f"\n{'  ' * depth(o)}    ↳ {o['statusMessage'][:200]}"
+            line += f"\n{'  ' * d}    ↳ {o['statusMessage'][:200]}"
         print(line)
-    scores = c.get("/api/public/v3/scores", params={"traceId": trace_id, "limit": 50})
+    # fields=core,details: without `details` the v3 scores API returns no comment (self_eval critique, feedback text)
+    scores = c.get("/api/public/v3/scores", params={"traceId": trace_id, "limit": 50, "fields": "core,details"})
     if scores.status_code == 200 and scores.json().get("data"):
-        print("    scores:", [(s.get("name"), s.get("value")) for s in scores.json()["data"]])
+        for s in scores.json()["data"]:
+            comment = f" — {s['comment'][:120]}" if s.get("comment") else ""
+            print(f"    score {s.get('name')}={s.get('value')}{comment}")
     if not do_audit:
         return 0
     findings = audit(obs)

@@ -113,7 +113,7 @@ Reference numbers, measured on GreenNode MaaS on 2026-10-02 (1 tool-calling requ
 
 **Quality warning (seen on a real runtime):** with adaptive routing, a greeting was routed to `agent_simple` using `qwen/qwen3.8-flash`, and the Vietnamese reply got mixed with Indonesian words ("beberapa"). Models for flows that **answer the user directly** (`agent_simple`, `agent`, `agent_complex`) must pass evals on language/tone; internal flows (`router`, `summarize`, `eval_judge`) are lower risk. Add eval items in the user's language for simple messages (greetings, thanks) when enabling adaptive routing.
 
-Note: most models on MaaS emit reasoning tokens, even flash variants. Langfuse v4 **does separate** `output_reasoning` (verified), so check it directly on the generation — together with the thinking text in its output (captured by `_ChatMaaS`; not yet confirmed on MaaS which field name it uses — extend `_reasoning_text` if `output_reasoning > 0` but no text shows).
+Note: most models on MaaS emit reasoning tokens, even flash variants. Langfuse v4 **does separate** `output_reasoning` (verified), so check it directly on the generation — together with the thinking text in its output (captured by `_ChatMaaS`; MaaS returns it as `reasoning_content`, verified streamed and not on qwen3.8-flash/max and deepseek-v4-pro).
 
 **Judge burns reasoning tokens**: on real Langfuse, `reflection.judge` running `qwen3.8-max` used **939–1395 reasoning tokens per grading** (longer than the answer itself). The `judge` flow (within the chat turn) should use a fast, low-reasoning model (`LLM_TASK_TIERS='{"judge":"small"}'` with an evaluated small model), keeping `eval_judge` (offline) on reasoning. Re-measure on Langfuse before settling.
 
