@@ -381,7 +381,42 @@ def _callback_handler_class() -> type:
         - masks LLM/tool/chain error text AT THE SOURCE: the SDK also copies status_message into the OTel span
           status description, which `mask_otel_spans` cannot patch (it only patches attributes);
         - chains get their type from _CHAIN_TYPES instead of the SDK's "name contains agent" guess;
-        - generations show the model's thinking (generation_info[REASONING_KEY], see app/llm)."""
+        - generations show the model's thinking (generation_info[REASONING_KEY], see app/llm);
+        - plain chains (LangGraph graph/nodes/edges, llm.<task> wrappers) carry NO input/output: their I/O is the
+          graph state — the whole message history on every node — which duplicates the generations, tools and
+          spans below them and filled Langfuse's session page (default view "All observations with I/O")."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._io_free_runs: set[Any] = set()
+
+        def on_chain_start(
+            self,
+            serialized: Any,
+            inputs: Any,
+            *,
+            run_id: Any,
+            parent_run_id: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            if _chain_type(self.get_langchain_run_name(serialized, **kwargs)) == "chain":
+                self._io_free_runs.add(run_id)
+                # a non-dict root input (LangGraph `Command(resume=…)`) is what the SDK checks to link a resume
+                inputs = inputs if parent_run_id is None and not isinstance(inputs, dict) else None
+            return super().on_chain_start(
+                serialized, inputs, run_id=run_id, parent_run_id=parent_run_id, **kwargs
+            )
+
+        def on_chain_end(self, outputs: Any, *, run_id: Any, **kwargs: Any) -> Any:
+            if run_id in self._io_free_runs:
+                self._io_free_runs.discard(run_id)
+                kwargs.pop("inputs", None)
+                outputs = None
+            return super().on_chain_end(outputs, run_id=run_id, **kwargs)
+
+        def on_chain_error(self, error: BaseException, *, run_id: Any, **kwargs: Any) -> Any:
+            self._io_free_runs.discard(run_id)
+            return super().on_chain_error(error, run_id=run_id, **kwargs)
 
         def _get_observation_type_from_serialized(
             self, serialized: Any, callback_type: str, **kwargs: Any

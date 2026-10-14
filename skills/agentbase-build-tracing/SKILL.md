@@ -84,8 +84,8 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
 ├─ auth [event]             output{user_id, mode, iss, aud, exp, client}      (NO token)
 ├─ tools.collect [span]     output{local, memory, mcp, mcp_errors} · level WARNING if MCP fails
 │   └─ mcp.list_tools [span] input{server, transport, url, auth, cached} · output[tool names]
-├─ memory.checkpoint_load [span] input{session_id, kind} · output{messages, next, interrupts}
-└─ agent.graph [chain]      (CallbackHandler: input/output = state of each node)
+├─ memory.checkpoint_load [span] output{messages, next, interrupts} · metadata{backend, session_id, kind}
+└─ agent.graph [chain]      (CallbackHandler; LangGraph chains carry NO input/output — see Session view)
     ├─ compress [chain]
     │   ├─ context.compress [span]   metadata{tokens_before, threshold, keep_last, removed_messages,
     │   │                             tokens_after, compression_ratio, latency_ms} · output{decision, summary}
@@ -188,6 +188,7 @@ Rules (all enforced by the template; keep them when adding code):
 | Rule | Why (seen on a real 10-turn session) | How |
 |---|---|---|
 | Generation I/O in the OpenAI chat format | the SDK's LangChain handler appends the tool definitions to the input as fake `{"role": "tool", "content": <schema>}` messages AFTER the user's question ⇒ the session view treated the whole input as the current turn and showed "User: chào bạn…" (turn 1) again in every turn; LangChain tool calls (`args` dicts) were not rendered as cards | `_AgentBaseCallbackHandler` (`tracing.langchain_callbacks()`): input `{"messages", "tools"}`, messages via `convert_to_openai_messages`, tool-call `arguments` as JSON strings, no `additional_kwargs`. `lf_trace.py --audit` flags tool definitions recorded as messages |
+| LangGraph chains carry no I/O | every node/edge/wrapper chain recorded the graph state — the whole message history — so the session page's default view showed 230 cards for a 13-turn conversation and the first user message 143 times | `_AgentBaseCallbackHandler` drops input/output of plain chains (graph, nodes, conditional edges, `llm.<task>`, `<task>.call`); they keep name, timing, metadata, level/status. Measured: 230 ⇒ 76 cards, 143 ⇒ 23 repeats (the rest is the faithful history in generation inputs); Conversation view: 1 card per turn |
 | Only user-facing LLM calls are at the top | router JSON (`{"complexity": …}`) and judge critiques showed up as threads "3.1 / 3.2 / 3.3" between the user's messages | `get_llm(task)`: tasks in `CONVERSATION_TASKS` (`agent`, `agent_simple`, `agent_complex`) are returned as is; **every other task is wrapped one level deeper** (`<run_name>` or `<task>.call`). A new internal flow (planner, classifier, extractor…) needs nothing; a new user-facing flow must be added to `CONVERSATION_TASKS` |
 | Static system prompt, per-turn context separate | the full system prompt was repeated every turn the recalled facts changed; the changing prefix also cost prompt cache | `[SystemMessage(system_prompt), *history, Human, SystemMessage(context)…]` — summary, recalled facts and the self-eval critique go in `build_context_message`, inserted right after the latest user message (`with_turn_context`). Measured: agent `cache_read` 1,024–2,048 ⇒ 5,120 tokens |
 | Don't rewrite history | an edited/removed message breaks the thread match | expected splits: a reflection retry (the rejected answer is removed), context compression (history replaced by a summary), HITL `edit` (arguments changed) — the session shows a new thread for that turn |

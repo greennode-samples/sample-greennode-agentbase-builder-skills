@@ -361,10 +361,14 @@ class _Run:
         config["recursion_limit"] = recursion_limit(self.settings)
         config["run_name"] = "agent.graph"
 
+        # output only (session/kind in metadata): a debugging span, kept out of the session page's I/O view
         with tracing.step(
             "memory.checkpoint_load",
-            input={"session_id": self.session_id, "kind": self.kind},
-            metadata={"backend": self.settings.memory_backend},
+            metadata={
+                "backend": self.settings.memory_backend,
+                "session_id": self.session_id,
+                "kind": self.kind,
+            },
         ) as st:
             snapshot = await graph.aget_state(config)
             st.set(
