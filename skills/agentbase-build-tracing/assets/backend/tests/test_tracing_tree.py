@@ -306,3 +306,53 @@ async def test_generation_io_is_openai_chat_format(spans, monkeypatch):
     replay = json.loads(second["langfuse.observation.input"])["messages"]
     assert [m["role"] for m in replay] == ["system", "user", "assistant", "tool"]
     assert replay[2]["tool_calls"][0]["id"] == replay[3]["tool_call_id"] == "call_1"
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+async def test_hitl_turns_read_like_chat(spans, monkeypatch, action):
+    """The root I/O is the conversation line of the session view: an approval request and the user's decision
+    must read like chat, not as raw {"interrupt": …} / {"resume": …} JSON (seen on a real session)."""
+    from app import llm, service
+
+    class _Remember(BaseChatModel):
+        calls: int = 0
+
+        @property
+        def _llm_type(self) -> str:
+            return "fake-remember"
+
+        def bind_tools(self, tools: Any, **kwargs: Any):  # type: ignore[override]
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                call = {"name": "remember", "args": {"fact": "Works remote on Fridays"}, "id": "c1"}
+                msg = AIMessage("", tool_calls=[call])
+            else:
+                msg = AIMessage("OK.")
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    monkeypatch.setenv("HITL_TOOLS", '["remember"]')
+    monkeypatch.setenv("LTM_ENABLED", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(llm, "_chat", lambda m, t, r: _Remember())
+    ctx = RequestContext(session_id=f"s-hitl-{action}", user_id="u")
+    first = await service.handle({"message": "remember I work remote on Fridays"}, ctx)
+    assert first["status"] == "interrupted"
+    decision = {"tool_call_id": "c1", "action": action, "reason": "my schedule changes"}
+    await service.handle(
+        {"type": "resume", "interrupt_id": first["interrupt"]["id"], "decisions": [decision]}, ctx
+    )
+    asked, decided = spans()["agent.invoke"]
+    assert asked["langfuse.observation.output"] == (
+        '[Awaiting approval]\n- remember({"fact": "Works remote on Fridays"})'
+    )
+    assert "langfuse.observation.metadata.interrupt" in asked  # raw payload kept for debugging
+    expected = {
+        "approve": '[Approval decision]\n- Approved remember({"fact": "Works remote on Fridays"})',
+        "reject": '[Approval decision]\n- Rejected remember({"fact": "Works remote on Fridays"})'
+        " — my schedule changes",
+    }[action]
+    assert decided["langfuse.observation.input"] == expected
+    assert "langfuse.observation.metadata.resume" in decided

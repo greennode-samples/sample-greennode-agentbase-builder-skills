@@ -54,6 +54,7 @@ Rules enforced in code:
 
 - Events `hitl.request` (tool_calls awaiting approval) and `hitl.decision` (the decision) sit under the `approval` node.
 - Score `hitl_requested` on the interrupt trace; both traces (interrupt and resume) share the `session_id` ⇒ view in the Sessions tab.
+- The root of each trace is the conversation line (session page → Conversation view): the interrupt turn's output is `describe_interrupt` (`[Awaiting approval] - remember({...})`), the resume turn's input is `describe_decisions` (`[Approval decision] - Approved|Rejected|Edited <tool>(<args>) — reason`, tool names read from the checkpoint); raw `interrupt` / `resume` payloads are in root metadata.
 - Track reject rate per tool ⇒ reveals which tools/prompts often propose wrong actions.
 
 ## Frontend
