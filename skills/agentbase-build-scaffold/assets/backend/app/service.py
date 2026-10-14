@@ -347,9 +347,18 @@ class _Run:
         config["run_name"] = "agent.graph"
 
         with tracing.step(
-            "memory.checkpoint_load", metadata={"backend": self.settings.memory_backend}
-        ):
+            "memory.checkpoint_load",
+            input={"session_id": self.session_id, "kind": self.kind},
+            metadata={"backend": self.settings.memory_backend},
+        ) as st:
             snapshot = await graph.aget_state(config)
+            st.set(
+                output={
+                    "messages": len((snapshot.values or {}).get("messages", [])),
+                    "next": list(snapshot.next or ()),
+                    "interrupts": len(getattr(snapshot, "interrupts", None) or ()),
+                }
+            )
         pending = is_waiting_approval(snapshot)
         if self.kind == "chat" and pending:
             raise _error("Awaiting tool approval — send {type: resume} before chatting again", 409)

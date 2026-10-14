@@ -72,7 +72,7 @@ docker compose -p langfuse-local up -d && curl http://localhost:<port>/api/publi
 
 ## Step 2 — Standard trace tree
 
-Structure verified on a real Langfuse server (v4.49); names/types of this version are pinned by `tests/test_tracing_tree.py` (in-memory OTel exporter).
+Verified end to end on a real Langfuse server (self-hosted v4.58, SDK 4.18) with real MaaS models — chat, knowledge search, tool call, HITL interrupt + approve, follow-up in the same session, streamed answer with reflection, a 403 primary ⇒ fallback, feedback — `lf_trace.py --audit` clean on every trace. Names/types are pinned by `tests/test_tracing_tree.py` (in-memory OTel exporter).
 
 ```
 agent.invoke [agent]        input=user message|resume decisions · output=answer text|{interrupt}
@@ -82,7 +82,7 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
 ├─ auth [event]             output{user_id, mode, iss, aud, exp, client}      (NO token)
 ├─ tools.collect [span]     output{local, memory, mcp, mcp_errors} · level WARNING if MCP fails
 │   └─ mcp.list_tools [span] input{server, transport, url, auth, cached} · output[tool names]
-├─ memory.checkpoint_load [span]
+├─ memory.checkpoint_load [span] input{session_id, kind} · output{messages, next, interrupts}
 └─ agent.graph [chain]      (CallbackHandler: input/output = state of each node)
     ├─ compress [chain]
     │   ├─ context.compress [span]   metadata{tokens_before, threshold, keep_last, removed_messages,
@@ -101,7 +101,8 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     │       │                        cache_creation_*, output_reasoning} · cost · completion_start_time (TTFT)
     │       └─ llm.<task>.generate   2nd generation only when the primary fails: metadata llm_role=fallback, other
     │                                model; the primary one is at level ERROR + statusMessage (e.g. 503)
-    ├─ approval [chain]              hitl.request [event] · hitl.decision [event]
+    ├─ approval [chain]              hitl.request [event] · hitl.decision [event] (the node re-runs on resume ⇒ the
+    │                                resume trace shows both: what was asked and what was decided)
     ├─ tools [chain]
     │   └─ <tool_name> [tool]        input=args · output=result · level ERROR when the tool fails
     │       ├─ memory.save [span]    (tool remember) · memory.recall [retriever] (tool recall_memory)
@@ -130,6 +131,8 @@ Field details, debug playbook, dashboards: `references/trace-schema.md`.
 
 - `step()` attaches itself to the **currently running LangGraph node/tool** (reads the current run from `var_child_runnable_config`), so the span lands in the right place in the tree. Without a LangChain run, it attaches to the current OTel span.
 - An exception inside `step()` ⇒ observation `level=ERROR` + masked `status_message`, then re-raised (outside the OTel span context, so no raw `exception` event/stacktrace is exported). Same for `trace_request`.
+- `event()` inside a node makes the node's span current before `create_event`: the SDK's `span.start_observation(as_type="event")` (4.18) ignores its parent in async graphs — on a real server the `hitl.*` events landed under `agent.invoke` instead of `approval` (`tests/test_tracing_tree.py`).
+- LangChain runs started inside a `step()` (e.g. the router LLM inside `llm.route`) are siblings of that span under the node, not its children: the CallbackHandler nests by LangChain run, not by OTel context.
 - **Names are an API**: `<domain>.<action>` (`crm.lookup_customer`, `payment.create`); never a model name, user/order id, retry counter or anything per-request (put it in metadata). Keep existing names stable — evaluators, dashboards and saved views match them.
 - **Observation types — one agent per agent**: the SDK's `CallbackHandler` types every chain whose name contains "agent" as an `agent` (seen in tests: `agent.graph`, node `agent` and `llm.agent` became 3 nested agents under `agent.invoke`). `langchain_callbacks()` returns `_AgentBaseCallbackHandler`, which types chains from `_CHAIN_TYPES` (default `chain`).
 - Every observation should have input and/or output; one with neither is noise — drop it or fill it.
@@ -146,7 +149,7 @@ Field details, debug playbook, dashboards: `references/trace-schema.md`.
 - TTFT: requires `LLM_STREAMING=true` (Langfuse records `completion_start_time` at the first token).
 - Usage when streaming: requires `LLM_STREAM_USAGE=true`.
 - Cost: requires declared model prices (Step 1.4).
-- **Thinking**: most MaaS models emit reasoning tokens (`output_reasoning`, verified). The thinking **text** comes back in the non-standard `reasoning_content` (or `reasoning`) field that `ChatOpenAI` drops; `app/llm` `_ChatMaaS` keeps it in `generation_info` (streamed deltas concatenated) and `_AgentBaseCallbackHandler` adds it to the traced output — the message, the checkpoint and the next request stay unchanged. Tested offline (mock OpenAI-compatible server, in-memory exporter); **to confirm on MaaS + a real Langfuse**: `output_reasoning > 0` but no `reasoning_content` in the output ⇒ the provider uses another field name — extend `_reasoning_text` in `app/llm`.
+- **Thinking**: most MaaS models emit reasoning tokens (`output_reasoning`, verified). The thinking **text** comes back in the non-standard `reasoning_content` field (verified on MaaS for `qwen/qwen3.8-flash`, `qwen/qwen3.8-max`, `deepseek/deepseek-v4-pro`, streamed and not) that `ChatOpenAI` drops; `app/llm` `_ChatMaaS` keeps it (`reasoning_content` or `reasoning`) in `generation_info` (streamed deltas concatenated) and `_AgentBaseCallbackHandler` adds it to the traced output — the message, the checkpoint and the next request stay unchanged. Seen on a real Langfuse 4.58: judge 902 reasoning tokens ⇒ 3,120 chars of thinking on `llm.judge.generate`. `output_reasoning > 0` but no `reasoning_content` in the output ⇒ another provider/field name — extend `_reasoning_text` in `app/llm`.
 
 ## Step 5 — Prompt Management (optional, recommended for prod)
 
@@ -175,7 +178,7 @@ Point them to what they now have — **Traces** (one per turn, filter by `type:`
 
 Server v4 **drops** the old `/api/public/traces`, `/sessions`, `/scores`, `/metrics` (404 "not available … events_only mode"). Use:
 - `GET /api/public/v2/observations?traceId=<id>&fields=core,basic,time,io,metadata,model,usage,prompt,metrics` (CLI: `observations`, not `traces` or `legacy-*`)
-- `GET /api/public/v3/scores?traceId=<id>` · datasets: `GET /api/public/v2/datasets`
+- `GET /api/public/v3/scores?traceId=<id>&fields=core,details` (without `details` no `comment`) · datasets: `GET /api/public/v2/datasets`
 
 Bundled script: `uv run python <skill-dir>/scripts/lf_trace.py <trace_id> | --latest N | --session S [--audit]`. It prints the tree with latency, model (+ `llm_role`), usage (input/output/reasoning/cache), cost, TTFT, prompt version, statusMessage of failed observations, plus scores; `--audit` adds the best-practice findings. **Use it first when debugging "slow / wrong / expensive"**.
 

@@ -15,6 +15,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
 
+from app.config import get_settings
 from app.observability import tracing
 
 MODEL = "qwen/qwen3.8-flash"
@@ -163,3 +164,32 @@ def test_reasoning_is_added_to_a_copy_only():
     assert response.generations[0][0].message is message
     plain = LLMResult(generations=[[ChatGeneration(message=AIMessage("no thinking"))]])
     assert tracing._with_reasoning(plain) is plain
+
+
+async def test_event_in_a_node_lands_under_that_node(_lf, monkeypatch):
+    """SDK 4.18 `span.start_observation(as_type="event")` ignores the parent span: on a real server the hitl.*
+    events of the approval node showed up under agent.invoke (async graph, like the service). tracing.event
+    must nest them under the node."""
+    from langgraph.graph import START, MessagesState, StateGraph
+
+    client, exporter = _lf
+    exporter.clear()
+    monkeypatch.setattr(tracing, "_client", client)
+
+    async def approval(state):
+        tracing.event("hitl.request", input={"tool_calls": []})
+        return {}
+
+    g = StateGraph(MessagesState)
+    g.add_node("approval", approval)
+    g.add_edge(START, "approval")
+    with tracing.trace_request(settings=get_settings(), user_id="u", session_id="s", input="hi"):
+        await g.compile().ainvoke(
+            {"messages": []}, config={"callbacks": tracing.langchain_callbacks()}
+        )
+    client.flush()
+    finished = exporter.get_finished_spans()
+    by_id = {s.context.span_id: s for s in finished}
+    (event,) = [s for s in finished if s.name == "hitl.request"]
+    assert by_id[event.parent.span_id].name == "approval"
+    assert _type(dict(event.attributes)) == "event"

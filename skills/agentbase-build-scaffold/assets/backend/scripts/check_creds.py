@@ -88,6 +88,12 @@ def check_llm(env: dict[str, str]) -> Result:
         )
     except httpx.HTTPError as e:
         return "FAIL", f"LLM endpoint unreachable ({type(e).__name__})"
+    if r.status_code == 403 and "not allowed" in r.text.lower():
+        # MaaS: valid key, but this model is not enabled for it (seen: 403 "model not allowed for this key")
+        return (
+            "FAIL",
+            f"model {model!r} not allowed for this LLM_API_KEY — enable it for the key on AIP",
+        )
     if r.status_code in (401, 403):
         return "FAIL", f"LLM_API_KEY rejected (HTTP {r.status_code})"
     if r.status_code >= 400:
