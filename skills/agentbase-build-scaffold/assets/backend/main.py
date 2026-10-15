@@ -44,7 +44,8 @@ def bind_host(s: Settings, dockerenv: Path = Path("/.dockerenv")) -> str:
 async def lifespan(_app):
     tracing.init_tracing(settings)
     await prefetch_jwks(settings)  # the first request doesn't wait for the JWKS download
-    await log_iam_principal(settings)  # Policy Group principal iam:<sub> in the startup log (never fails)
+    # Policy Group principal iam:<sub> in the startup log (never fails startup)
+    await log_iam_principal(settings)
     try:
         yield
     finally:

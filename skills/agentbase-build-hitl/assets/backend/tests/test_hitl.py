@@ -353,7 +353,8 @@ async def test_rejected_call_message_names_the_user_and_forbids_a_retry(fake_llm
     await service.handle({"type": "resume", "decisions": [reject]}, ctx("hitl-note"))
     [tool_msg] = [m for m in model.calls[-1] if isinstance(m, ToolMessage)]
     assert tool_msg.content.startswith("Not executed: the user declined this call")
-    assert '"schedule changes often"' in tool_msg.content and "Do not call this tool again" in tool_msg.content
+    assert '"schedule changes often"' in tool_msg.content
+    assert "Do not call this tool again" in tool_msg.content
 
 
 async def test_decision_event_lists_every_call_with_its_tool_and_implicit_rejects(
