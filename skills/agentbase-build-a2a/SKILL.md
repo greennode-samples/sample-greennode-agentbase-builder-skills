@@ -44,7 +44,7 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 
 ## A2A client (this agent calls other agents)
 
-`a2a_agents.json` (`${VAR}` — braces only — is expanded inside string values **after** JSON parsing, so a `"` or `\` in a key can't break the file or inject keys like `auth`; an unset/empty variable skips that agent with an error log naming it, never sends the literal; `enabled: false` entries are not expanded. Secrets go in the runtime env file / Identity, not committed):
+`a2a_agents.json` (`${VAR}` — braces only — is expanded inside string values **after** JSON parsing, so a `"` or `\` in a key can't break the file or inject keys like `auth`; an unset/empty variable skips that agent with an error log naming it, never sends the literal; `enabled: false` entries are not expanded. Secrets go in the runtime env file / Identity, not committed — the user enters the key in their own terminal: `make set-secret NAME=A2A_STOCK_AGENT_API_KEY` (or `make set-secret NAME=A2A_STOCK_AGENT_API_KEY STDIN=1 < ~/.stock-agent-api-key` from the file the target's key generator wrote), `ENV_FILE=src/backend/.env.<env>` / CI `RUNTIME_ENV_SECRETS` for deploys — never through the chat):
 
 ```json
 {"agents": {"stock-agent": {"url": "${A2A_STOCK_AGENT_URL}", "description": "Vietnam stock agent",

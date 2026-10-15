@@ -5,7 +5,7 @@ description: "Standard for BUILDING an MCP server (Python, uv, FastMCP streamabl
 
 # Build an MCP Server with Authentication / OAuth
 
-Verified template (`assets/mcp_server/`, 45 e2e tests: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
+Verified template (`assets/mcp_server/`, 46 tests — e2e: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
 
 | File | Role |
 |---|---|
@@ -14,6 +14,7 @@ Verified template (`assets/mcp_server/`, 45 e2e tests: real uvicorn server + rea
 | `store.py` | Per-user data access (SQLite, **local only** — `open_store()` refuses it when deployed; every query filtered by owner) |
 | `backend.py` | Client for the internal system: timeout + clean `ToolError` mapping |
 | `scripts/call_tool.py` · `Makefile` | Call tools from the shell · `make setup/dev/test/lint/tools/call` |
+| `scripts/set_secret.py` | `make set-secret`: the **user** sets secrets (`MCP_BACKEND_TOKEN`…) in their own terminal with hidden input — same script as the agent template (`/agentbase-build-scaffold`) |
 | `tests/conftest.py` · `test_auth.py` · `test_tools.py` | Harness + fixtures · auth tests · **per-tool tests (copy per new tool)** |
 
 ## Standard architecture
@@ -47,7 +48,7 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    ```bash
    cp -R <skill-dir>/assets/mcp_server <dest> && cd <dest>
    sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml settings.py .env.example Makefile   # Linux: sed -i
-   make setup && make test      # uv sync + .env from .env.example · 45 passed
+   make setup && make test      # uv sync + .env from .env.example · 46 passed
    ```
 2. **Write tools** in `server.py` — **read `references/tool-design.md` first**; copy the closest sample, then delete the samples you don't need (and their tests):
    - Shared data from an internal system ⇒ copy `get_product` + `backend.py` (`MCP_BACKEND_URL`, timeout, error mapping).
@@ -62,9 +63,9 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    make call TOOL=add_note ARGS='{"text":"hi"}'   # prints structured output; exit 1 if isError
    ```
    - `none` mode: `current_user()` = `MCP_DEV_USER`, `require_scope()` always passes, the server logs `authentication is DISABLED` and listens on 127.0.0.1 only ⇒ restart with another `MCP_DEV_USER` to see per-user isolation by hand. Scopes, 401 and real isolation are covered by `uv run pytest` (JWT mode with a test-signed token) — add a test per new tool.
-   - Test a real auth mode locally: set `MCP_AUTH_MODE=api_key` + hash in `.env` (+ `MCP_API_KEY_SCOPES` for the tools the key may call), then `make call TOOL=… TOKEN=<raw key>`. With auth on, the server listens on 0.0.0.0.
+   - Test a real auth mode locally: generate a key with the `.env.example` one-liner (raw key → `~/.<name>-mcp-api-key`, only the hash printed), set `MCP_AUTH_MODE=api_key` + hash in `.env` (+ `MCP_API_KEY_SCOPES` for the tools the key may call), then `make call TOOL=… TOKEN="$(cat ~/.<name>-mcp-api-key)"` (the key never appears in the command or the chat). With auth on, the server listens on 0.0.0.0.
    - Docker locally: `make docker-build docker-run` (publishes on 127.0.0.1:8080 — `PORT=8081` to change — and sets `MCP_HOST=0.0.0.0` inside the container so `none` stays usable for local tests, plus `MCP_DB_PATH=/tmp/mcp.db`: the image keeps `/app` read-only for the server user).
-   - Internal system locally: point `MCP_BACKEND_URL` at a dev/mock instance (+ `MCP_BACKEND_TOKEN`); empty ⇒ those tools answer "not configured".
+   - Internal system locally: point `MCP_BACKEND_URL` at a dev/mock instance (+ `MCP_BACKEND_TOKEN`: the user runs `make set-secret NAME=MCP_BACKEND_TOKEN` in their own terminal — never pasted into the chat); empty ⇒ those tools answer "not configured".
    - Interactive UI (optional): `make inspector` → Streamable HTTP, URL `http://localhost:8080/mcp`.
 4. **Connect a local agent** (optional, agent built with `/agentbase-build-mcp`) — the agent's `make dev` binds 8080, so run this server with **`make dev PORT=8081`**, then call it directly, bypassing the gateway, in the agent's `mcp_servers.json`:
    ```json
@@ -72,7 +73,7 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    ```
    For `api_key` mode add `"headers": {"Authorization": "Bearer ${NOTES_MCP_KEY}"}` (`${…}` is expanded from the agent's env). Tool names in the agent = `<server>_<tool>` (e.g. `notes_add_note`). Policy Group does not apply without the gateway.
 5. **Configure auth** (`.env.example` → deploy env file; it **must** set `MCP_AUTH_MODE=api_key|jwt` and must **not** set `MCP_APP_ENV=local` (the image defaults to `prod`) — a missing or incomplete env makes the server refuse to start, never serve unauthenticated; leave `MCP_HOST` empty):
-   - `api_key`: generate a key, env holds only `MCP_API_KEY_SHA256=["<sha256>"]`; **store the raw key in AgentBase Identity** (API key provider via `/agentbase-identity`) for the connector to use — not in the repo. The key carries no scopes: `MCP_API_KEY_SCOPES` lists the scopes it is granted (e.g. `["catalog.read"]` for `get_product`; only shared-data tools — per-user tools refuse API keys anyway).
+   - `api_key`: generate a key with the `.env.example` one-liner (raw key → a `0600` file outside the repo, only the hash printed — never print the raw key where a coding agent reads it), env holds only `MCP_API_KEY_SHA256=["<sha256>"]`; **the user stores the raw key in AgentBase Identity** (API key provider via `/agentbase-identity`) for the connector to use — not in the repo. The key carries no scopes: `MCP_API_KEY_SCOPES` lists the scopes it is granted (e.g. `["catalog.read"]` for `get_product`; only shared-data tools — per-user tools refuse API keys anyway).
    - `jwt`: `MCP_ISSUER`, `MCP_JWKS_URL`, `MCP_AUDIENCE` — all **required** (startup error otherwise); `aud` is always verified, so tokens minted for another API or without `aud` get 401. `MCP_AUDIENCE` = API identifier registered at the IdP, ideally = `MCP_RESOURCE_URL`. `MCP_REQUIRED_SCOPES` if every request needs a scope.
    - `jwt`: `MCP_USER_TOKEN_CLAIM` (recommended, see the 2LO rule above).
    - `MCP_RESOURCE_URL` = `https://<runtime endpoint>/mcp` — **jwt mode only**: appears in `WWW-Authenticate` and `/.well-known/oauth-protected-resource` so OAuth clients can discover the authorization server; must be `https://` unless `MCP_APP_ENV=local` (startup error otherwise — the default `http://localhost:8080/mcp` would be advertised). `api_key` mode publishes no protected-resource metadata (there is no authorization server).
@@ -107,6 +108,7 @@ Read `references/oauth.md` — 2LO / 3LO / inbound forward flows, registering th
 
 - `tests/test_auth.py`: public health · 401 + `WWW-Authenticate resource_metadata` (https `MCP_RESOURCE_URL`; none in api_key mode) · wrong key · API key has no user identity (even with the notes scopes granted) · OAuth 2LO tokens have no user (Auth0 / Okta / Keycloak / Entra variants, `MCP_USER_TOKEN_CLAIM`) · Entra `roles` as scopes · JWKS unreachable ⇒ 401 · `require_scope` fails closed · SQLite refused outside local · missing scope · invalid JWT (wrong / missing audience, wrong issuer, expired) · `MCP_AUDIENCE` required + verifier never skips `aud` · `MCP_JWT_ALGORITHMS` asymmetric only (HS*/none refused at startup, like the agent's `AUTH_ALGORITHMS`) · alg/key-type mismatch (ES256 header on an RSA kid) ⇒ 401 not 500 · EC key from JWKS accepted · key removed from the JWKS ⇒ 401 once the 1h JWK-set cache expires · slow JWKS fetch doesn't block other requests · protected resource metadata · fail closed (no env ⇒ `none` refused; Dockerfile env refuses `none`) · `none` binds 127.0.0.1 and warns · **local quickstart** (`.env.example` + `python server.py` + `scripts/call_tool.py` as a real process).
 - `tests/test_tools.py`: per-user isolation · idempotent write (replay returns the stored note) · 8 concurrent retries ⇒ one note, no SQL error · pagination · can't delete another user's note · internal system OK / 404 / timeout / 500 / non-JSON / contract drift without leaking details (fake backend via `httpx.MockTransport`) · `get_product` with an API key (`MCP_API_KEY_SCOPES`) · input validation · scope · annotations & output schema.
+- `tests/test_set_secret.py`: `make set-secret` writes `MCP_BACKEND_TOKEN` with hidden input, keeps the rest of `.env`, mode 600, never prints it, refuses without a TTY (in-depth tests live in the agent template).
 - Tests run in a temp dir (own SQLite file, no developer `.env`). Fixtures are documented at the top of `tests/conftest.py`.
 
 ## Official docs

@@ -75,8 +75,8 @@ Every failure names the file, the line and the fix. Fix the doc or the template;
 
 ```bash
 bash skills/agentbase-build-scaffold/scripts/scaffold.sh my-agent ./my-agent --with-frontend
-cd my-agent && make test          # then fill src/backend/.env + .greennode.json, `make check-creds`, `make dev`,
-                                  # and in another terminal: make invoke MSG="hello"
+cd my-agent && make test          # then, in YOUR terminal: make set-secret (IAM + LLM key, hidden input),
+                                  # `make check-creds`, `make dev`, and in another terminal: make invoke MSG="hello"
 ```
 
 ## Official GreenNode docs
@@ -85,13 +85,14 @@ Platform behavior (Runtime, Memory, Identity, MCP Gateway, Policy, MaaS) is docu
 
 ## Prerequisites
 
-To build and run an agent you need these values. **Never paste secrets into the chat with your coding agent.** It creates the files from `.example` templates, you fill them in your editor, then you run `make check-creds`, which prints only OK/FAIL and non-secret IDs.
+To build and run an agent you need these values. **Never paste secrets into the chat with your coding agent** — everything typed there is stored by the agent host. When a step needs one, the agent asks you to run **`make set-secret`** in your own terminal (a new terminal tab, your IDE's terminal, or the Claude Code desktop app's Terminal pane — not the chat's `!` prefix): it reads the value with a hidden prompt, checks it and writes it to the git-ignored file. Then `make check-creds` prints only OK/FAIL and non-secret IDs. Deploy secrets: `gh secret set <NAME> --env <env>` (CI) or `make set-secret ENV_FILE=src/backend/.env.<env>` (`/agentbase-deploy`). Pasted one anyway? Rotate it (`skills/agentbase-build/references/security.md`).
 
-| Value | Get it with | Put it in |
+| Value | Get it with | Set it with (your terminal) |
 |---|---|---|
-| IAM service account `client_id` + `client_secret` (Memory, Identity, MCP Gateway) | `/agentbase` (IAM setup) | `src/backend/.greennode.json` |
-| `LLM_API_KEY` + `LLM_MODEL` | `/agentbase-llm` | `src/backend/.env` |
-| [Langfuse](https://github.com/langfuse/langfuse) public/secret key (optional) | Langfuse project settings (Langfuse Cloud or self-hosted) | `src/backend/.env` |
+| IAM service account `client_id` + `client_secret` (Memory, Identity, MCP Gateway) | `/agentbase` (IAM setup) | `make set-secret NAME=iam` → `src/backend/.greennode.json` |
+| `LLM_API_KEY` | `/agentbase-llm` (it can save the key itself) | `make set-secret NAME=LLM_API_KEY` → `src/backend/.env` |
+| `LLM_MODEL` (not secret) | `/agentbase-llm` | `src/backend/.env` |
+| [Langfuse](https://github.com/langfuse/langfuse) public/secret key (optional) | Langfuse project settings (Langfuse Cloud or self-hosted) | `make set-secret NAME=langfuse` → `src/backend/.env` |
 
 Tools: Python 3.13 + [uv](https://docs.astral.sh/uv/), Docker (deploy), Node.js + npm (frontend only).
 

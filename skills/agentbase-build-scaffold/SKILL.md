@@ -35,7 +35,7 @@ make test        # must be green (offline tests: fake LLM, in-memory memory, aut
 make lint
 ```
 
-Report to the user: list of created files + next steps (`/agentbase-build-llm` to get a key, `/agentbase-build-memory` to create memory).
+Report to the user: list of created files + next steps: **they run `make set-secret` in their own terminal** (hidden prompt for the IAM `client_id`/`client_secret` → `.greennode.json` and `LLM_API_KEY` → `.env`; you cannot type into it — never offer to take the values in the chat), then `make check-creds`; `/agentbase-build-llm` to get a key, `/agentbase-build-memory` to create memory.
 
 ## Managing the environment with uv (MANDATORY)
 
@@ -57,11 +57,13 @@ Rules: **every Python command runs via `uv run`** (including one-liners: `uv run
 | `.env.example` | Full template of every `Settings` variable | ✔ |
 | `.env` | Local dev (`APP_ENV=local`, may use `AUTH_MODE=none`, `MEMORY_BACKEND=inmemory`) | ✖ |
 | `.env.dev.example` / `.env.staging.example` / `.env.prod.example` | Per-environment **non-secret** runtime config (secrets `<set-in-deploy>`); CI merges it with the secret store | ✔ |
-| `.env.dev` / `.env.staging` / `.env.prod` | Copy of the `.example` with secrets filled by the user — passed to the runtime by `/agentbase-deploy --env-file` | ✖ |
-| `.greennode.json` | IAM credentials for local dev (read by the SDK). The **user** creates it from `.greennode.json.example` — never via chat | ✖ |
+| `.env.dev` / `.env.staging` / `.env.prod` | Copy of the `.example` with secrets filled by the user (`make set-secret ENV_FILE=src/backend/.env.<env>`) — passed to the runtime by `/agentbase-deploy --env-file` | ✖ |
+| `.greennode.json` | IAM credentials for local dev (read by the SDK). The **user** writes it with `make set-secret NAME=iam` (from `.greennode.json.example`) — never via chat | ✖ |
 | `.greennode.json.example` | Template `{client_id, client_secret, agent_identity}` (`agent_identity`: the **dev** identity, only when tools use Identity providers) | ✔ |
 
-`make check-creds` (`scripts/check_creds.py`) verifies IAM, the LLM key against **every** tier's primary and fallback model (FAIL for a primary, WARN for a fallback), the agent identity and Langfuse keys, and prints only `OK/WARN/FAIL` + non-secret IDs (the **developer's** IAM principal `iam:<sub>` from the local `.greennode.json` — the runtime has its own, see `/agentbase-build-deploy` Step 5). Run it after the user fills the files.
+**Secrets: `make set-secret`** (`scripts/set_secret.py`, Python 3 standard library — works before `uv sync`) is run by the **user in their own terminal**, never by you through the chat: it lists what can be set (keys of `.greennode.json.example`; the secrets the env file's template declares; secret-looking `${VAR}` of enabled entries in `mcp_servers.json` / `a2a_agents.json`), reads each value with a hidden prompt (refuses without a TTY), rejects obvious wrong pastes (quotes, spaces, `Bearer `, a whole `NAME=value` line, placeholders, the same value as another secret…) and anything the strict env-file format forbids, asks before replacing a value, and writes atomically with mode 600 — every other line and key is kept, `.env` is created from `.env.example` if missing, and files git would commit are refused. It prints only `set (N chars)`. `NAME=<key|group>` (`iam`, `llm`, `langfuse`, `feedback`, `identity`), `ENV_FILE=src/backend/.env.<env>` (deploy env file: IAM is refused, the `<set-in-deploy>` keys are the default), `LIST=1` (names + set/not set — safe for you to run), `STDIN=1` (one value piped from a secret manager, e.g. `op read … | make set-secret NAME=LLM_API_KEY STDIN=1`; never `echo <secret> |`). Where to open the terminal: `/agentbase-build` → *Credentials*.
+
+`make check-creds` (`scripts/check_creds.py`) verifies IAM, the LLM key against **every** tier's primary and fallback model (FAIL for a primary, WARN for a fallback), the agent identity and Langfuse keys, and prints only `OK/WARN/FAIL` + non-secret IDs (the **developer's** IAM principal `iam:<sub>` from the local `.greennode.json` — the runtime has its own, see `/agentbase-build-deploy` Step 5); each FAIL names the `make set-secret NAME=…` to re-run. Run it after the user ran `make set-secret`.
 
 Deploy env files are read **literally** by the platform (`runtime.sh --env-file`) and by `docker run --env-file`, unlike python-dotenv for the local `.env`: one `KEY=VALUE` per line, no quotes, no inline comments, no `export`, no `${VAR}`. `make check-env ENV_FILE=src/backend/.env.<env>` (`deploy/env_file.py`) lints a file and prints key names only.
 
@@ -79,6 +81,7 @@ See the directory tree and module responsibilities in `/agentbase-build` → `re
 - `assets/backend/app/service.py` — payload contract, orchestration, HITL resume (interrupt taken from graph output), feedback token, `run_chat()`/`run_resume()`/`pending_tool_calls()` for eval & A2A.
 - `assets/backend/app/graph/{state,builder}.py` — the single graph.
 - `assets/backend/app/prompts/system.md` — system prompt (rewrite for your domain, but keep its "Dates & time" and "Memory" sections).
+- `assets/backend/scripts/{set_secret,check_creds}.py` — `make set-secret` / `make check-creds` (above); tests `tests/test_set_secret.py`, `tests/test_check_creds.py`. The MCP server template ships an identical `set_secret.py` (skills CI compares them).
 - `assets/backend/tests/{conftest,test_agent,test_isolation,test_service,test_turn_context}.py` — `fake_llm` fixture (patches `get_llm` in every module listed in `LLM_MODULES`; add new LLM-calling modules there); conftest overrides env so tests don't depend on `.env`; per-user isolation tests; service error mapping (stale resume ⇒ 409, LLM config errors); per-turn context (current date/time in `APP_TIMEZONE`, recalled notes framed as data).
 - `assets/backend/.python-version` — `3.13`.
 - `assets/backend/Dockerfile` — multi-stage `python:3.13-slim`: uv only in the builder; the runtime stage gets the venv + code (root-owned, read-only for the non-root `agent` user), `ARG AGENT_VERSION` → `ENV AGENT_VERSION` (Langfuse release = image tag), port 8080. `.dockerignore` uses `**/` patterns so nested caches/secrets are excluded too.

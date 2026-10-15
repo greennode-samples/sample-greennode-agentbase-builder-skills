@@ -68,7 +68,8 @@ second one; read it there rather than copying it). What it does:
   `CONTEXT_*` from the committed `src/backend/.env.<EVAL_CONFIG_ENV>.example` (repo variable `EVAL_CONFIG_ENV`, default `prod`;
   `LLM_API_KEY` is never read from it). Missing file ⇒ a notice and the eval runs on `EVAL_LLM_MODEL` only.
 - Uses a **dedicated, repo-level** secret `EVAL_LLM_API_KEY` (eval traffic gets its own rate limit; never the runtime's
-  `LLM_API_KEY`) — it must be allowed for **every model** that config names (check with `make check-creds` locally).
+  `LLM_API_KEY`; the user sets it with `gh secret set EVAL_LLM_API_KEY`, which prompts without echo — never via the
+  chat) — it must be allowed for **every model** that config names (check with `make check-creds` locally).
   `vars.EVAL_LLM_MODEL` (or `vars.LLM_MODEL`) overrides the primary model; otherwise `LLM_MODEL` from the config is used.
 - No key or no model ⇒ the gate is **skipped** with a notice (`gate=skipped`) and the deploy job allows **dev only**.
   Otherwise `python -m evals.run_eval --data evals/datasets/smoke.jsonl --min-pass-rate ${EVAL_MIN_PASS_RATE:-0.8}

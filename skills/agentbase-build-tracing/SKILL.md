@@ -19,7 +19,7 @@ npx skills add langfuse/skills --skill langfuse      # or: git clone https://git
 | `langfuse-cli` (`npx langfuse-cli api <resource> <action>`) to read/write traces, prompts, datasets, scores | Names, observation types and the trace tree of Step 2 (dashboards, evaluators and evals depend on them) |
 | Playbooks: instrumentation audit, prompt migration, user-feedback signals, setting up evals, judge calibration, CI experiment gates, v4 project migration | Masking (secrets + VN PII), GreenNode MaaS specifics (model prices, thinking text, prompt cache), LangGraph span attachment, `lf_trace.py --audit` |
 
-Conflicts: the hard rules here win (masking, one module, no per-request `flush()`, Step 2 names). For SDK/API signatures and UI behaviour, the **current** Langfuse docs win over this file — then fix this skill. Never ask the user to paste Langfuse keys into the chat: they go in `.env` (`/agentbase-build-scaffold`).
+Conflicts: the hard rules here win (masking, one module, no per-request `flush()`, Step 2 names). For SDK/API signatures and UI behaviour, the **current** Langfuse docs win over this file — then fix this skill. Never ask the user to paste Langfuse keys into the chat: they run `make set-secret NAME=langfuse` in their own terminal (hidden input → `.env`; `/agentbase-build` → *Credentials*).
 
 Workflow (same order as the Langfuse instrumentation playbook): **assess** what exists → **baseline** (table below + Step 2) → **run & self-audit until clean** (Step 6, required) → **explore the traces with the user** (Step 7).
 
@@ -55,7 +55,7 @@ Source: [What does a good trace look like?](https://langfuse.com/docs/observabil
 ## Step 1 — Connect
 
 1. Have a Langfuse instance (Cloud or self-hosted). Create project `<project-name>`, get the public/secret keys.
-2. Fill env (local `.env`, deploy `.env.<env>`): `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`, optional `LANGFUSE_SAMPLE_RATE`. Missing keys ⇒ tracing turns itself off (no-op), the agent still runs. `main.py` calls `load_dotenv()` before anything imports Langfuse.
+2. Before wiring anything, ask the user to set the keys **in their own terminal** — `make set-secret NAME=langfuse` asks for `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (hidden) and `LANGFUSE_BASE_URL` (Cloud or self-hosted) and writes the local `.env`; deploy: `gh secret set LANGFUSE_SECRET_KEY --env <env>` (+ the public key) for CI, or `make set-secret NAME=langfuse ENV_FILE=src/backend/.env.<env>` for `/agentbase-deploy`. Optional `LANGFUSE_SAMPLE_RATE` is plain config. `make check-creds` then shows `OK  Langfuse`. Missing keys ⇒ tracing turns itself off (no-op), the agent still runs. `main.py` calls `load_dotenv()` before anything imports Langfuse.
 3. Runtime in VPC mode ⇒ make sure it can reach `LANGFUSE_BASE_URL` (route/NAT).
 4. **Declare GreenNode model prices** in Langfuse (Project Settings → Models: match pattern = `LLM_MODEL` path, input/output/cached-input prices) — without this, generations have no cost. Take prices from the user's contract/billing; do not guess.
 

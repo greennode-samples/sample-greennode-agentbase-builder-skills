@@ -7,7 +7,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] `app/` structure follows the standard; no second graph/LLM factory (`grep -rn "ChatOpenAI(" app | grep -v app/llm` is empty).
 - [B] No `os.environ`/`os.getenv` reads outside `app/config.py` and the allowed exceptions (HARD RULE 2: `app/prompts`, `app/observability`, the `${VAR}` expansion in `app/tools/mcp.py` / `app/a2a/client.py`). Must print nothing: `grep -rn "os.getenv\|os.environ" app | grep -v -e '^app/config.py:' -e '^app/prompts/' -e '^app/observability/' -e '^app/tools/mcp.py:.*environ.get(m.group(1))' -e '^app/a2a/client.py:.*environ.get(m.group(1))'`.
 - [B] `.env`, `.greennode.json` are in `.gitignore` and `.dockerignore`.
-- [B] `make check-creds` prints OK for IAM and LLM (secrets were filled in by the user, never pasted into chat or printed).
+- [B] `make check-creds` prints OK for IAM and LLM — the user entered the secrets themselves (`make set-secret` in their own terminal; never pasted into chat or printed); any secret that did reach a chat, commit or log has been rotated (`references/security.md` → *Secret pasted into a chat*).
 - Every variable in `Settings` is in `.env.example`.
 
 ## Runtime contract

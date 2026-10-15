@@ -10,6 +10,9 @@
 #   vars:    EVAL_CONFIG_ENV (default prod — eval uses the LLM tiers/fallbacks/routing/token caps, reflection, LTM and
 #            time zone of src/backend/.env.<EVAL_CONFIG_ENV>.example), EVAL_LLM_MODEL (optional override of its LLM_MODEL),
 #            LANGFUSE_BASE_URL (optional), EVAL_MIN_PASS_RATE (default 0.8)
+# Set secrets YOURSELF, never through a chat with a coding agent: `gh secret set <NAME>` (repository) or
+# `gh secret set <NAME> --env <env>` prompts for the value without echoing it (multi-line RUNTIME_ENV_SECRETS:
+# `gh secret set RUNTIME_ENV_SECRETS --env <env> < <git-ignored file>`); non-secret vars: `gh variable set`.
 # Per GitHub Environment dev / staging / prod (Settings → Environments; add required reviewers on prod), used by
 # `deploy` — environment-scoped values are only visible to jobs that declare `environment:`:
 #   secrets: GRN_ACCESS_KEY_ID, GRN_SECRET_ACCESS_KEY (dedicated CI service account), VCR_USERNAME, VCR_PASSWORD

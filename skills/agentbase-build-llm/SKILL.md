@@ -12,7 +12,7 @@ description: "LLM standard for AI agents on GreenNode AgentBase: GreenNode AI Pl
 | Provider | GreenNode AI Platform (MaaS) |
 | Endpoint | `https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1` (OpenAI-compatible, pay-as-you-go keys). A **Token Plan** key uses `https://tokenplan.api.greennode.ai/v1` with the model **code** — a key on the wrong host returns 401 ([connect-openai-compatible-to-maas](https://docs.greennode.ai/ai-stack/ai-coding/connect-openai-compatible-to-maas)) |
 | Rate limit | **10 requests/minute and 14,400/day per account, shared across ALL models** ([available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models)) — a fallback to another model does NOT bypass it; more needs a whitelist request. One chat turn can use several calls (router + agent + tool rounds + judge) ⇒ budget accordingly |
-| API key | Create/select via **`/agentbase-llm`** → `.env` `LLM_API_KEY` (never print the key) |
+| API key | Create/select via **`/agentbase-llm`** run from `src/backend` (`api-keys create` / `--save-env` writes `LLM_API_KEY` into `.env` itself, never shown). A key the user already has: they run `make set-secret NAME=LLM_API_KEY` in their own terminal (hidden input) — never ask for it in chat, never print it |
 | Model | The model's **`path`** field (`/agentbase-llm models list --status ENABLED`) |
 
 ## 1. Three capability tiers
@@ -155,7 +155,7 @@ Keep `LLM_BASE_URL` pointing at MaaS on the Runtime too. An older doc mentioned 
 
 | Error | Cause | Fix |
 |---|---|---|
-| 401 (ERROR log names `LLM_API_KEY`) | Wrong/deleted key, or a Token Plan key on the pay-as-you-go host | `/agentbase-llm api-keys list`, reload with `--save-env`; Token Plan keys use the Token Plan base URL (fallback can't help) |
+| 401 (ERROR log names `LLM_API_KEY`) | Wrong/deleted key, or a Token Plan key on the pay-as-you-go host | `/agentbase-llm api-keys list`, reload with `--save-env` (or the user re-enters it: `make set-secret NAME=LLM_API_KEY`); Token Plan keys use the Token Plan base URL (fallback can't help) |
 | 402 | Token Plan expired or out of balance | Renew/top up the plan, or use a pay-as-you-go key (`/agentbase-llm`) |
 | 403 model not allowed (ERROR log names the env var) | Model not enabled for this key, or not in the key's plan | Enable it or pick an ENABLED model (`/agentbase-llm models list --status ENABLED`); with a fallback the request still works but every call fails over first, so fix it |
 | `ProviderStreamError` / bare `openai.APIError: <message>` (no status), often after some tokens | Provider failed inside the stream (SSE error chunk: engine overloaded or crashed) | Falls back automatically when the tier has fallbacks; without fallbacks it surfaces as an error, so add a fallback |

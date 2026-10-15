@@ -49,7 +49,7 @@ Secrets live in the platform vault — never in .env, code, the image, traces, o
 3. **Per-user flows only** (3LO, delegated):
    - Add the app page that users land on after consent to the identity's **`allowedReturnUrls`**.
    - Set `IDENTITY_CALLBACK_URL` to that page in `.env.<env>`. It can be a simple "Done — go back to the chat" page: per the SDK flow the platform's own `callbackUrl` completes the exchange (verify once on your environment).
-4. **Local dev** — fill `"agent_identity"` in `.greennode.json` (the `.example` ships it empty: projects without Identity providers leave it so) with the **dev** identity — never the prod one — then `make check-creds` must show `OK  Agent identity`.
+4. **Local dev** — set `"agent_identity"` in `.greennode.json` (the `.example` ships it empty: projects without Identity providers leave it so) to the **dev** identity — never the prod one: the user runs `make set-secret NAME=agent_identity` (plain input — the name is not secret, but the file holds the IAM secret, so the coding agent never opens it) — then `make check-creds` must show `OK  Agent identity`.
    - Per-user flows locally run with `AUTH_MODE=none` (the user id is only asserted) ⇒ they are refused unless `IDENTITY_TRUST_ASSERTED_USER=true` in `.env` (dev identity only), or test with `AUTH_MODE=jwt`.
    - Without it the SDK would silently **create a new identity** that has none of your providers. `app/identity.py` refuses instead.
    - The SDK caches `.greennode.json` for the whole process ⇒ restart `make dev` after editing it.
