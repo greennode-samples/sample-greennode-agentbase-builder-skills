@@ -20,18 +20,23 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
 // Chat
 {"type": "chat", "message": "Hello", "stream": false}
 
-// Resume after a HITL interrupt
-{"type": "resume", "stream": false, "interrupt_id": "<interrupt.id>",  // recommended: differs from the pending interrupt ⇒ 409
+// Resume after a HITL interrupt — ALWAYS echo interrupt_id (an earlier card's id ⇒ 409)
+{"type": "resume", "stream": false, "interrupt_id": "<interrupt.id>",
  "decisions": [
   {"tool_call_id": "call_1", "action": "approve"},
   {"tool_call_id": "call_2", "action": "edit", "args": {"amount": 100}},
   {"tool_call_id": "call_3", "action": "reject", "reason": "Wrong recipient"}
 ]}
+// one decision per tool_call_id of THIS card (missing ⇒ reject; an id of another card ⇒ 409);
+// tool_call_id string ≤ 128, reason string ≤ 1000 chars, edit args = object (≤ 16 000 chars JSON) — else 400
 
 // Feedback on 1 answer (records a user_feedback score on the Langfuse trace)
 {"type": "feedback", "trace_id": "…", "feedback_token": "…", "score": 1, "comment": "spot on"}
-// score ∈ {-1, 0, 1}; feedback_token comes from the response (HMAC of user+trace) — used by another user ⇒ 403
+// score ∈ {-1, 0, 1}; trace_id string ≤ 128; feedback_token comes from the response (HMAC of user+trace) — used by
+// another user ⇒ 403
 ```
+
+**HITL loop**: a `resume` can be answered by **another** `interrupted` (the model asks for the next action — a new `interrupt.id`). Keep handling `interrupt` (show the card, resume with its `id`) until the turn ends with `success`.
 
 ## Responses (non-stream)
 
@@ -44,7 +49,15 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
                "tool_calls": [{"id": "call_1", "name": "gateway_create_ticket", "args": {…}}]}}
 ```
 
-Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` invalid payload · `401` missing/invalid token · `403` spoofed user header · `409` invalid HITL state (chat while an approval is pending, resume with nothing pending, stale `interrupt_id`) — a second request of the same session on the same replica **waits** for the first (per-session lock), it is not rejected · `422` exceeded `MAX_TOOL_ROUNDS` · `502` LLM returned an error · `503` MaaS/Memory overloaded or JWKS unreachable (client retries with backoff) · `504` exceeded `REQUEST_TIMEOUT_S` · `500` other errors.
+Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` invalid payload · `401` missing/invalid token (only the agent's own auth — never a backing service's 401/403) · `403` spoofed user header / feedback token of another user · `409` invalid HITL state — a second request of the same session on the same replica **waits** for the first (per-session lock), it is not rejected · `422` exceeded `MAX_TOOL_ROUNDS` · `502` LLM provider error after all fallbacks, "LLM configuration error (HTTP 401/402/403/404)" (key rejected / plan expired / model not enabled or wrong id — fix the config, retrying won't help), or a backing service (Memory / Identity) rejected the request (provider/SDK details only in the server log) · `503` MaaS/Memory overloaded, IdP/JWKS unreachable or slow (client retries with backoff) · `504` exceeded `REQUEST_TIMEOUT_S` · `500` other errors.
+
+`409` and `details.interrupt`:
+
+| Situation | `details.interrupt` | Client |
+|---|---|---|
+| `chat` while an approval is pending | the pending card — same object as the `interrupted` response's `interrupt` (`id` may be `null` when the backend cannot see it yet) | **re-show the approval card** (don't show an error) |
+| `resume` for an earlier card (double tap, retry, stale tab — wrong `interrupt_id` or decisions for tool calls that are not pending) while another card is pending | the card pending now | replace the card with this one |
+| `resume` with nothing pending (already handled / expired) | absent | drop the approval card (retrying only gets 409 again) |
 
 ## SSE events (`stream: true`)
 
@@ -56,9 +69,9 @@ Each frame is `data: {json}\n\n`. Clients must parse per the SSE spec (LF/CRLF/C
 | `tool_start` | `name` | show "using tool …" |
 | `tool_end` | `name`, `status` | |
 | `reset` | `reason`: `self_eval_retry` (self-eval asked for a new answer) or `llm_fallback` (the primary model failed mid-answer and a backup restarts it) | **clear the displayed text** |
-| `interrupt` | same as the `interrupted` response | show the approval card (Approve / Reject; `edit` is supported by the API — the sample `ApprovalCard` has no Edit button yet) |
+| `interrupt` | same as the `interrupted` response | show the approval card (sample `ApprovalCard`: Approve / Edit — JSON args, validated — / Reject with a per-call reason); resume with its `id`; another `interrupt` may follow |
 | `done` | same as the `success` response | finalize the bubble, store `trace_id` + `feedback_token` for feedback |
-| `error` | `message`, `status?` | show the error; `401` ⇒ log in again; `409` on a resume ⇒ the approval was already handled or expired: drop the approval card (retrying only gets 409 again) |
+| `error` | `message`, `status?`, `interrupt?` | `interrupt` present (409) ⇒ show that approval card, as for the non-stream 409 above; `409` without it on a resume ⇒ drop the card; `401` ⇒ log in again; otherwise show the error |
 
 ## A2A (when `A2A_ENABLED=true`)
 
@@ -67,4 +80,4 @@ Each frame is `data: {json}\n\n`. Clients must parse per the SSE spec (LF/CRLF/C
 | `GET /.well-known/agent-card.json` | public | Agent Card (skills, securitySchemes, JSON-RPC interface `<url>/a2a`) |
 | `POST /a2a` | same as `/invocations` (api key + User-Id, or JWT) | JSON-RPC A2A v1: `SendMessage`, `GetTask`, `ListTasks`, `CancelTask` |
 
-`contextId` ⇒ session `a2a-<contextId>`; tasks are keyed by user; HITL ⇒ `TASK_STATE_INPUT_REQUIRED`, then send `approve` / `reject: <reason>`.
+`contextId` ⇒ session `a2a-<contextId>` (a calling agent built from this template sends its own **session id** — never its internal `thread_id`); tasks are keyed by user; HITL ⇒ `TASK_STATE_INPUT_REQUIRED`, then send `approve` / `reject: <reason>`. A decision word with nothing pending ⇒ `TASK_STATE_FAILED` "Nothing is awaiting confirmation" (no LLM call). Each message creates a new task (no task-id continuation).

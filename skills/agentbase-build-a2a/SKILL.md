@@ -5,7 +5,7 @@ description: "A2A standard (Agent2Agent Protocol, a2a-sdk 1.x JSON-RPC) for AI a
 
 # A2A — Agent2Agent Protocol
 
-AgentBase has **no** dedicated A2A gateway/registry (docs 2026-10) ⇒ A2A runs **inside the agent container itself** via `a2a-sdk`, sharing the Runtime endpoint. Skill assets: `app/a2a/{server,client}.py`, `a2a_agents.json`, `tests/test_a2a.py` (23 tests — mostly e2e: real uvicorn app + real a2a-sdk client, real local JWKS for JWT mode).
+AgentBase has **no** dedicated A2A gateway/registry (docs 2026-10) ⇒ A2A runs **inside the agent container itself** via `a2a-sdk`, sharing the Runtime endpoint. Skill assets: `app/a2a/{server,client}.py`, `a2a_agents.json`, `tests/test_a2a.py` (28 tests — mostly e2e: real uvicorn app + real a2a-sdk client, real local JWKS for JWT mode).
 
 ## When to use A2A vs MCP vs sub-agent
 
@@ -21,7 +21,7 @@ Enable: `A2A_ENABLED=true`, `A2A_PUBLIC_URL` (**set it explicitly** to the runti
 
 | Route | Auth | Notes |
 |---|---|---|
-| `GET /.well-known/agent-card.json` | public | name, version, interface `JSONRPC` `<url>/a2a`, `securitySchemes` (apiKey header or bearer JWT per `AUTH_MODE`), skills |
+| `GET /.well-known/agent-card.json` | public | name, version, interface `JSONRPC` `<url>/a2a`, `securitySchemes` (apiKey header or bearer JWT per `AUTH_MODE`) **and** `securityRequirements` (the scheme is required, not just declared), skills |
 | `POST /a2a` | **required** (same `authenticate()` as `/invocations`, same HTTP status: 401 bad credentials, 403 User-Id ≠ token subject, 400 missing User-Id in api_key mode, 503 IdP/JWKS down) | SendMessage, GetTask, ListTasks, CancelTask... |
 
 Standard mapping (verified by tests):
@@ -33,9 +33,12 @@ Standard mapping (verified by tests):
 | `contextId` | session `a2a-<contextId>` (memory per (session, user)) |
 | message text | `service.run_chat()` |
 | graph interrupt (HITL) | task `TASK_STATE_INPUT_REQUIRED` + description of the tool awaiting approval; next message in the same contextId: `approve` or `reject: <reason>` ⇒ `run_resume()` |
-| decision when nothing is pending any more (duplicate / concurrent `approve`) | `TASK_STATE_FAILED` "…already handled" — never a second INPUT_REQUIRED; chat while an approval is pending ⇒ `INPUT_REQUIRED` naming the pending call |
+| decision word (`approve`, `yes`, `ok`, `no`, `reject: …`…) when **nothing is pending** (stray, duplicate or concurrent) | `TASK_STATE_FAILED` "Nothing is awaiting confirmation — … already handled …" — deterministic, **no LLM call** (a relayed "approve" never reaches the model as chat). Conversational replies over A2A must therefore be sentences ("yes, show the details") |
+| two concurrent `approve` while the first one leads to a NEXT card | the loser's decisions (card 1) are refused (409 inside), it answers `INPUT_REQUIRED` naming card 2 — card 2 is never decided by them (`test_concurrent_approvals_never_decide_the_next_card`) |
+| chat while an approval is pending | `INPUT_REQUIRED` naming the pending call |
 | answer | artifact `response` + `TASK_STATE_COMPLETED` |
-| validation error inside the task | `TASK_STATE_FAILED` |
+| validation error inside the task | `TASK_STATE_FAILED` with the (client-safe) message |
+| unexpected exception | `TASK_STATE_FAILED` "The agent failed to process the request." — details only in the server log (never `str(exception)`) |
 
 Note: the executor must **enqueue the Task before** any status update (A2A v1 — otherwise `InvalidAgentResponseError`). The default task store is `InMemoryTaskStore` (lost on restart, not shared across replicas, and it **never evicts** — every message without a taskId adds a task, so memory grows for the container's lifetime; fine for demos only) ⇒ multi-replica prod uses a2a-sdk's `DatabaseTaskStore` (Postgres) — conversation history stays durable in AgentBase Memory.
 
@@ -49,12 +52,13 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 ```
 
 - Each agent ⇒ tool `ask_<name>(message)` (already included in `collect_tools`, trace `tools.collect.output.a2a`).
-- **Per-user isolation across agents**: the tool takes `actor_id`/`thread_id` from `RunnableConfig` (not from the LLM) ⇒ sends `X-GreenNode-AgentBase-User-Id` + `contextId=session` ⇒ the target agent keeps memory for the correct user (tested by `test_client_tool_propagates_user`).
+- **Per-user isolation across agents**: the tool takes `actor_id` + `session_id` from `RunnableConfig["configurable"]` (set by `thread_config`, not by the LLM) ⇒ sends `X-GreenNode-AgentBase-User-Id` + `contextId` = the caller's **session id** ⇒ the target agent keeps memory for the correct user (tested by `test_client_tool_propagates_user`, end to end through `run_chat` by `test_caller_session_reaches_the_target_as_context_id`). Never send `thread_id`: with `MEMORY_BACKEND=inmemory` it is `<user>::<session>` (leaks the user id, and the target rejects it).
 - `auth`: `api_key` (target agent built from this template) · `user_jwt` (forward the end-user JWT, same IdP) · `none` (local). Any other value is skipped with an error log. Outside `APP_ENV=local` the `url` must be `https://` (entries with http are skipped with an error log).
 - **No IAM mode**: a target whose Runtime **Inbound Auth is `IAM Permissions`** can't be called with this client (it would need a GreenNode IAM bearer in `Authorization` plus the app-level key/JWT in a custom header). Use Runtime `JWT` or `No authorization` + IP Access Control on the target, or extend `_headers` (e.g. with `IAMBearerAuth` from `app/tools/mcp.py`).
 - **Credentials only go to the configured origin**: the RPC URL comes from the target's Agent Card; interfaces whose scheme + host + port differ from `url` are dropped, none left ⇒ the call is refused before any credential is sent (`test_card_pointing_elsewhere_gets_no_credentials`). The target must advertise its real URL (`A2A_PUBLIC_URL`).
 - `contextId` = the caller's session id **unchanged** (already validated `[A-Za-z0-9-]`) ⇒ distinct sessions stay distinct on the target.
-- `user_jwt` replays the user's token at the target, so the target must accept this agent's `AUTH_AUDIENCE`. Only use it for agents you trust with that token; otherwise use `api_key` (identity still propagates via `X-GreenNode-AgentBase-User-Id`).
+- **Timeouts** (`A2A_TIMEOUT_S`, default 120 s = one call to another agent): **`A2A_TIMEOUT_S` ≥ the target's `REQUEST_TIMEOUT_S` + margin (~10 s)** — otherwise the caller gives up while the target is still working and may still run side effects ⇒ the user/LLM retries ⇒ duplicates. And **the caller's `REQUEST_TIMEOUT_S` > `A2A_TIMEOUT_S` + one LLM call** (the agent tier's worst case, `app.llm.worst_case_s`) — the caller's own half is checked at startup (WARNING `A2A client timeouts: …`). With template defaults (180 s everywhere) the target half is violated: either lower the target's `REQUEST_TIMEOUT_S` (e.g. 110 s for an agent called by agents) or raise the caller's `A2A_TIMEOUT_S` (≥ 190 s) **and** `REQUEST_TIMEOUT_S` (≥ 250 s).
+- `user_jwt` replays the user's token at the target, so the target must accept this agent's `AUTH_AUDIENCE` — **token passthrough**: the target (or anyone who compromises it) can then replay that token against this agent too. Only within one trust domain you control; otherwise give each agent its own audience and exchange the token at the IdP (RFC 8693 / on-behalf-of — extend `_headers`), or use `api_key` (identity still propagates via `X-GreenNode-AgentBase-User-Id`).
 - Target agent returns `INPUT_REQUIRED` ⇒ the tool returns `[<agent> needs confirmation] ...` so the current agent asks the user.
 - **Only a human may confirm another agent's action.** `ask_<agent>` refuses to relay a decision (`approve`, `yes`, `đồng ý`, `reject: …`) unless `ask_<agent>` is in `HITL_TOOLS` — then the user approves that exact call in the approval card. ⇒ For target agents that take actions, **add `ask_<agent>` to `HITL_TOOLS`** (otherwise their confirmations cannot be completed). Tested by `test_llm_cannot_relay_decision_without_hitl`.
 - Trace: `agent` observation `a2a.<agent>` {agent, url, message, state, text} under the tool `ask_<agent>` — one name per target, so each remote agent is its own node in the Langfuse Agent Graph (`/agentbase-build-tracing`).
@@ -70,6 +74,7 @@ Note: the executor must **enqueue the Task before** any status update (A2A v1 �
 ## Current limitations (state these clearly to the user)
 
 - Streaming (`capabilities.streaming=false`) and push notifications not enabled yet.
+- No task-id continuation: every message (also `approve`) creates a **new** task; the conversation continues through the `contextId`. A task left in `INPUT_REQUIRED` is never moved to a final state by later messages — callers read the newest task. Decision words are decisions only while something is pending.
 - No platform registry/discovery ⇒ the agent list is managed in `a2a_agents.json`.
 - api_key mode trusts the caller's User-Id header and does not bind tasks to the key ⇒ every key holder can act for every user; only issue keys to trusted agents/systems; public agents use JWT.
 - No IAM mode in the client (see above).

@@ -5,18 +5,20 @@ description: "Outbound credentials for AI agents on GreenNode AgentBase via Acce
 
 # Outbound credentials — AgentBase Access Control (Identity)
 
-Asset `app/identity.py` (+ `tests/test_identity.py`, 8 tests against a fake Identity API that keeps consent per user, written against the greennode-agentbase 1.0.3 source; the consent round-trip itself is not yet verified on a live environment).
+Asset `app/identity.py` (+ `tests/test_identity.py`, 11 tests against a fake Identity API that keeps consent per user — Runtime path, i.e. no workload token in the request context — written against the greennode-agentbase 1.0.3 source; the consent round-trip itself is not yet verified on a live environment).
 
 ## Model
 
 ```
-Identity "my-order-agent"  (persistent, org-unique; shared by the staging + prod runtimes)
+Identity "my-order-agent-prod"  (persistent, org-unique; ONE PER ENVIRONMENT: -dev / -staging / -prod)
   ├─ Static API Key provider   "weather-key"   → one key for the whole agent
   ├─ OAuth2 provider           "google-oauth"  → M2M token (agent) or 3LO token (per end user, after consent)
   └─ Delegated API Key provider "user-openai"  → each end user supplies their own key once
 Runtime injects GREENNODE_CLIENT_ID / _SECRET / GREENNODE_AGENT_IDENTITY ⇒ the SDK fetches credentials at call time.
 Secrets live in the platform vault — never in .env, code, the image, traces, or the chat.
 ```
+
+**One identity per environment — never shared.** The platform hands out a user's 3LO token / delegated key to whoever holds the identity's IAM credentials and names that user id (it checks IAM only; the user id comes from the agent). So a dev agent (`AUTH_MODE=none` trusts any `User-Id`) or any api_key caller running against the **prod** identity can fetch **any prod user's** connected accounts by choosing their user id. Use `<agent>-dev` / `-staging` / `-prod` identities with **separate service accounts** (ideally separate OAuth apps/providers per environment), and **never put the prod identity or its service account in a developer's `.greennode.json`**.
 
 ## Choose the helper
 
@@ -32,7 +34,7 @@ Secrets live in the platform vault — never in .env, code, the image, traces, o
 
 | Component | Link to Identity | Skill |
 |---|---|---|
-| **Agent Runtime** | Every runtime is created **bound to an identity** (an identity must exist first; staging/prod may share it); the runtime injects `GREENNODE_AGENT_IDENTITY` + its service account. Pick the identity that holds the providers. An identity with runtimes cannot be deleted | `/agentbase-build-deploy` → `/agentbase-deploy` |
+| **Agent Runtime** | Every runtime is created **bound to an identity** (an identity must exist first; one identity per environment — see above); the runtime injects `GREENNODE_AGENT_IDENTITY` + its service account. Pick the identity of that environment that holds the providers. An identity with runtimes cannot be deleted | `/agentbase-build-deploy` → `/agentbase-deploy` |
 | **Agent code** (local tools) | `app/identity.py` fetches credentials from that identity's providers | this skill |
 | **MCP Gateway connectors** | The connector's outbound OAuth / API key uses a **Secret Provider from Access Control** (Managed or Custom) — no agent code | `/agentbase-build-mcp` |
 | **Your own MCP server** | Receives the token the Gateway attaches (it doesn't call Identity). If deployed on a Runtime it has its own identity; to call further services with stored secrets it follows the same SDK pattern (adapt `app/identity.py`) | `/agentbase-build-mcp-server` |
@@ -40,14 +42,15 @@ Secrets live in the platform vault — never in .env, code, the image, traces, o
 
 ## Workflow (every mutating platform step needs user confirmation)
 
-1. **Identity** — one per agent, via `/agentbase-identity`. Name 3–50 chars `^[a-zA-Z0-9_-]+$`, unique in the org. Runtimes (staging/prod) share it.
+1. **Identity** — one per agent **per environment** (`<agent>-dev`, `-staging`, `-prod`), via `/agentbase-identity`. Name 3–50 chars `^[a-zA-Z0-9_-]+$`, unique in the org. Each with its own service account and providers.
 2. **Provider** — via `/agentbase-identity` (Portal / REST / SDK). The **user** enters the secret in the Console or the tool's flow — never ask for it in chat.
    - OAuth2: the create response contains the provider's **`callbackUrl`** ⇒ register it as a redirect URI in the OAuth app at the IdP (Google, Slack…).
    - Least-privilege scopes; separate providers for read and write when possible.
 3. **Per-user flows only** (3LO, delegated):
    - Add the app page that users land on after consent to the identity's **`allowedReturnUrls`**.
    - Set `IDENTITY_CALLBACK_URL` to that page in `.env.<env>`. It can be a simple "Done — go back to the chat" page: per the SDK flow the platform's own `callbackUrl` completes the exchange (verify once on your environment).
-4. **Local dev** — add `"agent_identity": "<name>"` to `.greennode.json` next to the IAM pair (the `.example` omits it on purpose: projects without Identity providers don't need it), then `make check-creds` must show `OK  Agent identity`.
+4. **Local dev** — fill `"agent_identity"` in `.greennode.json` (the `.example` ships it empty: projects without Identity providers leave it so) with the **dev** identity — never the prod one — then `make check-creds` must show `OK  Agent identity`.
+   - Per-user flows locally run with `AUTH_MODE=none` (the user id is only asserted) ⇒ they are refused unless `IDENTITY_TRUST_ASSERTED_USER=true` in `.env` (dev identity only), or test with `AUTH_MODE=jwt`.
    - Without it the SDK would silently **create a new identity** that has none of your providers. `app/identity.py` refuses instead.
    - The SDK caches `.greennode.json` for the whole process ⇒ restart `make dev` after editing it.
 5. **Code** — decorate an **inner** function; the `@tool` calls it and turns `AuthorizationRequired` into the tool result:
@@ -103,8 +106,10 @@ turn 2: same tool → SDK → platform returns the user's token immediately → 
 ```
 
 - The frontend shows `https://` links as tappable (`MessageBubble`), and only `https://`.
-- The credential is keyed by the **verified** user id. `app/service.py` sets `GreenNodeAgentBaseContext.set_user_id(principal.user_id)` on every path (HTTP, A2A, `run_chat`).
-- No user in context, or no `IDENTITY_CALLBACK_URL` ⇒ the helper refuses before calling the platform (fail closed).
+- The credential is keyed by the **verified** user id. `app/service.py` sets `GreenNodeAgentBaseContext.set_user_id(principal.user_id)` on every path (HTTP, A2A, `run_chat`). The helpers read that **request-scoped** value only — the SDK's `get_user_id()` falls back to `agent_user_id` from `.greennode.json`/env (one fixed user for every request), which they ignore.
+- No user in this request, or no `IDENTITY_CALLBACK_URL` ⇒ the helper refuses before calling the platform (fail closed).
+- **Only a proven user id** may fetch a per-user credential: `AUTH_MODE=jwt`. With `api_key` (the caller asserts `User-Id`) or `none`, per-user helpers refuse unless `IDENTITY_TRUST_ASSERTED_USER=true` — set it only if **every** key holder may act as **every** user, including their connected accounts (e.g. a BFF that verified the user's token itself).
+- OAuth2 tokens (`agent_access_token`, `user_access_token`) are fetched with one shared `IdentityClient` (cached IAM token): the SDK's `requires_access_token` builds two new clients — two IAM token requests — on every call.
 
 ## Security rules
 
@@ -115,6 +120,7 @@ turn 2: same tool → SDK → platform returns the user's token immediately → 
 - `AUTHORIZATION_REQUIRED` means the agent must tell the user and wait. It must not retry in a loop (the tool message says so). `str(e)` is the same message, so a tool without `try/except` still surfaces the link through ToolNode's error handling.
 - **Consent links are bearer links.** Whoever opens one binds THEIR account to the user who requested it — tell users to open only links shown in their own chat, never forwarded ones. If your IdP/platform echoes `custom_state` to the return page, check it against the logged-in user there.
 - Tools sharing a provider should request the **same scopes**: scopes are part of the token request, so different scopes may ask the user to consent again.
+- **Identity per environment** (see *Model*): a shared identity lets dev or any api_key caller read prod users' connected accounts.
 
 ## Gotchas (verified against greennode-agentbase 1.0.3)
 
@@ -123,6 +129,8 @@ turn 2: same tool → SDK → platform returns the user's token immediately → 
 | `TypeError: … unexpected keyword 'api_key'` / missing arg | The SDK injects into `into=` (default `api_key` / `access_token`). The official docs sample uses `openai_key` without `into=` | Name the parameter `api_key`/`access_token`, or pass `into=` |
 | `TypeError` on `requires_access_token` | `scopes` and `auth_flow` are required keyword arguments (the docs sample omits them) | Use the helpers above |
 | Request hangs ~10 min, then times out | Raw SDK decorator with `USER_FEDERATION` polls for 600 s | Use `user_access_token` / `user_api_key` |
+| 1–2 extra IAM token requests per OAuth2 tool call | Raw `requires_access_token` builds 2 new `IdentityClient`s per call | Use `agent_access_token` / `user_access_token` (shared client) |
+| `PermissionError … AUTH_MODE=none/api_key` | Per-user credential with a caller-asserted user id | `AUTH_MODE=jwt`, or `IDENTITY_TRUST_ASSERTED_USER=true` (trusted callers / dev identity only) |
 | A new identity appears in the Console | `GREENNODE_AGENT_IDENTITY` unset locally ⇒ the SDK auto-creates one | `agent_identity` in `.greennode.json` (helpers refuse without it) |
 | Changed `.greennode.json` has no effect | SDK caches the file per process | Restart the app |
 | "Agent can't retrieve credential" | Identity name missing / wrong in the runtime | Check `GREENNODE_AGENT_IDENTITY` (injected on Runtime) |
