@@ -5,8 +5,11 @@
    skill, the orchestrator, or any skill here — mentions on a line naming a platform skill such as `/agentbase-policy`
    are skipped, those files live in the platform skill set).
 3. The standard version is the same in the plugin manifests, scaffold.sh (STANDARD_VERSION) and CHANGELOG.md.
+4. Docs ↔ code drift (check_drift.py): settings ↔ env files, trace names ↔ the tracing tree, `make` targets,
+   cited template paths, config variable names, shared Docker/uv build settings. Intended differences go in
+   drift_allowlist.py, each with its reason.
 
-    python3 .github/scripts/check_skills.py        # from the repo root; exit 1 on any error
+    python3 .github/scripts/check_skills.py        # from the repo root (Python >= 3.12); exit 1 on any error
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ import json
 import re
 import sys
 from pathlib import Path
+
+import check_drift  # sibling module (this script's directory is on sys.path)
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS = ROOT / "skills"
@@ -100,6 +105,7 @@ def main() -> int:
     check_frontmatter(errors)
     check_links(errors)
     check_versions(errors)
+    check_drift.run(errors)
     for e in errors:
         print(f"ERROR {e}")
     return 1 if errors else 0
