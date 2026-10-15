@@ -113,3 +113,65 @@ def test_agent_identity_placeholder_fails(workdir, monkeypatch, capsys):
     _fake_http(monkeypatch)
     assert check_creds.main() == 1
     assert "placeholder" in capsys.readouterr().out
+
+
+TIER_ENV = {
+    "LLM_MODEL_LARGE": "big-model",  # replaces LLM_MODEL (fake-model) as the large primary
+    "LLM_MODEL_SMALL": "small-model",
+    "LLM_TIER_FALLBACKS": '{"large": ["fb-model", "small-model"]}',
+}
+
+
+def _per_model_http(monkeypatch, refused: set[str]) -> list[str]:
+    """MaaS answers 403 "model not allowed for this key" for the `refused` models; returns the pinged models."""
+    _fake_http(monkeypatch)
+    pinged: list[str] = []
+
+    def post(url, **kwargs):
+        model = kwargs["json"]["model"]
+        pinged.append(model)
+        if model in refused:
+            return httpx.Response(403, content=b'{"error":"model not allowed for this key"}')
+        return httpx.Response(200)
+
+    monkeypatch.setattr(check_creds.httpx, "post", post)
+    return pinged
+
+
+@pytest.mark.parametrize("settings_valid", [True, False])
+def test_every_tier_model_is_pinged_once(workdir, monkeypatch, capsys, settings_valid):
+    """A key may be valid for LLM_MODEL but not for another tier's model (seen: LLM_MODEL_LARGE ⇒ 403)."""
+    _creds_file(workdir)
+    for k, v in TIER_ENV.items():
+        monkeypatch.setenv(k, v)
+    if not settings_valid:  # resolved from the raw env instead of app.llm
+        monkeypatch.setenv("MEMORY_BACKEND", "agentbase")
+        monkeypatch.delenv("MEMORY_ID", raising=False)
+    pinged = _per_model_http(monkeypatch, refused={"big-model"})
+    assert check_creds.main() == 1
+    assert sorted(pinged) == ["big-model", "fb-model", "small-model"]  # deduplicated
+    out = capsys.readouterr().out
+    assert "FAIL  LLM (MaaS)" in out and "[reasoning primary, large primary]" in out
+    assert "not allowed for this LLM_API_KEY" in out
+
+
+def test_broken_fallback_is_only_a_warning(workdir, monkeypatch, capsys):
+    _creds_file(workdir)
+    for k, v in TIER_ENV.items():
+        monkeypatch.setenv(k, v)
+    _per_model_http(monkeypatch, refused={"fb-model"})
+    assert check_creds.main() == 0
+    out = capsys.readouterr().out
+    assert "WARN  LLM (MaaS)             [large fallback]" in out
+    assert "[large fallback, small primary] key accepted" in out  # one ping, both roles
+
+
+def test_greennode_json_example_has_an_empty_agent_identity(workdir, monkeypatch, capsys):
+    """The template ships `"agent_identity": ""`: copied as is it is 'not set' (SKIP), never the placeholder FAIL."""
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parent.parent / ".greennode.json.example"
+    data = json.loads(example.read_text())
+    assert data["agent_identity"] == ""
+    (workdir / ".greennode.json").write_text(json.dumps(data))
+    assert check_creds.check_agent_identity()[0] == "SKIP"

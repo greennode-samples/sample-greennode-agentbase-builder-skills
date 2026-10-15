@@ -3,8 +3,9 @@
 Payload contract (POST /invocations) — keep stable, the frontend & eval depend on it:
 
   {"type": "chat",     "message": "...", "stream": false}
-  {"type": "resume",   "decisions": [{"tool_call_id","action":"approve|edit|reject","args"?,"reason"?}],
-                       "stream": false}                                    # HITL
+  {"type": "resume",   "interrupt_id": "<interrupt.id>",                   # HITL — always echo it
+                       "decisions": [{"tool_call_id","action":"approve|edit|reject","args"?,"reason"?}],
+                       "stream": false}
   {"type": "feedback", "trace_id": "...", "feedback_token": "...", "score": 1, "comment": "..."}
                        # score: 1 | 0 | -1; feedback_token comes from the response — binds the trace to the user
 
@@ -17,9 +18,12 @@ Response non-stream:
   {"status": "success",     "response", "tools_used", "session_id", "trace_id", "feedback_token"}
   {"status": "interrupted", "interrupt": {"id","type","tool_calls","message"}, "session_id", "trace_id",
    "feedback_token"}
+  A resume may be answered with ANOTHER `interrupted` (new interrupt id) — handle `interrupt` until `success`.
+Errors: HTTP status + {"error", "error_type", "details"}. 409 while an approval is pending (chat, or a resume
+  whose decisions/interrupt_id belong to an earlier card): details.interrupt = the pending approval ⇒ show it.
 Response stream (SSE, one `data: {...}` per line):
   token | tool_start | tool_end | reset {reason: self_eval_retry | llm_fallback} (clear the shown text) |
-  interrupt {…same as interrupted} | done {…same as success} | error {message, status}
+  interrupt {…same as interrupted} | done {…same as success} | error {message, status, interrupt?}
 """
 
 from __future__ import annotations
@@ -50,14 +54,14 @@ from app.auth.inbound import (
 from app.config import get_settings
 from app.graph.builder import build_graph, recursion_limit
 from app.hitl import (
+    ALREADY_HANDLED,
     describe_decisions,
     describe_interrupt,
     interrupt_payload,
     is_placeholder_tool_message,
     is_rejected_tool_message,
-    is_waiting_approval,
-    last_ai,
-    requires_approval,
+    pending_approval,
+    stale_decision_ids,
     validate_decisions,
 )
 from app.llm import TIERS, fallbacks_for, model_for
@@ -68,10 +72,21 @@ from app.tools.mcp import reset_policy_denials
 
 log = logging.getLogger(__name__)
 MAX_MESSAGE_CHARS = 16_000
+MAX_TRACE_ID_CHARS = 128
 
 
-def _error(msg: str, status: int = 400) -> GreenNodeRequestError:
-    return GreenNodeRequestError(msg, status_code=status)
+class _ClientError(GreenNodeRequestError):
+    """An error written FOR the caller (validation, HITL state, mapped infra errors) — the only
+    GreenNodeRequestError passed through as is. The SDK raises GreenNodeRequestError too (Memory / Identity:
+    "HTTP 403 … principal iam:sa-… not allowed memory:GetEvents on mem-…"): never forwarded verbatim."""
+
+
+# `error_type` in the SDK's JSON error body = the class name: keep the documented "GreenNodeRequestError"
+_ClientError.__name__ = GreenNodeRequestError.__name__
+
+
+def _error(msg: str, status: int = 400, details: dict | None = None) -> GreenNodeRequestError:
+    return _ClientError(msg, status_code=status, details=details)
 
 
 async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
@@ -104,6 +119,8 @@ async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
             decisions = validate_decisions(payload.get("decisions"))
         except ValueError as e:
             raise _error(str(e)) from e
+        if not isinstance(payload.get("interrupt_id"), str | None):
+            raise _error("`interrupt_id` must be a string")
         graph_input = Command(resume=decisions)
         # readable in the session view; tool names are added once the checkpoint is loaded (_prepare)
         trace_input = describe_decisions(decisions)
@@ -160,7 +177,10 @@ async def run_resume(
     """Resume HITL in-process — only for eval / tests / A2A (pass `principal` when already authenticated)."""
     validate_user_id(user_id)
     validate_session_id(session_id)
-    decisions = validate_decisions(decisions)
+    try:
+        decisions = validate_decisions(decisions)
+    except ValueError as e:
+        raise _error(str(e)) from e
     run = _Run(
         _principal_for(user_id, principal),
         session_id,
@@ -182,23 +202,20 @@ async def pending_tool_calls(*, user_id: str, session_id: str) -> list[dict]:
     s = get_settings()
     graph = build_graph(settings=s, tools=[], checkpointer=get_checkpointer(s))
     snap = await graph.aget_state(thread_config(s, session_id=session_id, user_id=user_id))
-    if not is_waiting_approval(snap):
-        return []
-    ai = last_ai(snap.values.get("messages", []))
-    return [
-        {"id": tc["id"], "name": tc["name"], "args": tc["args"]}
-        for tc in (ai.tool_calls if ai else [])
-        if requires_approval(tc["name"], s)
-    ]
+    return (pending_approval(snap, s) or {}).get("tool_calls", [])
 
 
 def _handle_feedback(payload: dict[str, Any], principal: Principal) -> dict:
     trace_id = payload.get("trace_id")
     score = payload.get("score")
-    if not trace_id or score not in (-1, 0, 1):
+    valid_trace = isinstance(trace_id, str) and 0 < len(trace_id) <= MAX_TRACE_ID_CHARS
+    if not valid_trace or isinstance(score, bool) or score not in (-1, 0, 1):
         raise _error("feedback requires trace_id and score in {-1, 0, 1}")
-    token = str(payload.get("feedback_token") or "")
-    if not hmac.compare_digest(token, feedback_token(principal.user_id, trace_id)):
+    token = payload.get("feedback_token")
+    token = token if isinstance(token, str) else ""
+    # bytes: compare_digest on str raises TypeError for non-ASCII input (a 500 instead of a 403)
+    expected = feedback_token(principal.user_id, trace_id)
+    if not hmac.compare_digest(token.encode(), expected.encode()):
         raise _error("feedback_token is not valid for this user", 403)
     # user_id ⇒ deterministic score id: re-tapping 👍/👎 updates the same score instead of adding duplicates
     ok = tracing.record_feedback(
@@ -283,21 +300,34 @@ def _session_lock(user_id: str, session_id: str) -> asyncio.Lock:
 
 def _user_error(e: BaseException) -> dict:
     """The error the caller receives (HTTP error / SSE `error` event) — the root trace output of a failed turn.
-    `invoke` raises the already-mapped error (`raise mapped from e`): keep it, mapping it again would turn a 504
-    timeout into the generic 503 "overloaded" message."""
-    mapped = (
-        e if isinstance(e, GreenNodeRequestError) and e.__cause__ is not None else _map_error(e)
-    )
+    `invoke` raises the already-mapped error (a _ClientError, kept as is by _map_error)."""
+    mapped = _map_error(e)
     return {"error": mapped.message, "status": getattr(mapped, "status_code", 500)}
 
 
+# Errors _map_error turns into a status for the caller (anything else ⇒ SDK 500 / SSE "failed")
+_MAPPED_ERRORS = (GreenNodeRequestError, GraphRecursionError, openai.APIError, TimeoutError)
+
+
+def _mapped(e: BaseException) -> GreenNodeRequestError:
+    """_map_error + log what the caller won't see (the SDK error's own message)."""
+    mapped = _map_error(e)
+    if isinstance(e, GreenNodeRequestError) and mapped is not e:
+        log.warning("backing service error (HTTP %s): %s", e.status_code, e.message)
+    return mapped
+
+
 def _map_error(e: BaseException) -> GreenNodeRequestError:
-    """Infrastructure errors ⇒ meaningful HTTP codes instead of a generic 500."""
+    """Infrastructure errors ⇒ meaningful HTTP codes instead of a generic 500. Only _ClientError reaches the
+    caller as is: an SDK GreenNodeRequestError < 500 (Memory/Identity 400/401/403/404) would leak internals and
+    a 401/403 that frontends read as "session expired" ⇒ generic 502."""
+    if isinstance(e, _ClientError):
+        return e
     if isinstance(e, GreenNodeRequestError):
         status = getattr(e, "status_code", 500) or 500
         if status in (429,) or status >= 500:  # Memory/Identity overloaded or failing
             return _error("Backing service temporarily overloaded, try again later", 503)
-        return e
+        return _error("Backing service rejected the request", 502)
     if isinstance(e, GraphRecursionError):
         return _error(
             "The request needs too many steps — please split up the question (MAX_TOOL_ROUNDS)", 422
@@ -378,25 +408,38 @@ class _Run:
                     "interrupts": len(getattr(snapshot, "interrupts", None) or ()),
                 }
             )
-        pending = is_waiting_approval(snapshot)
+        pending = pending_approval(snapshot, self.settings)
         if self.kind == "chat" and pending:
-            raise _error("Awaiting tool approval — send {type: resume} before chatting again", 409)
-        if self.kind == "resume" and not pending:
-            raise _error("No approval request is pending in this session", 409)
-        if self.kind == "resume" and self.root is not None:
-            ai = last_ai((snapshot.values or {}).get("messages", []))
-            decisions = getattr(self.graph_input, "resume", None) or []
-            self.root.update(
-                input=describe_decisions(decisions, ai.tool_calls if ai else []),
-                metadata={"resume": decisions, "interrupt_id": self.interrupt_id},
+            # details.interrupt = the pending card (same object as the interrupted response) ⇒ client re-shows it
+            raise _error(
+                "Awaiting tool approval — send {type: resume} before chatting again",
+                409,
+                details={"interrupt": pending},
             )
-        if self.kind == "resume" and self.interrupt_id:
+        if self.kind == "resume":
+            if not pending:
+                raise _error("No approval request is pending in this session", 409)
+            decisions = getattr(self.graph_input, "resume", None) or []
+            if self.root is not None:
+                self.root.update(
+                    input=describe_decisions(decisions, pending["tool_calls"]),
+                    metadata={"resume": decisions, "interrupt_id": self.interrupt_id},
+                )
             visible = [i.id for i in (getattr(snapshot, "interrupts", None) or ())]
-            # the bridge may not see the __interrupt__ write yet (visible empty) ⇒ can't block, let it through
-            if visible and self.interrupt_id not in visible:
+            # the bridge may not see the __interrupt__ write yet (visible empty) ⇒ the decision ids decide below
+            if self.interrupt_id and visible and self.interrupt_id not in visible:
                 raise _error(
-                    "This approval request has already been handled (interrupt_id is no longer valid)",
+                    f"{ALREADY_HANDLED} (interrupt_id is no longer valid)",
                     409,
+                    details={"interrupt": pending},
+                )
+            # Works without interrupt_id (A2A, eval) and when the snapshot hides the interrupt: a double-tap /
+            # retried resume of card 1, serialized behind the lock, must not be applied to card 2.
+            if stale_decision_ids(decisions, pending["tool_calls"]):
+                raise _error(
+                    f"{ALREADY_HANDLED} (its tool calls are no longer pending)",
+                    409,
+                    details={"interrupt": pending},
                 )
         return graph, config
 
@@ -439,13 +482,8 @@ class _Run:
                         self.root = root
                         graph, config = await self._prepare()
                         out = await graph.ainvoke(self.graph_input, config)
-                except (
-                    GreenNodeRequestError,
-                    GraphRecursionError,
-                    openai.APIError,
-                    TimeoutError,
-                ) as e:
-                    mapped = _map_error(e)
+                except _MAPPED_ERRORS as e:
+                    mapped = _mapped(e)
                     if mapped is e:
                         raise
                     raise mapped from e
@@ -487,9 +525,12 @@ class _Run:
                     yield {"event": "interrupt", **result}
                 else:
                     yield {"event": "done", **result}
-        except (GreenNodeRequestError, GraphRecursionError, openai.APIError, TimeoutError) as e:
-            mapped = _map_error(e)
-            yield {"event": "error", "message": mapped.message, "status": mapped.status_code}
+        except _MAPPED_ERRORS as e:
+            mapped = _mapped(e)
+            event = {"event": "error", "message": mapped.message, "status": mapped.status_code}
+            if interrupt := (mapped.details or {}).get("interrupt"):
+                event["interrupt"] = interrupt  # same as the non-stream 409's details.interrupt
+            yield event
         except Exception:  # noqa: BLE001 — stream already open, must return the error as an event
             log.exception("stream failed")
             yield {

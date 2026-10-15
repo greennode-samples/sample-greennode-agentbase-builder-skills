@@ -6,13 +6,15 @@ A CLI tool, not app runtime code — hence it lives outside app/ and may read th
 
 The USER fills these files in their editor (never paste secrets into a chat with a coding agent):
     .greennode.json  IAM service account {"client_id", "client_secret"}  — /agentbase (IAM setup)
-    .env             LLM_API_KEY, LLM_MODEL                              — /agentbase-llm
+    .env             LLM_API_KEY, LLM_MODEL (+ LLM_MODEL_* tiers, fallbacks) — /agentbase-llm
                      LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY (optional) — Langfuse project settings
-Exit code 1 if a required credential is missing or rejected.
+Every model the agent may call is pinged once (a key can be valid while one tier's model is not enabled for it).
+Exit code 1 if a required credential is missing or rejected (a fallback model failing is a WARN).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -22,7 +24,8 @@ from dotenv import dotenv_values
 
 from app.config import GREENNODE_LLM_BASE_URL, get_settings, normalize_iam_env
 
-Result = tuple[str, str]  # (status: OK | FAIL | SKIP, detail)
+Result = tuple[str, str]  # (status: OK | FAIL | WARN | SKIP, detail)
+TIER_NAMES = ("reasoning", "large", "small")
 
 
 def _env() -> dict[str, str]:
@@ -70,11 +73,46 @@ def check_agent_identity() -> Result:
     return "OK", f"agent identity '{name}'"
 
 
-def check_llm(env: dict[str, str]) -> Result:
-    key, model = env.get("LLM_API_KEY"), env.get("LLM_MODEL")
-    if not (key and model):
-        return "FAIL", "LLM_API_KEY / LLM_MODEL not set in .env (get them with /agentbase-llm)"
-    base = env.get("LLM_BASE_URL", GREENNODE_LLM_BASE_URL).rstrip("/")
+def _json_env(env: dict[str, str], name: str, default: object) -> object:
+    try:
+        return json.loads(env[name]) if env.get(name) else default
+    except ValueError:
+        return default  # malformed: reported by the Settings check
+
+
+def _models_from_env(env: dict[str, str]) -> dict[str, list[str]]:
+    """Same resolution as app.llm (model_for / fallbacks_for), from the raw env — used when Settings is invalid."""
+    large = env.get("LLM_MODEL_LARGE") or env.get("LLM_MODEL", "")
+    shared = _json_env(env, "LLM_FALLBACK_MODELS", [])
+    per_tier = _json_env(env, "LLM_TIER_FALLBACKS", {})
+    roles: dict[str, list[str]] = {}
+    for tier in TIER_NAMES:
+        primary = env.get(f"LLM_MODEL_{tier.upper()}") or large
+        roles.setdefault(primary, []).append(f"{tier} primary")
+        chain = per_tier.get(tier, shared) if isinstance(per_tier, dict) else shared
+        for m in chain if isinstance(chain, list) else []:
+            if isinstance(m, str) and m and m != primary:
+                roles.setdefault(m, []).append(f"{tier} fallback")
+    return roles
+
+
+def llm_models(env: dict[str, str]) -> dict[str, list[str]]:
+    """model → its roles ("large primary", "small fallback"…): every model the agent may call, deduplicated."""
+    try:
+        get_settings()
+    except ValueError:
+        return {m: r for m, r in _models_from_env(env).items() if m}
+    from app.llm import TIERS, fallbacks_for, model_for
+
+    roles: dict[str, list[str]] = {}
+    for tier in TIERS:
+        roles.setdefault(model_for(tier), []).append(f"{tier} primary")
+        for m in fallbacks_for(tier):
+            roles.setdefault(m, []).append(f"{tier} fallback")
+    return {m: r for m, r in roles.items() if m}
+
+
+def _ping_model(base: str, key: str, model: str) -> Result:
     try:  # 1-token completion: proves key AND model path in one call
         r = httpx.post(
             f"{base}/chat/completions",
@@ -104,6 +142,26 @@ def check_llm(env: dict[str, str]) -> Result:
     return "OK", f"key accepted · model {model}"
 
 
+def check_llm(env: dict[str, str]) -> list[tuple[str, Result]]:
+    """One line per model: FAIL if a tier's primary is unusable, WARN if only a fallback is."""
+    key, models = env.get("LLM_API_KEY"), llm_models(env)
+    if not (key and models):
+        return [
+            (
+                "LLM (MaaS)",
+                ("FAIL", "LLM_API_KEY / LLM_MODEL not set in .env (get them with /agentbase-llm)"),
+            )
+        ]
+    base = env.get("LLM_BASE_URL", GREENNODE_LLM_BASE_URL).rstrip("/")
+    lines = []
+    for model, roles in models.items():  # one ping per distinct model
+        status, detail = _ping_model(base, key, model)
+        if status == "FAIL" and not any(r.endswith("primary") for r in roles):
+            status = "WARN"  # only a fallback is broken: the agent runs, without that safety net
+        lines.append(("LLM (MaaS)", (status, f"[{', '.join(roles)}] {detail}")))
+    return lines
+
+
 def check_langfuse(env: dict[str, str]) -> Result:
     pk, sk = env.get("LANGFUSE_PUBLIC_KEY"), env.get("LANGFUSE_SECRET_KEY")
     if not (pk and sk):
@@ -131,7 +189,7 @@ def check_config() -> Result:
 
 def main() -> int:
     env = _env()
-    checks: list[tuple[str, Callable[[], Result]]] = [
+    checks: list[tuple[str, Callable[[], Result | list[tuple[str, Result]]]]] = [
         ("IAM (.greennode.json)", check_iam),
         ("Agent identity", check_agent_identity),
         ("LLM (MaaS)", lambda: check_llm(env)),
@@ -140,9 +198,10 @@ def main() -> int:
     ]
     failed = False
     for name, fn in checks:
-        status, detail = fn()
-        failed |= status == "FAIL"
-        print(f"{status:<4}  {name:<22} {detail}")
+        out = fn()
+        for line_name, (status, detail) in out if isinstance(out, list) else [(name, out)]:
+            failed |= status == "FAIL"
+            print(f"{status:<4}  {line_name:<22} {detail}")
     return 1 if failed else 0
 
 

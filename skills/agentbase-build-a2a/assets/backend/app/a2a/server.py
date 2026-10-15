@@ -13,7 +13,10 @@ Authentication & per-user isolation (same as /invocations):
     tools see the same AUTH_FORWARD_CLAIMS / user token as on /invocations (RBAC, user_jwt).
   - A2A `contextId` ⇒ session_id `a2a-<contextId>`; memory is keyed by (session, user) like every other flow.
   - HITL: graph pauses ⇒ task `INPUT_REQUIRED` + description of the tool awaiting approval; the caller sends
-    the next message on the same contextId with "approve" or "reject: <reason>" to continue.
+    the next message on the same contextId with "approve" or "reject: <reason>" to continue. A decision word
+    is a decision ONLY while something is pending; otherwise it is answered "Nothing is awaiting confirmation"
+    without calling the LLM (a relayed "approve" must never reach the model as a chat message).
+  - Unexpected errors ⇒ task FAILED with a generic message (details only in the log), never str(exception).
 """
 
 from __future__ import annotations
@@ -107,10 +110,27 @@ def _text_of(message: pb.Message | None) -> str:
     return "\n".join(p.text for p in (message.parts if message else []) if p.text).strip()
 
 
+NOTHING_PENDING = (
+    "Nothing is awaiting confirmation — the decision was already handled or has expired. "
+    "Send a new message."
+)
+FAILED_GENERIC = "The agent failed to process the request."
+
+
 class AgentBaseExecutor(AgentExecutor):
     """Wraps the standard graph (service.run_chat / run_resume) as an A2A task."""
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        try:
+            await self._execute(context, event_queue, updater)
+        except Exception:  # noqa: BLE001 — a2a-sdk would return str(e) to the caller as an InternalError
+            log.exception("A2A task %s failed", context.task_id)
+            await updater.failed(updater.new_agent_message([pb.Part(text=FAILED_GENERIC)]))
+
+    async def _execute(
+        self, context: RequestContext, event_queue: EventQueue, updater: TaskUpdater
+    ) -> None:
         from app import service  # avoid a circular import at app init
 
         session_id = f"a2a-{context.context_id}"
@@ -125,7 +145,6 @@ class AgentBaseExecutor(AgentExecutor):
                     history=[context.message] if context.message else None,
                 )
             )
-        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         text = _text_of(context.message)
         await updater.start_work()
         try:
@@ -145,6 +164,10 @@ class AgentBaseExecutor(AgentExecutor):
                 if decision
                 else []
             )
+            if decision and not pending:
+                # Deterministic, no LLM call: a stray / duplicate "approve" is not a chat message
+                await updater.failed(updater.new_agent_message([pb.Part(text=NOTHING_PENDING)]))
+                return
             if pending:
                 approve, reason = decision
                 decisions = [
@@ -184,8 +207,7 @@ class AgentBaseExecutor(AgentExecutor):
                     )
                 else:
                     gone = (
-                        "Nothing is awaiting confirmation any more — this decision was already handled "
-                        "(e.g. by a concurrent request). Send a new message."
+                        NOTHING_PENDING
                         if resuming
                         else "The conversation changed while this message was processed (concurrent "
                         "request) — send it again."
@@ -252,6 +274,10 @@ def build_agent_card(settings: Settings) -> pb.AgentCard:
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         security_schemes=schemes,
+        # Declared schemes alone don't say they are REQUIRED — clients read security_requirements
+        security_requirements=[
+            pb.SecurityRequirement(schemes={name: pb.StringList() for name in schemes})
+        ],
         skills=[
             pb.AgentSkill(
                 id=s["id"],

@@ -15,8 +15,12 @@ Decision sent back by the client (one decision per tool_call_id; missing => reje
 Rules:
 - HITL_TOOLS is a list of globs on tool names (e.g. ["gateway_*_delete", "send_email"]).
   Apply it by default to side-effecting tools (write/delete/send/payment). Read-only tools need no approval.
-- The approval node is re-run FROM THE START on resume => put no side effects before `interrupt()`.
-- While awaiting approval, new chats in the same session are rejected (409) — resume first.
+- The approval node is re-run FROM THE START on resume => put no side effects before `interrupt()` (the
+  `hitl.request` event is therefore emitted again on resume).
+- While awaiting approval, new chats in the same session are rejected (409, with the pending `interrupt`).
+- Approving may lead to ANOTHER approval request (new interrupt id) — clients keep handling `interrupt` until done.
+  Decisions naming tool calls that are not pending (a replayed / double-submitted earlier card) are refused (409),
+  never applied to the next card.
 """
 
 from __future__ import annotations
@@ -35,6 +39,12 @@ from app.observability import tracing
 
 VALID_ACTIONS = {"approve", "edit", "reject"}
 REJECTED_PREFIX = "Not executed:"
+# Decisions come from the client: bounded, because `reason` and edited `args` reach the LLM (and the trace)
+MAX_DECISIONS = 64
+MAX_TOOL_CALL_ID_CHARS = 128
+MAX_REASON_CHARS = 1000
+MAX_EDIT_ARGS_CHARS = 16_000
+ALREADY_HANDLED = "This approval request has already been handled"
 
 
 def is_rejected_tool_message(m: Any) -> bool:
@@ -59,16 +69,47 @@ def last_ai(messages: list) -> AIMessage | None:
 
 
 def validate_decisions(decisions: Any) -> list[dict]:
+    """Type-checked, normalized copy (documented keys only): a malformed decision is a 400 (ValueError), never
+    a 500 further down (unhashable id, `reason: 123` …)."""
     if not isinstance(decisions, list) or not decisions:
         raise ValueError("decisions must be a non-empty list")
+    if len(decisions) > MAX_DECISIONS:
+        raise ValueError(f"at most {MAX_DECISIONS} decisions")
+    out: list[dict] = []
     for d in decisions:
-        if not isinstance(d, dict) or not d.get("tool_call_id"):
-            raise ValueError("each decision needs a tool_call_id")
-        if d.get("action") not in VALID_ACTIONS:
+        if not isinstance(d, dict):
+            raise ValueError("each decision must be an object")
+        tool_call_id = d.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not 0 < len(tool_call_id) <= MAX_TOOL_CALL_ID_CHARS:
+            raise ValueError(
+                f"each decision needs a tool_call_id (string, max {MAX_TOOL_CALL_ID_CHARS} chars)"
+            )
+        if any(o["tool_call_id"] == tool_call_id for o in out):
+            raise ValueError("one decision per tool_call_id")
+        action = d.get("action")
+        if not isinstance(action, str) or action not in VALID_ACTIONS:
             raise ValueError(f"action must be one of {sorted(VALID_ACTIONS)}")
-        if d["action"] == "edit" and not isinstance(d.get("args"), dict):
-            raise ValueError("action=edit requires args (object)")
-    return decisions
+        reason = d.get("reason")
+        if reason is not None and (not isinstance(reason, str) or len(reason) > MAX_REASON_CHARS):
+            raise ValueError(f"reason must be a string (max {MAX_REASON_CHARS} chars)")
+        clean: dict[str, Any] = {"tool_call_id": tool_call_id, "action": action}
+        if reason:
+            clean["reason"] = reason
+        if action == "edit":
+            args = d.get("args")
+            if not isinstance(args, dict):
+                raise ValueError("action=edit requires args (object)")
+            if len(json.dumps(args, ensure_ascii=False, default=str)) > MAX_EDIT_ARGS_CHARS:
+                raise ValueError(f"edited args exceed {MAX_EDIT_ARGS_CHARS} chars")
+            clean["args"] = args
+        out.append(clean)
+    return out
+
+
+def stale_decision_ids(decisions: list[dict], pending_tool_calls: list[dict]) -> set[str]:
+    """Decision ids that are not pending. Non-empty ⇒ the decisions were made for another (earlier) card."""
+    pending = {tc.get("id") for tc in pending_tool_calls}
+    return {d["tool_call_id"] for d in decisions} - pending
 
 
 def edited_args_error(tool: Any, args: dict) -> str | None:
@@ -100,28 +141,50 @@ def build_approval_node(settings: Settings, tools: list | None = None):
             for tc in ai.tool_calls
             if requires_approval(tc["name"], settings)
         ]
+        # Re-emitted on every resume: the node re-runs from the start (see module docstring)
         tracing.event("hitl.request", input={"tool_calls": pending})
-        decisions = interrupt({"type": "tool_approval", "tool_calls": pending, "message": ai.text})
-        by_id = {d["tool_call_id"]: d for d in validate_decisions(decisions)}
-        tracing.event("hitl.decision", output={"decisions": list(by_id.values())})
+        card = {"type": "tool_approval", "tool_calls": pending, "message": ai.text}
+        decisions = validate_decisions(interrupt(card))
+        # Last line of defense (the service refuses these first, but cannot across replicas): decisions naming calls
+        # that are not in THIS message belong to an earlier card ⇒ never applied; the card is asked again. Raising
+        # instead would leave the stale resume value in the checkpoint, and every later resume would hit it.
+        while stale := stale_decision_ids(decisions, ai.tool_calls):
+            tracing.event(
+                "hitl.stale_decision", level="WARNING", metadata={"tool_call_ids": sorted(stale)}
+            )
+            decisions = validate_decisions(interrupt(card))
+        by_id = {d["tool_call_id"]: d for d in decisions}
 
-        new_calls, rejected = [], {}
+        new_calls, rejected, resolved = [], {}, []
         for tc in ai.tool_calls:
-            if not requires_approval(tc["name"], settings):
-                new_calls.append(tc)
-                continue
-            d = by_id.get(tc["id"], {"action": "reject", "reason": "no decision"})
-            if d["action"] == "edit":
+            # A decision for this call is honored FIRST: if HITL_TOOLS changed between the interrupt and the
+            # resume, a call the user rejected must still not run.
+            d = by_id.get(tc["id"])
+            if d is None:
+                if not requires_approval(tc["name"], settings):
+                    new_calls.append(tc)
+                    continue
+                d = {"action": "reject", "reason": "no decision"}
+            action, reason = d["action"], None
+            if action == "edit":
                 if err := edited_args_error(by_name.get(tc["name"]), d["args"]):
-                    rejected[tc["id"]] = f"Edited arguments are invalid ({err})"
+                    action, reason = "reject", f"Edited arguments are invalid ({err})"
                     tracing.event(
                         "hitl.invalid_edit", level="WARNING", metadata={"tool": tc["name"]}
                     )
                 else:
                     tc = {**tc, "args": d["args"]}
-            elif d["action"] == "reject":
-                rejected[tc["id"]] = d.get("reason") or "Rejected by the user"
+            elif action == "reject":
+                reason = d.get("reason") or "Rejected by the user"
+            if reason is not None:
+                rejected[tc["id"]] = reason
+            resolved.append(
+                {"tool_call_id": tc["id"], "tool": tc["name"], "action": action}
+                | ({"reason": reason} if reason else {})
+            )
             new_calls.append(tc)
+        # What actually happens per call (incl. implicit rejects) — not the raw client payload
+        tracing.event("hitl.decision", output={"decisions": resolved})
         # Same id => add_messages REPLACES the old AIMessage (keeps the edited args)
         updated = AIMessage(content=ai.content, tool_calls=new_calls, id=ai.id)
         return {"messages": [updated], "hitl_rejected": rejected}
@@ -166,8 +229,29 @@ def interrupt_payload(interrupts: Any) -> dict | None:
     return {"id": getattr(first, "id", None), **(getattr(first, "value", None) or {})}
 
 
+def pending_approval(snapshot: Any, settings: Settings) -> dict | None:
+    """The approval request pending in this checkpoint — same shape as the interrupted response's `interrupt`
+    ({id, type, tool_calls, message}) — or None. AgentBase Memory may not expose the interrupt right after the
+    pause (see is_waiting_approval) ⇒ rebuilt from the last AIMessage then, with `id` None."""
+    if not is_waiting_approval(snapshot):
+        return None
+    if payload := interrupt_payload(getattr(snapshot, "interrupts", None)):
+        return payload
+    ai = last_ai((getattr(snapshot, "values", None) or {}).get("messages", []))
+    calls = ai.tool_calls if ai else []
+    # `or calls`: HITL_TOOLS changed since the interrupt — the card must still list what awaits a decision
+    awaiting = [tc for tc in calls if requires_approval(tc["name"], settings)] or calls
+    return {
+        "id": None,
+        "type": "tool_approval",
+        "tool_calls": [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in awaiting],
+        "message": ai.text if ai else "",
+    }
+
+
 def _call_text(tool_call: dict) -> str:
-    return f"{tool_call.get('name')}({json.dumps(tool_call.get('args') or {}, ensure_ascii=False)})"
+    args = json.dumps(tool_call.get("args") or {}, ensure_ascii=False, default=str)
+    return f"{tool_call.get('name')}({args})"
 
 
 def describe_interrupt(interrupt: dict) -> str:
@@ -180,19 +264,22 @@ def describe_interrupt(interrupt: dict) -> str:
 
 def describe_decisions(decisions: list[dict], tool_calls: list | None = None) -> str:
     """Root trace INPUT of a resume turn — what the user decided, per tool call (names from the pending
-    AIMessage when known), e.g. "[Approval decision]\n- Rejected remember({…}) — reason"."""
-    by_id = {tc["id"]: tc for tc in tool_calls or [] if isinstance(tc, dict) and tc.get("id")}
+    AIMessage when known), e.g. "[Approval decision]\n- Rejected remember({…}) — reason". Tolerates any value
+    types (coerced with str()) — it only renders text."""
+    by_id = {str(tc["id"]): tc for tc in tool_calls or [] if isinstance(tc, dict) and tc.get("id")}
     lines = []
     for d in decisions:
-        tc = by_id.get(d["tool_call_id"])
-        call = _call_text(tc) if tc else d["tool_call_id"]
-        if d["action"] == "approve":
+        tool_call_id = str(d.get("tool_call_id"))
+        tc = by_id.get(tool_call_id)
+        call = _call_text(tc) if tc else tool_call_id
+        if d.get("action") == "approve":
             lines.append(f"Approved {call}")
-        elif d["action"] == "edit":
-            name = tc.get("name") if tc else d["tool_call_id"]
-            lines.append(f"Edited {name} → {json.dumps(d.get('args') or {}, ensure_ascii=False)}")
+        elif d.get("action") == "edit":
+            name = tc.get("name") if tc else tool_call_id
+            args = d.get("args") if isinstance(d.get("args"), dict) else {}
+            lines.append(f"Edited {name} → {json.dumps(args, ensure_ascii=False, default=str)}")
         else:
-            reason = (d.get("reason") or "").strip()
+            reason = str(d.get("reason") or "").strip()
             lines.append(f"Rejected {call}" + (f" — {reason}" if reason else ""))
     return "[Approval decision]\n" + "\n".join(f"- {line}" for line in lines)
 

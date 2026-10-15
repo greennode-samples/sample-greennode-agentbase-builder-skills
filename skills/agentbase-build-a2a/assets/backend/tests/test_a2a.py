@@ -169,6 +169,7 @@ def test_agent_card_public_and_rpc_requires_auth(a2a_server):
     card = httpx.get(f"{a2a_server}/.well-known/agent-card.json").json()
     assert card["supportedInterfaces"][0]["url"].endswith("/a2a")
     assert "apiKey" in card["securitySchemes"]
+    assert card["securityRequirements"] == [{"schemes": {"apiKey": {}}}]  # declared AND required
     r = httpx.post(f"{a2a_server}/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage"})
     assert r.status_code == 401
 
@@ -239,7 +240,7 @@ async def test_client_tool_propagates_user(a2a_server, fake_llm, tmp_path, monke
     [tool] = build_a2a_tools(get_settings(), Principal(user_id="alice"))
     assert tool.name == "ask_peer"
     out = await tool.ainvoke(
-        {"message": "hello"}, config={"configurable": {"actor_id": "alice", "thread_id": "s-1"}}
+        {"message": "hello"}, config={"configurable": {"actor_id": "alice", "session_id": "s-1"}}
     )
     assert "answer from peer" in out
     assert seen["user"] == "alice"  # target agent gets the right user ⇒ per-user memory isolation
@@ -270,7 +271,7 @@ async def _ask_peer(a2a_server, tmp_path, monkeypatch, message: str, hitl: str =
 
     [tool] = build_a2a_tools(get_settings(), Principal(user_id="alice"))
     out = await tool.ainvoke(
-        {"message": message}, config={"configurable": {"actor_id": "alice", "thread_id": "s-1"}}
+        {"message": message}, config={"configurable": {"actor_id": "alice", "session_id": "s-1"}}
     )
     return out, len(hits)
 
@@ -287,8 +288,16 @@ async def test_llm_cannot_relay_decision_without_hitl(
 async def test_decision_relayed_when_tool_is_human_approved(
     a2a_server, fake_llm, tmp_path, monkeypatch
 ):
-    fake_llm(AIMessage("peer handled it"))
-    out, reached = await _ask_peer(a2a_server, tmp_path, monkeypatch, "approve", hitl='["ask_*"]')
+    hitl = '["ask_*", "remember"]'  # caller and target share this process' env
+    monkeypatch.setenv("HITL_TOOLS", hitl)
+    get_settings.cache_clear()
+    fake_llm(
+        AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}]),
+        AIMessage("peer handled it"),
+    )
+    task, _, _ = await _send(a2a_server, "alice", "remember x", "s-1")  # pending on the target
+    assert task.status.state == pb.TASK_STATE_INPUT_REQUIRED
+    out, reached = await _ask_peer(a2a_server, tmp_path, monkeypatch, "approve", hitl=hitl)
     assert reached >= 1 and "peer handled it" in out
 
 
@@ -447,7 +456,7 @@ async def test_card_pointing_elsewhere_gets_no_credentials(a2a_server, tmp_path,
         with pytest.raises(Exception) as e:  # noqa: B017 — HEAD failed later with a parse error
             await tool.ainvoke(
                 {"message": "hi"},
-                config={"configurable": {"actor_id": "alice", "thread_id": "s-1"}},
+                config={"configurable": {"actor_id": "alice", "session_id": "s-1"}},
             )
         assert (
             elsewhere.requests == []
@@ -479,7 +488,7 @@ async def test_context_id_keeps_distinct_sessions_distinct(
     _peer_config(tmp_path, monkeypatch, a2a_server)
     [tool] = build_a2a_tools(get_settings(), Principal(user_id="alice"))
     for thread in ("ABC-1", "XYZ-1"):
-        conf = {"configurable": {"actor_id": "alice", "thread_id": thread}}
+        conf = {"configurable": {"actor_id": "alice", "session_id": thread}}
         await tool.ainvoke({"message": "hi"}, config=conf)
     assert sessions == ["a2a-ABC-1", "a2a-XYZ-1"]
 
@@ -529,3 +538,117 @@ def test_unknown_auth_mode_is_skipped(tmp_path, monkeypatch, caplog):
     agents = {"peer": {"url": "https://p.example", "auth": "iam"}}
     assert _load(tmp_path, monkeypatch, agents) == {}
     assert "auth must be one of" in caplog.text
+
+
+# --------------------------------------------------------------------------- contextId end to end (C2)
+async def test_caller_session_reaches_the_target_as_context_id(
+    a2a_server, fake_llm, tmp_path, monkeypatch
+):
+    """The real path: run_chat (inmemory ⇒ thread_id "alice::s-e2e") → the LLM calls ask_peer → the target
+    gets contextId = the caller's RAW session id. thread_id would leak the user id (and fail the target's
+    session-id check)."""
+    import app.service as service_mod
+
+    seen = []
+    caller_run_chat = service_mod.run_chat
+
+    async def target_spy(message, **kw):  # the target executor calls service.run_chat
+        seen.append((kw["user_id"], kw["session_id"]))
+        return await caller_run_chat(message, **kw)
+
+    _peer_config(tmp_path, monkeypatch, a2a_server)
+    model = fake_llm(
+        AIMessage("", tool_calls=[{"name": "ask_peer", "args": {"message": "hi"}, "id": "a1"}]),
+        AIMessage("peer says hello"),  # the target's graph (same process, same fake model)
+        AIMessage("final answer"),
+    )
+    monkeypatch.setattr(service_mod, "run_chat", target_spy)
+    out = await caller_run_chat("ask the peer", user_id="alice", session_id="s-e2e")
+    assert seen == [("alice", "a2a-s-e2e")]
+    assert out["response"] == "final answer" and out["tools_used"] == ["ask_peer"]
+    [tool_msg] = [m for m in model.calls[-1] if isinstance(m, ToolMessage)]
+    assert "peer says hello" in tool_msg.content and "alice::" not in tool_msg.content
+
+
+# --------------------------------------------------------------------------- decision words
+async def test_decision_word_with_nothing_pending_never_reaches_the_llm(a2a_server, fake_llm):
+    model = fake_llm(AIMessage("I approved something!"))
+    task, _, _ = await _send(a2a_server, "alice", "approve", "ctx-stray")
+    assert task.status.state == pb.TASK_STATE_FAILED  # final: no never-ending INPUT_REQUIRED
+    assert "Nothing is awaiting confirmation" in _text(task)
+    assert model.calls == []
+
+
+async def test_concurrent_approvals_never_decide_the_next_card(a2a_server, fake_llm, monkeypatch):
+    """Two 'approve' for card 1: the winner runs it and the model asks card 2. The loser's decisions (card 1 ids)
+    must not be applied to card 2 (it used to be silently rejected) — card 2 stays pending."""
+    import app.memory.long_term as lt
+    import app.service as service_mod
+
+    runs = []
+    original_save = lt.InMemoryLTM.save
+
+    async def counting_save(self, user_id, fact):
+        runs.append(fact)
+        return await original_save(self, user_id, fact)
+
+    monkeypatch.setattr(lt.InMemoryLTM, "save", counting_save)
+    fake_llm(
+        AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}]),
+        AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "y"}, "id": "c2"}]),
+        AIMessage("Both remembered."),
+    )
+    task, _, _ = await _send(a2a_server, "alice", "remember x then y", "ctx-2cards")
+    assert task.status.state == pb.TASK_STATE_INPUT_REQUIRED
+    original = service_mod._Run._prepare
+
+    async def slow_prepare(self):  # the first resume holds the session lock a while
+        out = await original(self)
+        if self.kind == "resume":
+            await asyncio.sleep(0.5)
+        return out
+
+    monkeypatch.setattr(service_mod._Run, "_prepare", slow_prepare)
+    (t1, _, _), (t2, _, _) = await asyncio.gather(
+        _send(a2a_server, "alice", "approve", "ctx-2cards"),
+        _send(a2a_server, "alice", "approve", "ctx-2cards"),
+    )
+    assert runs == ["x"]  # card 2 neither ran nor was rejected
+    for t in (t1, t2):
+        assert t.status.state == pb.TASK_STATE_INPUT_REQUIRED and "'y'" in _text(t)
+    task, _, _ = await _send(a2a_server, "alice", "approve", "ctx-2cards")
+    assert task.status.state == pb.TASK_STATE_COMPLETED and runs == ["x", "y"]
+
+
+# --------------------------------------------------------------------------- errors
+async def test_unexpected_error_fails_the_task_with_a_generic_message(
+    a2a_server, monkeypatch, caplog
+):
+    import app.service as service_mod
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("internal detail: dsn=postgres://admin:hunter2@db")
+
+    monkeypatch.setattr(service_mod, "run_chat", boom)
+    task, _, _ = await _send(a2a_server, "alice", "hi", "ctx-boom")
+    assert task.status.state == pb.TASK_STATE_FAILED
+    assert "hunter2" not in _text(task) and "failed to process" in _text(task)
+    assert "hunter2" in caplog.text  # the detail is in the server log only
+
+
+# --------------------------------------------------------------------------- client timeouts
+def test_client_timeout_rule_is_warned_at_startup(tmp_path, monkeypatch, caplog):
+    from app.a2a.client import timeout_problem, warn_if_timeouts_unsafe
+
+    assert timeout_problem(get_settings()) is None  # defaults: 180 s > 120 s + one LLM call (~50 s)
+    _peer_config(tmp_path, monkeypatch, "http://127.0.0.1:1")
+    monkeypatch.setenv("REQUEST_TIMEOUT_S", "130")
+    get_settings.cache_clear()
+    assert "REQUEST_TIMEOUT_S=130s" in timeout_problem(get_settings())
+    warn_if_timeouts_unsafe(get_settings())
+    assert "A2A client timeouts" in caplog.text
+    caplog.clear()
+    monkeypatch.setenv("A2A_AGENTS_FILE", str(tmp_path / "missing.json"))
+    get_settings.cache_clear()
+    warn_if_timeouts_unsafe(get_settings())  # calls no other agent ⇒ nothing to warn about
+    assert "A2A client timeouts" not in caplog.text

@@ -71,6 +71,34 @@ async def test_feedback_token_bound_to_user(fake_llm):
         assert e.value.status_code == 403
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # non-ASCII token: hmac.compare_digest(str, str) raised TypeError ⇒ was a 500
+        {"trace_id": "trace-1", "feedback_token": "đây-là-token", "score": 1},
+        {"trace_id": "trace-1", "feedback_token": ["x"], "score": 1},
+    ],
+)
+async def test_feedback_odd_tokens_are_403_not_500(payload):
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.handle({"type": "feedback", **payload}, ctx("alice"))
+    assert e.value.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"trace_id": ["trace-1"], "score": 1},
+        {"trace_id": "t" * 129, "score": 1},
+        {"trace_id": "trace-1", "score": True},
+    ],
+)
+async def test_feedback_payload_validated(payload):
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.handle({"type": "feedback", "feedback_token": "x", **payload}, ctx("alice"))
+    assert e.value.status_code == 400
+
+
 @pytest.mark.parametrize("bad", ["a/b", "../alice", "alice/../bob", "x y", "", "/root", "a" * 200])
 def test_invalid_user_ids_rejected(bad):
     with pytest.raises(GreenNodeRequestError):

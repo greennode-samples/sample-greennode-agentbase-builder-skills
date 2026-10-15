@@ -4,15 +4,20 @@ Which helper (see the agentbase-build-identity skill):
   - Agent-wide secret, same for every user ⇒ `agent_api_key` (Static API Key provider) /
     `agent_access_token` (OAuth2 provider, client-credentials M2M).
   - The END USER's own credential ⇒ `user_access_token` (OAuth2 3LO consent) / `user_api_key` (Delegated
-    API Key provider). They wrap the SDK so a missing consent does NOT block the request: the SDK's default
-    poller waits up to 600s for the user (> REQUEST_TIMEOUT_S) — instead we raise `AuthorizationRequired`, the
-    tool returns the link, the user consents, and the NEXT call gets the credential immediately.
+    API Key provider). A missing consent does NOT block the request (the SDK decorators poll up to 600s for the
+    user, > REQUEST_TIMEOUT_S): we raise `AuthorizationRequired`, the tool returns the link, the user consents,
+    and the NEXT call gets the credential immediately.
 
 Rules:
   - Decorate an INNER function, never the @tool: the injected key/token must not appear in the tool schema the
     LLM sees, nor in tool-call traces.
-  - Per-user credentials are keyed by GreenNodeAgentBaseContext user id — app.service sets it from the verified
-    Principal on every path. No user ⇒ refuse (never fetch a credential for "nobody").
+  - Per-user credentials are keyed by the REQUEST-SCOPED GreenNodeAgentBaseContext user id — app.service sets it
+    from the verified Principal on every path. No user ⇒ refuse (never fetch a credential for "nobody"; the SDK's
+    get_user_id() would fall back to the `agent_user_id` config value — not a user).
+  - The platform keys per-user credentials by whatever user id the agent sends ⇒ only a PROVEN id may be used:
+    AUTH_MODE=jwt, or IDENTITY_TRUST_ASSERTED_USER=true for api_key / none (see the identity skill).
+  - OAuth2 tokens are fetched with ONE shared IdentityClient (its IAM token is cached per instance); the SDK's
+    requires_access_token builds two new clients — two IAM token requests — on every call.
 """
 
 from __future__ import annotations
@@ -23,10 +28,11 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
-from greennode_agentbase import GreenNodeAgentBaseContext, requires_access_token, requires_api_key
+from greennode_agentbase import GreenNodeAgentBaseContext, requires_api_key
 from greennode_agentbase.core.config import get_config_value
 from greennode_agentbase.identity import TokenPoller
 from greennode_agentbase.identity import auth as _sdk_auth
+from greennode_agentbase.identity.models import GetM2mTokenRequest, ThreeLoTokenRequest
 
 from app.config import get_settings
 from app.observability import tracing
@@ -61,7 +67,8 @@ class AuthorizationRequired(Exception):
 
 
 class _ReturnLinkPoller(TokenPoller):
-    """Replaces the SDK's 600s polling: stop right away and hand the link back to the user."""
+    """Replaces the SDK's 600s polling (requires_api_key, delegated keys): stop right away and hand the link
+    back to the user."""
 
     def __init__(self, provider_name: str):
         self.provider_name = provider_name
@@ -85,7 +92,7 @@ def _client() -> Any:
     return _shared_client
 
 
-def _require_agent_identity() -> None:
+def _require_agent_identity() -> str:
     # Without it the SDK silently CREATES a new workload identity on the platform (and writes it to
     # .greennode.json) — the providers you configured would not be attached to it.
     name = get_config_value("GREENNODE_AGENT_IDENTITY")
@@ -94,20 +101,81 @@ def _require_agent_identity() -> None:
             'GREENNODE_AGENT_IDENTITY is not set (Runtime injects it; locally put "agent_identity" in '
             ".greennode.json) — the name of the identity your providers belong to (/agentbase-identity)."
         )
+    return name
 
 
-def _require_user_and_callback() -> str:
-    if not GreenNodeAgentBaseContext.get_user_id():
+def _request_user_id() -> str | None:
+    """The user of THIS request only. GreenNodeAgentBaseContext.get_user_id() falls back to the `agent_user_id`
+    config value (.greennode.json / env) when none is set — that would fetch credentials for a fixed user."""
+    return GreenNodeAgentBaseContext._user_id.get(None)
+
+
+def _require_user_and_callback() -> tuple[str, str]:
+    """(user id, callback url) for a per-user credential — refused before anything reaches the platform."""
+    user_id = _request_user_id()
+    if not user_id:
         raise PermissionError(
-            "Per-user credentials need an authenticated user (no user id in context)."
+            "Per-user credentials need an authenticated user (no user id in this request)."
         )
-    url = get_settings().identity_callback_url
+    settings = get_settings()
+    if settings.auth_mode != "jwt" and not settings.identity_trust_asserted_user:
+        raise PermissionError(
+            f"Per-user credentials are disabled with AUTH_MODE={settings.auth_mode}: the user id is asserted by "
+            "the caller, not proven by a JWT, so any caller could use any user's connected accounts. Use "
+            "AUTH_MODE=jwt, or set IDENTITY_TRUST_ASSERTED_USER=true if every caller is trusted for every user."
+        )
+    url = settings.identity_callback_url
     if not url:
         raise ValueError(
             "IDENTITY_CALLBACK_URL is required for per-user credentials (and must be in the agent "
             "identity's allowedReturnUrls)."
         )
-    return url
+    return user_id, url
+
+
+def _injecting(fetch: Callable[[], Awaitable[str]], into: str) -> Callable:
+    """Decorator-shaped like the SDK's: await `fetch()` at call time, pass the result as keyword `into`."""
+
+    def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+        async def call(*args: Any, **kwargs: Any) -> T:
+            return await func(*args, **{**kwargs, into: await fetch()})
+
+        return call
+
+    return decorator
+
+
+async def _m2m_token(provider_name: str, scopes: list[str]) -> str:
+    response = await _client().get_m2m_token_async(
+        provider_name=provider_name,
+        agent_identity_name=_require_agent_identity(),
+        request=GetM2mTokenRequest(scopes=scopes),
+    )
+    if not response.access_token:
+        raise ValueError(f"Identity provider '{provider_name}' returned no access token")
+    return response.access_token
+
+
+async def _3lo_token(provider_name: str, scopes: list[str]) -> str:
+    """Token if the user already consented; else AuthorizationRequired with the consent link (no polling)."""
+    user_id, callback_url = _require_user_and_callback()
+    response = await _client().get_3lo_token_async(
+        provider_name=provider_name,
+        agent_identity_name=_require_agent_identity(),
+        request=ThreeLoTokenRequest(
+            agent_user_id=user_id,
+            scopes=scopes,
+            return_url=callback_url,
+            force_authentication=False,
+        ),
+    )
+    if response.access_token:
+        return response.access_token
+    if response.authorization_url:
+        raise AuthorizationRequired(provider_name, response.authorization_url)
+    raise ValueError(
+        f"Identity provider '{provider_name}' returned neither a token nor an authorization URL"
+    )
 
 
 def _wrap(
@@ -160,9 +228,7 @@ def agent_access_token(
     return _wrap(
         "agent_access_token",
         provider_name,
-        lambda: requires_access_token(
-            provider_name=provider_name, scopes=scopes, auth_flow="M2M", into=into
-        ),
+        lambda: _injecting(lambda: _m2m_token(provider_name, scopes), into),
         per_user=False,
     )
 
@@ -171,31 +237,26 @@ def user_access_token(
     provider_name: str, scopes: list[str], *, into: str = "access_token"
 ) -> Decorator:
     """The end user's OAuth2 token (3LO / USER_FEDERATION). Raises AuthorizationRequired until they consent."""
-
-    def make() -> Callable:
-        return requires_access_token(
-            provider_name=provider_name,
-            scopes=scopes,
-            auth_flow="USER_FEDERATION",
-            into=into,
-            callback_url=_require_user_and_callback(),
-            on_auth_url=_remember_auth_url,
-            token_poller=_ReturnLinkPoller(provider_name),
-        )
-
-    return _wrap("user_access_token", provider_name, make, per_user=True)
+    return _wrap(
+        "user_access_token",
+        provider_name,
+        lambda: _injecting(lambda: _3lo_token(provider_name, scopes), into),
+        per_user=True,
+    )
 
 
 def user_api_key(provider_name: str, *, into: str = "api_key") -> Decorator:
     """The end user's own API key (Delegated API Key provider). Raises AuthorizationRequired until provided."""
 
     def make() -> Callable:
+        # The SDK reads the user via get_user_id(): it returns the request-scoped id checked here
+        _, callback_url = _require_user_and_callback()
         return requires_api_key(
             provider_name=provider_name,
             auth_flow="USER_FEDERATION",
             into=into,
             identity_client=_client(),
-            callback_url=_require_user_and_callback(),
+            callback_url=callback_url,
             on_auth_url=_remember_auth_url,
             token_poller=_ReturnLinkPoller(provider_name),
         )

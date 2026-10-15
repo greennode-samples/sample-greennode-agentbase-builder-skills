@@ -27,6 +27,16 @@ GREENNODE_LLM_BASE_URL = "https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1"
 # importing app.llm (which imports this module).
 LLM_TIERS: tuple[str, ...] = ("reasoning", "large", "small")
 
+# Inbound JWTs are verified with keys from the IdP's JWKS ⇒ only asymmetric algorithms (PyJWT names)
+ASYMMETRIC_JWT_ALGORITHMS = frozenset(
+    "RS256 RS384 RS512 PS256 PS384 PS512 ES256 ES256K ES384 ES512 EdDSA".split()
+)
+CUSTOM_HEADER_PREFIX = "X-GreenNode-AgentBase-Custom-"
+
+
+def _forwarded_header(name: str) -> bool:
+    return name.lower() == "authorization" or name.lower().startswith(CUSTOM_HEADER_PREFIX.lower())
+
 
 class Settings(BaseSettings):
     # env_ignore_empty: a "KEY=" line in .env (e.g. LLM_MAX_TOKENS=) => use the default instead of a parse error
@@ -149,6 +159,10 @@ class Settings(BaseSettings):
     # App page the user lands on after OAuth2 3LO / delegated-key consent. MUST be in the agent identity's
     # allowedReturnUrls (/agentbase-identity). Empty ⇒ per-user (USER_FEDERATION) credentials are disabled.
     identity_callback_url: str = ""
+    # Per-user credentials need a user id PROVEN by a JWT (AUTH_MODE=jwt). With api_key / none the caller merely
+    # asserts it ⇒ whoever holds the key (or reaches a local agent) could use ANY user's connected accounts.
+    # true = accept that (a trusted BFF that verified the user, or local testing with a dev identity).
+    identity_trust_asserted_user: bool = False
 
     # --- Human-in-the-loop: globs on tool names that need human approval, JSON list ---
     # e.g. HITL_TOOLS=["gateway_*_delete","gateway_*_create","send_email"]
@@ -178,6 +192,8 @@ class Settings(BaseSettings):
         ]
     )
     a2a_agents_file: str = "a2a_agents.json"
+    # Client: one call to another agent. Must be ≥ the TARGET's REQUEST_TIMEOUT_S + margin, and this agent's
+    # REQUEST_TIMEOUT_S > A2A_TIMEOUT_S + one LLM call (warned at startup) — skill agentbase-build-a2a
     a2a_timeout_s: float = 120.0
 
     # --- Feedback token (prevents posting scores to another user's trace). Empty => derived from
@@ -297,6 +313,37 @@ class Settings(BaseSettings):
         if self.auth_mode == "api_key" and not self.auth_api_key_sha256:
             raise ValueError(
                 "AUTH_MODE=api_key requires AUTH_API_KEY_SHA256 (JSON list of SHA-256 hex)."
+            )
+        # Any env: keys come from a PUBLIC JWKS ⇒ HS* would let anyone holding the JWKS forge tokens; none = unsigned
+        if self.auth_mode == "jwt" and (
+            not self.auth_algorithms
+            or any(a not in ASYMMETRIC_JWT_ALGORITHMS for a in self.auth_algorithms)
+        ):
+            raise ValueError(
+                f"AUTH_ALGORITHMS must be a non-empty subset of {sorted(ASYMMETRIC_JWT_ALGORITHMS)} "
+                "(asymmetric only — never HS*/none)."
+            )
+        if self.auth_mode == "jwt" and not self.is_local:
+            for name, value in (
+                ("AUTH_JWKS_URL", self.auth_jwks_url),
+                ("AUTH_ISSUER", self.auth_issuer),
+            ):
+                if not value.lower().startswith("https://"):
+                    raise ValueError(
+                        f"{name} must be an https:// URL outside local (copy it verbatim from the IdP's "
+                        "/.well-known/openid-configuration)."
+                    )
+        # The SDK forwards only Authorization and X-GreenNode-AgentBase-Custom-* to the handler: any other header
+        # never arrives ⇒ every request would be a 401 in the deployed agent
+        var, header = (
+            ("AUTH_TOKEN_HEADER", self.auth_token_header)
+            if self.auth_mode == "jwt"
+            else ("AUTH_API_KEY_HEADER", self.auth_api_key_header)
+        )
+        if self.auth_mode != "none" and not self.is_local and not _forwarded_header(header):
+            raise ValueError(
+                f"{var}={header!r}: use Authorization or a header starting with "
+                f"{CUSTOM_HEADER_PREFIX} (the only headers the AgentBase SDK forwards)."
             )
         if not self.a2a_public_url:
             self.a2a_public_url = os.getenv("GREENNODE_ENDPOINT_URL") or "http://localhost:8080"

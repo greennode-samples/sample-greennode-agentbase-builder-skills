@@ -13,6 +13,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from greennode_agentbase import RequestContext
 from greennode_agentbase.exceptions import GreenNodeRequestError
+from starlette.datastructures import Headers
 
 from app.auth import inbound
 from app.config import get_settings
@@ -26,10 +27,23 @@ class JwksServer:
         self.private: dict[str, Any] = {}
         self.published: list[str] = []
         self.broken = False  # True ⇒ answer like a proxy maintenance page (200, HTML)
+        self.body: Any = None  # not None ⇒ served as is (e.g. [] or {"keys": []})
+        self.delay = 0.0  # seconds before answering (slow / hanging IdP)
+        self.fetches = 0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
+                outer.fetches += 1
+                time.sleep(outer.delay)
+                if outer.body is not None:
+                    body = json.dumps(outer.body).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if outer.broken:
                     body = b"<html><body>Down for maintenance</body></html>"
                     self.send_response(200)
@@ -306,3 +320,189 @@ def test_no_audience_outside_local_requires_client_allowlist(monkeypatch):
     get_settings.cache_clear()
     with pytest.raises(ValueError, match="AUTH_ALLOWED_CLIENT_IDS"):
         get_settings()
+
+
+# --- token checks (each one is a mutation that must be caught)
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"iss": "https://evil.test"},
+        {"iss": None},  # missing iss
+        {"exp": None},  # missing exp
+        {"nbf": int(time.time()) + 3600},  # not valid yet (beyond the 30 s leeway)
+    ],
+)
+def test_bad_claims_rejected(jwt_env, claims):
+    with pytest.raises(GreenNodeRequestError) as e:
+        inbound.authenticate(_ctx(jwt_env(**claims)), get_settings())
+    assert e.value.status_code == 401
+
+
+def test_alg_none_and_attacker_key_with_a_real_kid_rejected(jwt_env):
+    claims = {"sub": "admin", "iss": "https://issuer.test", "aud": "agent-api"}
+    now = int(time.time())
+    unsigned = jwt.encode(
+        {**claims, "iat": now, "exp": now + 300}, None, algorithm="none", headers={"kid": "k1"}
+    )
+    attacker = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    forged = jwt_env("admin", kid="k1", key=attacker)  # RS256, the IdP's kid, the attacker's key
+    for token in (unsigned, forged):
+        with pytest.raises(GreenNodeRequestError) as e:
+            inbound.authenticate(_ctx(token), get_settings())
+        assert e.value.status_code == 401
+
+
+def test_random_kids_cannot_hammer_the_jwks(jwt_env):
+    """Unknown kid ⇒ at most one forced refetch per cooldown window (an attacker can't DoS the IdP / the lock)."""
+    attacker = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    for i in range(50):
+        with pytest.raises(GreenNodeRequestError) as e:
+            inbound.authenticate(_ctx(jwt_env(kid=f"rnd-{i}", key=attacker)), get_settings())
+        assert e.value.status_code == 401
+    assert jwt_env.jwks.fetches <= 1
+
+
+# --- IdP failures: 503 (bounded in time), never 401 (would log every user out)
+@pytest.mark.parametrize("body", [[], {"keys": []}, {"keys": [{"kty": "oct", "k": "c2VjcmV0"}]}])
+def test_jwks_without_usable_keys_is_503(jwt_env, body):
+    token = jwt_env()
+    jwt_env.jwks.body = body
+    with pytest.raises(GreenNodeRequestError) as e:
+        inbound.authenticate(_ctx(token), get_settings())
+    assert e.value.status_code == 503
+
+
+def test_jwks_client_is_bounded():
+    client = inbound._jwks_client("https://idp.test/jwks.json")
+    assert client.timeout == inbound.JWKS_TIMEOUT_S <= 5
+    assert client.cooldown_duration == inbound.JWKS_REFETCH_COOLDOWN_S
+
+
+async def test_slow_jwks_is_503_within_the_auth_timeout(jwt_env, monkeypatch):
+    token = jwt_env()
+    jwt_env.jwks.delay = 1.0
+    monkeypatch.setattr(inbound, "AUTH_TIMEOUT_S", 0.2)
+    started = time.monotonic()
+    with pytest.raises(GreenNodeRequestError) as e:
+        await inbound.authenticate_async(_ctx(token), get_settings())
+    assert e.value.status_code == 503 and time.monotonic() - started < 0.8
+
+
+def test_hanging_jwks_fetch_times_out_as_503(jwt_env, monkeypatch):
+    token = jwt_env()
+    jwt_env.jwks.delay = 1.0
+    monkeypatch.setattr(inbound, "JWKS_TIMEOUT_S", 0.2)
+    inbound._jwks_client.cache_clear()
+    with pytest.raises(GreenNodeRequestError) as e:
+        inbound.authenticate(_ctx(token), get_settings())
+    assert e.value.status_code == 503
+
+
+async def test_failed_prefetch_is_logged_as_error(jwt_env, caplog):
+    jwt_env.jwks.close()
+    await inbound.prefetch_jwks(get_settings())
+    assert any(r.levelname == "ERROR" and "JWKS prefetch" in r.message for r in caplog.records)
+
+
+# --- Settings: deploy-time mistakes fail at startup
+PROD_JWT = {
+    "APP_ENV": "prod",
+    "AUTH_MODE": "jwt",
+    "AUTH_JWKS_URL": "https://issuer.test/jwks.json",
+    "AUTH_ISSUER": "https://issuer.test",
+    "AUTH_AUDIENCE": "agent-api",
+    "MEMORY_BACKEND": "agentbase",
+    "MEMORY_ID": "mem-1",
+    "MEMORY_STRATEGY_ID": "strat-1",  # valid memory config: isolate the auth checks
+}
+
+
+def _settings_with(monkeypatch, **env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    return get_settings()
+
+
+@pytest.mark.parametrize(
+    ("override", "error"),
+    [
+        ({"AUTH_JWKS_URL": "http://issuer.test/jwks.json"}, "AUTH_JWKS_URL"),
+        ({"AUTH_ISSUER": "http://issuer.test"}, "AUTH_ISSUER"),
+        ({"AUTH_ALGORITHMS": '["HS256"]'}, "AUTH_ALGORITHMS"),
+        ({"AUTH_ALGORITHMS": '["RS256", "none"]'}, "AUTH_ALGORITHMS"),
+        ({"AUTH_TOKEN_HEADER": "X-User-Token"}, "AUTH_TOKEN_HEADER"),
+    ],
+)
+def test_unsafe_jwt_settings_refused_outside_local(monkeypatch, override, error):
+    with pytest.raises(ValueError, match=error):
+        _settings_with(monkeypatch, **{**PROD_JWT, **override})
+
+
+def test_forwarded_headers_and_asymmetric_algorithms_accepted(monkeypatch):
+    s = _settings_with(
+        monkeypatch,
+        **PROD_JWT,
+        AUTH_TOKEN_HEADER="X-GreenNode-AgentBase-Custom-User-Token",
+        AUTH_ALGORITHMS='["RS256", "PS256", "ES384", "EdDSA"]',
+    )
+    assert s.auth_token_header.startswith("X-GreenNode-AgentBase-Custom-")
+    with pytest.raises(ValueError, match="AUTH_API_KEY_HEADER"):
+        _settings_with(
+            monkeypatch,
+            APP_ENV="prod",
+            AUTH_MODE="api_key",
+            AUTH_API_KEY_SHA256='["' + "0" * 64 + '"]',
+            AUTH_API_KEY_HEADER="X-Api-Key",
+            MEMORY_BACKEND="agentbase",
+            MEMORY_ID="mem-1",
+            MEMORY_STRATEGY_ID="strat-1",
+        )
+
+
+def test_symmetric_algorithms_refused_even_locally(monkeypatch):
+    with pytest.raises(ValueError, match="AUTH_ALGORITHMS"):
+        _settings_with(
+            monkeypatch,
+            AUTH_MODE="jwt",
+            AUTH_JWKS_URL="http://127.0.0.1:1/jwks.json",
+            AUTH_ALGORITHMS='["HS256"]',
+        )
+
+
+# --- the token never leaks through repr / logs
+def test_principal_repr_hides_token_and_claims():
+    p = inbound.Principal(user_id="alice", token="eyJ.secret.token", claims={"email": "a@x.vn"})
+    assert "secret" not in repr(p) and "a@x.vn" not in repr(p) and "alice" in repr(p)
+
+
+# --- the caller's User-Id comes from the request, not from the SDK's config fallback
+def _http_ctx(context_user: str | None, headers: dict) -> RequestContext:
+    """Like the SDK builds it for /invocations: `user_id` may come from .greennode.json `agent_user_id`."""
+    return RequestContext(
+        session_id="s",
+        user_id=context_user,
+        request_headers=headers,
+        request=SimpleNamespace(headers=Headers(headers)),
+    )
+
+
+def test_api_key_user_id_must_be_sent_by_the_caller(api_key_env):
+    key = {"X-GreenNode-AgentBase-Custom-Api-Key": "secret-key-1"}
+    # only the SDK's config fallback in context.user_id ⇒ the caller sent no User-Id
+    with pytest.raises(GreenNodeRequestError) as e:
+        inbound.authenticate(_http_ctx("from-config", key), get_settings())
+    assert e.value.status_code == 400
+    sent = {**key, "X-GreenNode-AgentBase-User-Id": "alice"}
+    assert inbound.authenticate(_http_ctx("alice", sent), get_settings()).user_id == "alice"
+
+
+def test_jwt_ignores_the_config_user_fallback(jwt_env):
+    headers = {"Authorization": f"Bearer {jwt_env()}"}
+    principal = inbound.authenticate(_http_ctx("from-config", headers), get_settings())
+    assert principal.user_id == "user-1"  # not a 403 "User-Id does not match"
+
+
+def test_none_mode_ignores_the_config_user_fallback(monkeypatch):
+    principal = inbound.authenticate(_http_ctx("from-config", {}), get_settings())
+    assert principal.user_id == inbound.LOCAL_USER_ID

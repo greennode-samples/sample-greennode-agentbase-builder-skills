@@ -191,6 +191,8 @@ def thread_config(settings: Settings, *, session_id: str, user_id: str, **extra)
 
     AgentBaseMemoryEvents isolates by (thread_id, actor_id) itself; InMemorySaver keys only by
     thread_id, so the user is prepended so another user reusing the session_id can't read the history.
+    `session_id` = the raw session id for code that must pass it on (A2A contextId) — never send `thread_id`
+    elsewhere: with inmemory it is "<user>::<session>" (leaks the user id).
     """
     from app.auth.inbound import validate_session_id, validate_user_id
 
@@ -198,4 +200,11 @@ def thread_config(settings: Settings, *, session_id: str, user_id: str, **extra)
     validate_user_id(user_id)
     validate_session_id(session_id)
     thread_id = session_id if settings.memory_backend == "agentbase" else f"{user_id}::{session_id}"
-    return {"configurable": {"thread_id": thread_id, "actor_id": user_id, **extra}}
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "actor_id": user_id,
+            "session_id": session_id,
+            **extra,
+        }
+    }

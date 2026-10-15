@@ -10,9 +10,14 @@ Principles:
   "No authorization" leaves the endpoint public ⇒ the agent ALWAYS authenticates its caller itself:
   jwt or api_key is mandatory outside local (defense in depth, whatever the Runtime setting).
 - api_key: only for trusted callers (server/BFF/job/test) — NEVER embed the key in a mobile app. The
-  User-Id header is REQUIRED (no shared bucket) — the trusted caller is responsible for its value.
+  User-Id header is REQUIRED (no shared bucket) — the trusted caller is responsible for its value (a BFF that
+  verified the user's IdP token sends `user_id_from_subject(sub, iss)` — the same id jwt mode would use).
   Env stores only the key's SHA-256.
+- The caller's User-Id is read from the HTTP request itself, never from `context.user_id`: the SDK fills that
+  from the `agent_user_id` config value (.greennode.json / env) when the header is absent.
 - Every user_id (header or JWT sub) goes through validate_user_id() before touching memory.
+- The IdP is bounded: JWKS fetch timeout JWKS_TIMEOUT_S, whole authentication AUTH_TIMEOUT_S ⇒ 503 (PyJWKClient
+  fetches under one process-wide lock — an unbounded IdP outage would queue every request behind it).
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -32,7 +38,13 @@ from greennode_agentbase.exceptions import GreenNodeRequestError
 
 from app.config import Settings
 
+log = logging.getLogger(__name__)
 LOCAL_USER_ID = "local-user"
+USER_ID_HEADER = "X-GreenNode-AgentBase-User-Id"
+JWKS_TIMEOUT_S = 5.0  # one JWKS HTTP fetch (PyJWT default: 30 s)
+AUTH_TIMEOUT_S = 10.0  # the whole authentication incl. waiting for another request's fetch
+# Unknown `kid` ⇒ at most one forced JWKS refetch per this window (random-kid tokens can't hammer the IdP)
+JWKS_REFETCH_COOLDOWN_S = 30.0
 # user_id is put into memory paths (/actors/{user_id}, /actors/{user}/sessions/...) ⇒ only safe
 # characters allowed; "/", "..", whitespace... are banned to prevent namespace injection / cross-user reads.
 USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+=-]{0,127}$")
@@ -77,26 +89,48 @@ def user_id_from_subject(subject: str, issuer: str | None) -> str:
 @dataclass(frozen=True)
 class Principal:
     user_id: str
-    token: str | None = None
-    claims: dict[str, Any] = field(default_factory=dict)
+    # repr=False: a Principal in a log line / exception / trace must not print the bearer token or the claims
+    token: str | None = field(default=None, repr=False)
+    claims: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 def _unauthorized(msg: str, status: int = 401) -> GreenNodeRequestError:
     return GreenNodeRequestError(msg, status_code=status)
 
 
+def _idp_unavailable() -> GreenNodeRequestError:
+    # 503, not 401: a 401 would log every user out during an IdP / JWKS outage
+    return _unauthorized("Identity provider unavailable", status=503)
+
+
 @lru_cache(maxsize=4)
 def _jwks_client(url: str) -> jwt.PyJWKClient:
-    # The JWK SET is cached 1h; an unknown `kid` forces a refetch (rate-limited by PyJWT's 30s cooldown).
+    # The JWK SET is cached 1h; an unknown `kid` forces a refetch (at most once per cooldown window).
     # cache_keys stays False: that per-kid LRU never expires ⇒ a key the IdP removed (compromised/rotated
-    # out) would stay trusted until restart.
-    return jwt.PyJWKClient(url, cache_keys=False, lifespan=3600)
+    # out) would stay trusted until restart. PyJWT ≥ 2.14 does not follow redirects ⇒ the URL must be final.
+    return jwt.PyJWKClient(
+        url,
+        cache_keys=False,
+        lifespan=3600,
+        timeout=JWKS_TIMEOUT_S,
+        cooldown_duration=JWKS_REFETCH_COOLDOWN_S,
+    )
 
 
 def _header(context: RequestContext, name: str) -> str | None:
     headers = context.request_headers or {}
     lowered = {k.lower(): v for k, v in headers.items()}
     return lowered.get(name.lower())
+
+
+def _claimed_user_id(context: RequestContext) -> str | None:
+    """The User-Id header the CALLER sent. From the HTTP request when there is one (/invocations): the SDK's
+    `context.user_id` falls back to the `agent_user_id` config value when the header is absent — a config value
+    is not a caller. In-process contexts (A2A auth backend, tests) set user_id from the request themselves."""
+    headers = getattr(context.request, "headers", None)
+    if headers is None:
+        return context.user_id
+    return {k.lower(): v for k, v in headers.items()}.get(USER_ID_HEADER.lower()) or None
 
 
 def _extract_bearer(raw: str | None) -> str | None:
@@ -112,12 +146,16 @@ def verify_jwt(token: str, settings: Settings) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         # The IdP/proxy answered the JWKS URL with non-JSON (maintenance page…): an outage, not a bad token ⇒ 503
         # (a 401 would log every user out). PyJWT doesn't wrap this error.
-        raise _unauthorized("Identity provider unavailable", status=503) from e
-    except (
-        jwt.PyJWKClientConnectionError
-    ) as e:  # IdP/JWKS unreachable ⇒ 503 (not 401 — no mass logouts)
-        raise _unauthorized("Identity provider unavailable", status=503) from e
-    except jwt.PyJWTError as e:
+        raise _idp_unavailable() from e
+    except jwt.PyJWKClientError as e:
+        # Only "no key for this kid" is the TOKEN's fault. Unreachable / redirected JWKS URL, `[]`, `{"keys": []}`,
+        # no signing keys ⇒ the IdP side is broken ⇒ 503.
+        if str(e).startswith("Unable to find a signing key that matches"):
+            raise _unauthorized("Invalid token: unknown signing key") from e
+        raise _idp_unavailable() from e
+    except jwt.PyJWKSetError as e:  # JWKS with no usable key
+        raise _idp_unavailable() from e
+    except jwt.PyJWTError as e:  # malformed token (DecodeError)
         raise _unauthorized(f"Invalid token: {type(e).__name__}") from e
     except (TypeError, ValueError) as e:
         raise _unauthorized("Invalid token: unusable key or token") from e
@@ -159,7 +197,7 @@ def _jwt_token(context: RequestContext, settings: Settings) -> str:
 
 
 def _principal(context: RequestContext, settings: Settings, claims: dict | None, token: str | None):
-    claimed_user = context.user_id
+    claimed_user = _claimed_user_id(context)
     if settings.auth_mode == "none":
         principal = Principal(user_id=claimed_user or LOCAL_USER_ID)
     elif settings.auth_mode == "api_key":
@@ -198,19 +236,28 @@ def authenticate(context: RequestContext, settings: Settings) -> Principal:
 
 
 async def authenticate_async(context: RequestContext, settings: Settings) -> Principal:
+    """Used by /invocations AND /a2a. Runs before the request timeout starts ⇒ bounded here (AUTH_TIMEOUT_S)."""
     if settings.auth_mode == "jwt":
         token = _jwt_token(context, settings)
-        claims = await asyncio.to_thread(verify_jwt, token, settings)  # JWKS fetch is sync I/O
+        try:
+            async with asyncio.timeout(AUTH_TIMEOUT_S):  # the JWKS fetch is sync I/O ⇒ a thread
+                claims = await asyncio.to_thread(verify_jwt, token, settings)
+        except TimeoutError as e:
+            raise _idp_unavailable() from e
         return _principal(context, settings, claims, token)
     return _principal(context, settings, None, None)
 
 
 async def prefetch_jwks(settings: Settings) -> None:
-    """Called at startup so the first request doesn't wait for the JWKS download (errors are only logged, not blocking)."""
+    """Called at startup so the first request doesn't wait for the JWKS download (not blocking: requests will
+    retry the fetch — but a failure here usually means a wrong AUTH_JWKS_URL, so it is logged as ERROR)."""
     if settings.auth_mode == "jwt" and settings.auth_jwks_url:
         try:
             await asyncio.to_thread(_jwks_client(settings.auth_jwks_url).get_jwk_set)
         except Exception:  # noqa: BLE001
-            import logging
-
-            logging.getLogger(__name__).warning("JWKS prefetch failed", exc_info=True)
+            log.error(
+                "JWKS prefetch from AUTH_JWKS_URL failed — every jwt request will get 503 until it works "
+                "(the URL must be the final https URL: copy jwks_uri from the IdP's "
+                "/.well-known/openid-configuration; redirects are not followed)",
+                exc_info=True,
+            )

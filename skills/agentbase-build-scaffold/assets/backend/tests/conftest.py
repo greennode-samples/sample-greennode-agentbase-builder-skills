@@ -1,8 +1,29 @@
-"""Tests run offline: fake LLM, in-memory memory, auth none, no Langfuse."""
+"""Tests run offline: fake LLM, in-memory memory, auth none, no Langfuse.
+
+They must not depend on the developer's .env / shell: Settings ignores .env, load_dotenv() (main.py, evals) is a
+no-op, and every Settings variable inherited from the environment is dropped before the test values are set.
+"""
 
 from __future__ import annotations
 
 import os
+
+import dotenv
+
+# before main.py / evals bind it with `from dotenv import load_dotenv`
+dotenv.load_dotenv = lambda *a, **k: False
+
+from app.config import Settings  # noqa: E402 — defines the class only; nothing reads the env at import
+
+Settings.model_config["env_file"] = None
+for _name in list(os.environ):
+    # pydantic-settings matches env names case-insensitively; the 2 GREENNODE_* change Settings too
+    # (on_runtime() ⇒ APP_ENV=local refused, A2A_PUBLIC_URL fallback)
+    if _name.lower() in Settings.model_fields or _name in (
+        "GREENNODE_AGENT_IDENTITY",
+        "GREENNODE_ENDPOINT_URL",
+    ):
+        del os.environ[_name]
 
 os.environ.update(
     APP_ENV="local",

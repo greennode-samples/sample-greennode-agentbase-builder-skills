@@ -10,10 +10,14 @@ empty variable skips that agent with an error log):
   No IAM mode: a target whose Runtime Inbound Auth is "IAM Permissions" can't be called with this client.
 
 Per-user isolation: always sends X-GreenNode-AgentBase-User-Id = current user (from RunnableConfig,
-not from the LLM) and contextId = current session ⇒ the target agent keeps memory per user/session.
+not from the LLM) and contextId = the caller's session id ⇒ the target agent keeps memory per user/session.
 
 Credentials only go to the configured origin: the RPC URL comes from the target's Agent Card, so interfaces
 on another scheme/host/port are dropped (none left ⇒ the call is refused before anything is sent).
+
+Timeouts: A2A_TIMEOUT_S must outlast the TARGET's REQUEST_TIMEOUT_S (else the target may still run side effects
+after this agent gave up ⇒ retries/duplicates), and this agent's REQUEST_TIMEOUT_S must cover A2A_TIMEOUT_S + one
+LLM call (`warn_if_timeouts_unsafe`, logged at startup).
 """
 
 from __future__ import annotations
@@ -102,6 +106,36 @@ def load_a2a_agents(settings: Settings) -> dict[str, dict[str, Any]]:
     return agents
 
 
+def timeout_problem(settings: Settings) -> str | None:
+    """Why this agent's own timeouts don't fit an A2A call (None = fine). Its request must outlast the A2A call
+    plus one LLM call (the answer written after the tool returns); otherwise the caller's request is cancelled
+    while the target is still working."""
+    from app.llm import tier_for, worst_case_s
+
+    llm_s = worst_case_s(tier_for("agent"))
+    if settings.request_timeout_s > settings.a2a_timeout_s + llm_s:
+        return None
+    return (
+        f"REQUEST_TIMEOUT_S={settings.request_timeout_s:.0f}s must exceed A2A_TIMEOUT_S="
+        f"{settings.a2a_timeout_s:.0f}s + the agent tier's worst-case LLM call ({llm_s:.0f}s)"
+    )
+
+
+def warn_if_timeouts_unsafe(settings: Settings) -> None:
+    """Startup check (main.py), only when this agent calls other agents. The other half of the rule —
+    A2A_TIMEOUT_S ≥ the target's REQUEST_TIMEOUT_S + margin — needs the target's settings: see the a2a skill."""
+    try:
+        agents = load_a2a_agents(settings)
+    except (OSError, ValueError):  # unreadable a2a_agents.json: reported when the tools are built
+        return
+    if agents and (problem := timeout_problem(settings)):
+        log.warning(
+            "A2A client timeouts: %s — raise REQUEST_TIMEOUT_S or lower A2A_TIMEOUT_S (and keep "
+            "A2A_TIMEOUT_S ≥ each target's REQUEST_TIMEOUT_S + margin; skill agentbase-build-a2a)",
+            problem,
+        )
+
+
 def _headers(cfg: dict, settings: Settings, principal: Principal, user_id: str) -> dict[str, str]:
     h = {"X-GreenNode-AgentBase-User-Id": user_id}
     if cfg.get("auth", "api_key") == "api_key":
@@ -178,7 +212,9 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
                     "action was not confirmed."
                 )
             conf = config.get("configurable") or {}
-            user_id, session_id = conf["actor_id"], conf["thread_id"]
+            # The RAW session id (thread_config). Never thread_id: with MEMORY_BACKEND=inmemory it is
+            # "<user>::<session>" — it would leak the user id to the target (and fail its session-id check).
+            user_id, session_id = conf["actor_id"], conf["session_id"]
             # `agent` observation named per target (a2a.<agent>): each remote agent is its own node in the Langfuse
             # Agent Graph instead of one generic span shared by every target
             with tracing.step(
