@@ -58,33 +58,21 @@ uv run python -m evals.run_eval --data ... --hitl reject   # test the rejection 
 - Exit codes: `0` pass · `1` `pass_rate < --min-pass-rate` (**CI gate** — the only quality verdict) · `2` the eval could not run: config/infra error with a one-line `Config error: …` (no `LLM_API_KEY`, neither `--data` nor `--dataset`, missing/invalid JSONL, **empty dataset** (JSONL or Langfuse), unknown Langfuse dataset, Langfuse unreachable or wrong keys — checked **before** any LLM call) or an unexpected runner crash (traceback + `Eval could not run: …`). Fix the setup on `2`, the agent on `1`.
 - The gate divides by the **dataset size**: an item whose agent run crashed (LLM 502, timeout…) is recorded as `status=error` and fails; a judge error scores `correctness=0`. Langfuse silently drops raising tasks/evaluators, so never let them raise.
 
-CI: the scaffold already ships the gate — job `eval` in `.github/workflows/ci.yml` (source of truth, don't hand-write a second one). It uses a
-**dedicated, repo-level** `EVAL_LLM_API_KEY` (eval traffic gets its own rate limit; never the runtime's `LLM_API_KEY`), `--concurrency 1`,
-and is skipped with a notice until `EVAL_LLM_API_KEY` / `EVAL_LLM_MODEL` are set. Its core:
+CI: the scaffold already ships the gate — job `eval` in `.github/workflows/ci.yml` (source of truth, don't hand-write a
+second one; read it there rather than copying it). What it does:
 
-```yaml
-eval:
-  needs: test
-  runs-on: ubuntu-latest
-  defaults: { run: { working-directory: src/backend } }
-  env:
-    APP_ENV: local
-    AUTH_MODE: none
-    MEMORY_BACKEND: inmemory
-    LLM_API_KEY: ${{ secrets.EVAL_LLM_API_KEY }}
-    LLM_MODEL: ${{ vars.EVAL_LLM_MODEL || vars.LLM_MODEL }}
-    LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
-    LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
-    LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
-  steps:
-    - uses: actions/checkout@v4
-    - uses: astral-sh/setup-uv@v6
-    - run: uv sync --frozen
-    # --concurrency 1: MaaS allows 10 requests/min per account
-    - run: >-
-        uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl
-        --min-pass-rate ${{ vars.EVAL_MIN_PASS_RATE || '0.8' }} --concurrency 1
-```
+- Runs in-process (`APP_ENV=local`, `AUTH_MODE=none`, `MEMORY_BACKEND=inmemory`): no runtime, no IAM. MCP servers limited to
+  deployed environments and `user_jwt` servers are not loaded ⇒ keep items that need them in a separate dataset.
+- `uv sync --locked`, then **evaluates the config of a real environment**: `deploy/env_file.py export` loads
+  `LLM_*` (tiers, fallbacks, routing, token caps), `REFLECTION_*`, `LTM_*`, `APP_TIMEZONE`, `MAX_TOOL_ROUNDS`, `HITL_TOOLS`,
+  `CONTEXT_*` from the committed `src/backend/.env.<EVAL_CONFIG_ENV>.example` (repo variable `EVAL_CONFIG_ENV`, default `prod`;
+  `LLM_API_KEY` is never read from it). Missing file ⇒ a notice and the eval runs on `EVAL_LLM_MODEL` only.
+- Uses a **dedicated, repo-level** secret `EVAL_LLM_API_KEY` (eval traffic gets its own rate limit; never the runtime's
+  `LLM_API_KEY`) — it must be allowed for **every model** that config names (check with `make check-creds` locally).
+  `vars.EVAL_LLM_MODEL` (or `vars.LLM_MODEL`) overrides the primary model; otherwise `LLM_MODEL` from the config is used.
+- No key or no model ⇒ the gate is **skipped** with a notice (`gate=skipped`) and the deploy job allows **dev only**.
+  Otherwise `python -m evals.run_eval --data evals/datasets/smoke.jsonl --min-pass-rate ${EVAL_MIN_PASS_RATE:-0.8}
+  --concurrency 1` (MaaS allows 10 requests/min per account) ⇒ `gate=passed` or the job fails.
 
 Same gate locally: `make eval MIN=0.8 CONCURRENCY=1`.
 

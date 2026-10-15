@@ -63,7 +63,7 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    ```
    - `none` mode: `current_user()` = `MCP_DEV_USER`, `require_scope()` always passes, the server logs `authentication is DISABLED` and listens on 127.0.0.1 only ⇒ restart with another `MCP_DEV_USER` to see per-user isolation by hand. Scopes, 401 and real isolation are covered by `uv run pytest` (JWT mode with a test-signed token) — add a test per new tool.
    - Test a real auth mode locally: set `MCP_AUTH_MODE=api_key` + hash in `.env` (+ `MCP_API_KEY_SCOPES` for the tools the key may call), then `make call TOOL=… TOKEN=<raw key>`. With auth on, the server listens on 0.0.0.0.
-   - Docker locally: `make docker-build docker-run` (publishes on 127.0.0.1:8080 — `PORT=8081` to change — and sets `MCP_HOST=0.0.0.0` inside the container so `none` stays usable for local tests).
+   - Docker locally: `make docker-build docker-run` (publishes on 127.0.0.1:8080 — `PORT=8081` to change — and sets `MCP_HOST=0.0.0.0` inside the container so `none` stays usable for local tests, plus `MCP_DB_PATH=/tmp/mcp.db`: the image keeps `/app` read-only for the server user).
    - Internal system locally: point `MCP_BACKEND_URL` at a dev/mock instance (+ `MCP_BACKEND_TOKEN`); empty ⇒ those tools answer "not configured".
    - Interactive UI (optional): `make inspector` → Streamable HTTP, URL `http://localhost:8080/mcp`.
 4. **Connect a local agent** (optional, agent built with `/agentbase-build-mcp`) — the agent's `make dev` binds 8080, so run this server with **`make dev PORT=8081`**, then call it directly, bypassing the gateway, in the agent's `mcp_servers.json`:

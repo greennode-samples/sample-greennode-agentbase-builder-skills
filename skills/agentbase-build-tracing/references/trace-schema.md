@@ -12,7 +12,7 @@ Pick the most specific type ([Langfuse observation types](https://langfuse.com/d
 | `tool` | Each tool call | CallbackHandler |
 | `retriever` | Read-only lookups: `memory.recall`, `knowledge.search` | `step(as_type="retriever")` |
 | `evaluator` | LLM judges: `reflection.judge`, `eval.judge` | `_CHAIN_TYPES` |
-| `span` | Other custom steps (`tracing.step`): `tools.collect`, `mcp.list_tools`, `memory.save`, `context.compress`… | `tracing.step` |
+| `span` | Other custom steps (`tracing.step`): `tools.collect`, `mcp.list_tools`, `memory.save`, `memory.checkpoint_load`, `context.compress`, `llm.route`, `identity.<kind>`… | `tracing.step` |
 | `event` | Instant milestones (`tracing.event`) | `tracing.event` |
 | `embedding`, `guardrail` | Not used by the template — use them if the agent embeds itself or runs a guardrail model | `step(as_type=…)` |
 
@@ -41,6 +41,8 @@ Root observation `agent.invoke` (the trace's input/output — shown in the traci
 | "Why is it slow?" | Timeline: generation TTFT, `mcp.list_tools` latency (cache hit?), `memory.recall`, tool spans |
 | "Why is it expensive?" | Usage per generation; does `context.summarize` run too often? Low cache_read? |
 | "Which action did the user reject?" | Event `hitl.decision` |
+| "Why was there no approval card for a tool?" | `tools.collect.output.hitl_unmatched`: `HITL_TOOLS` patterns that matched no tool (typo, renamed MCP tool, connector down) — approval is NOT enforced for them |
+| "Why did the tool ask the user to sign in / connect?" | `identity.<kind>` span (WARNING, `output.status = authorization_required`): the user has not granted consent for that provider yet (`/agentbase-build-identity`) |
 | "MCP tool got 403/denied?" | Event `mcp.policy_denied` (server, tool) ⇒ fix the Policy Group (`/agentbase-build-mcp`) |
 | "Quality this week?" | Scores `user_feedback`, `self_eval`; Dataset runs from `/agentbase-build-eval` |
 

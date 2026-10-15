@@ -73,7 +73,7 @@ Moved to **`/agentbase-build-identity`** (Access Control): Static / Delegated AP
 
 - SDK `IAMCredentials` falls back **per field**: env var first, then `.greennode.json`. If the shell accidentally exports another account's `GREENNODE_CLIENT_ID` ⇒ wrong ID + correct secret ⇒ IAM **401** for Memory/Identity/Gateway (`get_token.sh` is unaffected because it reads the pair together).
 - Standard: in local dev, put IAM **only** in `.greennode.json`; do not put `GREENNODE_CLIENT_*` in `.env`; check `env | grep GREENNODE_`. `app/config.py::normalize_iam_env()` drops orphan variables (only ID or only SECRET) and logs a WARNING.
-- The agent's principal when calling the MCP Gateway (inbound IAM) = `iam:<sub>` of the IAM token (the service account's user id), **not** the client_id — the agent logs this value when fetching the token.
+- The agent's principal when calling the MCP Gateway (inbound IAM) = `iam:<sub>` of the IAM token (the service account's user id), **not** the client_id. The agent logs it (`IAM principal of the agent (use in Policy Group): iam:…`) at startup when an enabled `auth: iam` MCP server is configured (`log_iam_principal()`), else on its first IAM token fetch; `make check-creds` prints it too.
 
 ## Forbidden
 

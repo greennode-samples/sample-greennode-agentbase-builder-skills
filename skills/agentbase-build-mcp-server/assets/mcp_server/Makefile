@@ -38,4 +38,4 @@ docker-build:     ## Build a linux/amd64 image for AgentBase Runtime
 	docker build --platform linux/amd64 -t $(IMAGE):$(TAG) .
 
 docker-run:       ## Run the image locally with .env, published on this machine's loopback only
-	docker run --rm -p 127.0.0.1:$(or $(PORT),8080):8080 --env-file .env -e MCP_HOST=0.0.0.0 $(IMAGE):$(TAG)
+	docker run --rm -p 127.0.0.1:$(or $(PORT),8080):8080 --env-file .env -e MCP_HOST=0.0.0.0 -e MCP_DB_PATH=/tmp/mcp.db $(IMAGE):$(TAG)
