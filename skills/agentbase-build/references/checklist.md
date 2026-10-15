@@ -3,9 +3,9 @@
 Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short output). Items marked **[B]** = BLOCKER, do not deploy if FAIL.
 
 ## Structure & env
-- [B] `src/backend/pyproject.toml` + `uv.lock` + `.python-version` (3.13) exist; `requires-python = ">=3.13,<3.14"`; no `requirements.txt`; `uv sync --frozen` works; `uv run python --version` prints 3.13.x.
+- [B] `src/backend/pyproject.toml` + `uv.lock` + `.python-version` (3.13) exist; `requires-python = ">=3.13,<3.14"`; no `requirements.txt`; `uv sync --locked` works (lock matches `pyproject.toml`); `uv run python --version` prints 3.13.x.
 - [B] `app/` structure follows the standard; no second graph/LLM factory (`grep -rn "ChatOpenAI(" app | grep -v app/llm` is empty).
-- [B] No `os.environ`/`os.getenv` reads outside `app/config.py`, `app/prompts`, `app/observability` (`grep -rn "os.getenv\|os.environ" app`).
+- [B] No `os.environ`/`os.getenv` reads outside `app/config.py` and the allowed exceptions (HARD RULE 2: `app/prompts`, `app/observability`, the `${VAR}` expansion in `app/tools/mcp.py` / `app/a2a/client.py`). Must print nothing: `grep -rn "os.getenv\|os.environ" app | grep -v -e '^app/config.py:' -e '^app/prompts/' -e '^app/observability/' -e '^app/tools/mcp.py:.*environ.get(m.group(1))' -e '^app/a2a/client.py:.*environ.get(m.group(1))'`.
 - [B] `.env`, `.greennode.json` are in `.gitignore` and `.dockerignore`.
 - [B] `make check-creds` prints OK for IAM and LLM (secrets were filled in by the user, never pasted into chat or printed).
 - Every variable in `Settings` is in `.env.example`.
@@ -16,11 +16,9 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - Image built with `--platform linux/amd64`, runs as non-root.
 
 ## LLM
-- [B] LLMs are created only via `get_llm(task)` (`app/llm`); `LLM_MODEL` is the model's `path` on AIP.
-- Prod: the API key lives in the runtime's env file or Identity, not in the image.
-
-- Tiers: `summarize`/`router` use the small tier (if configured); the `large` tier has **at least 1 fallback** from a different model family for prod; every tier's model has been run through `make eval`.
-- Every LLM call goes through `get_llm("<task>")` (`grep -rn "ChatOpenAI(" app | grep -v app/llm` is empty).
+- [B] LLMs are created only via `get_llm(task)` (`app/llm`; the `ChatOpenAI(` grep above is empty); `LLM_MODEL` is the model's `path` on AIP. New flows are in `DEFAULT_TASK_TIERS`, new LLM-calling modules in `tests/conftest.py` `LLM_MODULES`.
+- Prod: the API key lives in the runtime's env file (rendered from the CI secret store), not in the image.
+- Tiers: `summarize`/`router`/`judge` use the small tier (the default when `LLM_MODEL_SMALL` is set); the `large` tier has **at least 1 fallback** from a different model family for prod; every tier's model has been run through `make eval`.
 
 ## Memory
 - [B] `MEMORY_BACKEND=agentbase` + `MEMORY_ID` in staging/prod (dev may use `inmemory` only with 1 replica — history is lost on restart).
@@ -30,7 +28,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 ## Tools / MCP
 - [B] Side-effect tools are in `HITL_TOOLS` (or the user confirmed in writing that it is not needed).
 - Prod MCP goes through the MCP Gateway, inbound `IAM` or `JWT`; secrets live in Identity (Secret Provider).
-- [B] The Gateway has a **Policy Group** attached (none attached ⇒ every tools/call returns 403); there is an ALLOW policy for the agent's principal `iam:<sub>` (taken from the startup log) with the exact action `<connector>__<tool>`.
+- [B] The Gateway has a **Policy Group** attached (none attached ⇒ every tools/call returns 403); there is an ALLOW policy with the exact action `<connector>__<tool>` for each principal that calls it: the developer's `iam:<sub>` (`make check-creds`, local runs) and **each environment's runtime** `iam:<sub>` (runtime logs `IAM principal …`, logged at startup by `log_iam_principal()` — only when an enabled `auth: "iam"` MCP server is configured — `/agentbase-build` Step 9b). Dev and prod use separate gateways/groups (≤ 10 policies per group).
 - [B] `mcp_servers.json` points to **each connector's connectUrl** (`<gateway endpoint>/<connector>`), not the gateway root, and every entry declares `auth` explicitly.
 - [B] `HITL_TOOLS` patterns all match a tool (`tools.collect.output.hitl_unmatched` is empty).
 - MCP servers in a VPC / data center go through a **Private** MCP Gateway (`references/private-networking.md`); they still authenticate every call.
@@ -38,7 +36,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - No duplicate tool names; a failing MCP server does not crash the agent (trace shows `mcp.list_tools` WARNING).
 
 ## Outbound credentials (if tools call external services) — `/agentbase-build-identity`
-- [B] Keys/tokens come from Access Control via `app/identity.py` helpers on an **inner** function; no credential in `.env`, code, tool parameters or traces.
+- [B] Keys/tokens for external services come from Access Control via `app/identity.py` helpers on an **inner** function; none of them in env files, code, tool parameters or traces (env files hold only the agent's own secrets — HARD RULE 5).
 - [B] Per-user credentials (3LO / delegated): `IDENTITY_CALLBACK_URL` is set per environment and listed in the identity's `allowedReturnUrls`; the tool returns the consent link (`AUTHORIZATION_REQUIRED`) instead of blocking.
 - [B] `make check-creds` shows `OK  Agent identity` locally; the runtime is bound to the identity that holds the providers.
 
@@ -50,7 +48,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] One request creates exactly 1 `agent.invoke` trace with user_id, session_id, tags, version.
 - Complete trace tree: `auth`, `tools.collect`, `mcp.list_tools`, `compress/context.compress`, `recall/memory.recall` (retriever), generations `llm.<task>.generate` (model attribute, usage, cost, thinking when the model reasons), tool observations, `hitl.*` when present.
 - Root `agent.invoke` input = user message, output = answer text; the only `agent` observations are the root and `a2a.<agent>`/`subagent.*`; no observation is named after a model or a per-request value.
-- `lf_trace.py --latest 3 --audit` (skill `agentbase-build-tracing`) reports no FAIL; WARNs are fixed or explained.
+- [B] `lf_trace.py --latest 3 --audit` (skill `agentbase-build-tracing`) reports no FAIL on real requests; WARNs are fixed or explained.
 - Generations have cost (GreenNode model prices declared in Langfuse) and `input_cache_read` if the provider returns it.
 - No tokens/API keys in traces (check 1 real trace).
 
@@ -71,16 +69,18 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - Agent Card has the correct URL, securitySchemes match `AUTH_MODE`; `POST /a2a` without auth ⇒ 401.
 - User B cannot GetTask user A's task (test `test_tasks_isolated_per_user`).
 - Client: a separate key per target agent; `ask_*` tools pass the user; tools that can take actions are in `HITL_TOOLS`.
+- Timeouts are nested (no startup WARNING about them): this agent's `A2A_TIMEOUT_S` ≥ the target's `REQUEST_TIMEOUT_S` + margin, and its own `REQUEST_TIMEOUT_S` > `A2A_TIMEOUT_S` + the LLM budget of the turn.
 
 ## Frontend (if any)
 - No secrets in `EXPO_PUBLIC_*`; OIDC uses PKCE; tokens in SecureStore.
 - All SSE events handled (`token`, `reset`, `interrupt`, `done`, `error`).
 
 ## Deploy
-- The deploy env file does not contain `GREENNODE_CLIENT_ID/SECRET/AGENT_IDENTITY` (injected) or `GREENNODE_ENDPOINT_URL` (reserved).
+- [B] `make check-env ENV_FILE=src/backend/.env.<env>` (or the `.example` CI uses) passes: strict KEY=VALUE, no quotes / inline comments / `export`, no `GREENNODE_*` (injected / reserved), no `AGENT_VERSION` (= image tag).
 - [B] The deploy env file sets `APP_ENV` (dev/staging/prod) — `local` is refused on the Runtime.
-- After deploy: health OK, 1 real request has a trace in Langfuse, clean logs (`/agentbase-monitor`).
-- [B] The runtime's identity, network mode (Public/Private) and endpoint are recorded in `.agentbase-state.json`.
+- After deploy: health OK, the latest version's `imageUrl` is the new tag, 1 real request has a trace in Langfuse with `release` = that tag, clean logs (`/agentbase-monitor`).
+- [B] After every update the new version keeps the previous network mode (VPC: same VPC/subnet/route CIDRs), IP Access Control and Inbound Auth (`/agentbase-build-deploy` Step 4).
+- [B] `.agentbase-state.json` → `environments.<env>` records `runtime_id`, `endpoint`, `image`, `network_mode`, `allowed_cidrs`, `inbound_auth`, `identity`, `memory_id`, `memory_strategy_id`, `llm_key_name`, `mcp_gateway`, `policy_group`, `principal`.
 - The agent's LLM API key is dedicated to this agent + environment and has a Protect & Govern **Rate Limit** (requests and tokens per day).
 - CI deploys with a dedicated service account (never a person's credentials); secrets live in the CI secret store; the rendered manifest is not committed (`references/iam-permissions.md`).
-- Teardown also revokes the deleted agent's **Orphaned** service account and its API keys.
+- Teardown follows the checklist in `/agentbase-build-deploy` (*Teardown checklist*): also gateways, Policy Groups, connectors, the **Orphaned** service account and inbound API key hashes — `/agentbase-teardown` alone does not remove them.

@@ -4,7 +4,14 @@ Source: [Private Networking](https://docs.greennode.ai/ai-stack/agent-base/priva
 
 ## Public vs Private
 
-Agent Runtime and MCP Gateway each have a network mode, chosen **at creation**:
+Agent Runtime and MCP Gateway each have a network mode — named differently in the APIs:
+
+| | Agent Runtime | MCP Gateway |
+|---|---|---|
+| API values | `networkConfig.mode`: `PUBLIC` \| **`VPC`** (+ `vpcId`, `subnetId`, `routeCidrs`) | `networkMode`: `PUBLIC` \| **`PRIVATE`** (+ `privateNetwork.vpcId` / `subnetId`) |
+| Change later | Yes — every runtime update sets it; switching recreates the endpoint (brief downtime) | No — sealed: delete and recreate the gateway |
+| Flavor | Must support `agent-runtime-vpc` for VPC (usually a `-vpc` variant) | Listed with `networkMode=PRIVATE&zoneId=…` |
+| Pitfall | An update **without** `networkConfig` makes the new version **PUBLIC** | — |
 
 | | Public (default) | Private |
 |---|---|---|
@@ -33,7 +40,9 @@ Prefer the **MCP Gateway** path: one governed entry point, per-tool policy, cred
 | Route CIDRs | optional — other subnets / the on-prem CIDR to reach | optional — same |
 | Flavor / Replicas | (runtime flavor / autoscaling as usual) | required, e.g. `general-2×4`, replicas for load |
 
-Through the skills: `/agentbase-deploy` (runtime) and `/agentbase-gateway` (gateway) with network mode Private + VPC/Subnet/Route CIDRs. Record the choice in `.agentbase-state.json`.
+Through the skills: `/agentbase-deploy` (runtime: `--network-mode VPC --vpc-id … --subnet-id … [--route-cidrs …]`; it validates the VPC — DNS enabled, no overlap with the AgentBase system CIDR) and `/agentbase-gateway` (gateway: `networkMode: PRIVATE`). Record the choice in `.agentbase-state.json` → `environments.<env>.network_mode`.
+
+**Every runtime update must re-send the network settings** (the update is a full replacement; omitted ⇒ PUBLIC). `/agentbase-deploy` re-passes the VPC flags after reading the latest version; the `grn` CLI (and so the scaffolded CI) cannot send `networkConfig` at all, so CI refuses to update a VPC runtime — deploy VPC environments with `/agentbase-deploy` and compare the new version with the previous one (`/agentbase-build-deploy` Step 4).
 
 ## On-prem over VPN (pattern from the sample)
 

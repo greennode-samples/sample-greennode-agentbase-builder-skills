@@ -26,6 +26,7 @@ The coding agent fills in this template **before writing code**, presents it to 
 - Which flow uses which tier (agent, router, summarize, judge, eval_judge, new business flows): ...
 - Adaptive routing: on / off — reason: ...
 - Reply language: ... (default: the user's language)
+- Data residency: may prompts/answers leave GreenNode? MaaS **Third-party** models forward each request to the vendor (Anthropic, OpenAI, Qwen…) — only **GreenNode self-host** models keep it on GreenNode infrastructure ([available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models), *Provider Type*). Allowed provider types per tier (incl. fallbacks): ...
 
 ## 5. Tools
 | Tool | Source (local / MCP server via Gateway / POC mock) | Read/Write | Needs HITL? | Credential (Identity provider) |
@@ -60,8 +61,9 @@ The coding agent fills in this template **before writing code**, presents it to 
 | MAX_TOOL_ROUNDS | | |
 
 ## 10. Non-functional
-- Sensitive data to mask in traces: ...
-- Network: Runtime Public / Private; MCP Gateway Public / Private (internal or on-prem MCP server? VPC Peering ready?)
+- Sensitive data to mask in traces: ... (default masks: email, VN phone, CCCD/CMND, card numbers with Luhn check — add business IDs)
+- Data residency: where may data go — LLM (provider type, §4), traces (`LANGFUSE_BASE_URL` defaults to Langfuse **Cloud** ⇒ self-hosted Langfuse in your VPC, reached from a VPC Runtime), memory (AgentBase Memory region), tool data (Private MCP Gateway)
+- Network: Runtime Public / VPC; MCP Gateway Public / Private (internal or on-prem MCP server? VPC Peering ready?)
 - Expected load / autoscaling: ... (replicas 1–10; MaaS 10 requests/min per account ⇒ whitelist needed?)
 - Cost guardrails: LLM key per agent per env, Rate Limit (requests/tokens per day), budget owner
 ```
@@ -83,7 +85,7 @@ The coding agent fills in this template **before writing code**, presents it to 
 | "only department A staff may use tool B" | Gateway Policy Group (`/agentbase-policy`) + inbound JWT | mcp + auth |
 | "use the user's Google/Slack account" | Identity OAuth2 3LO — `user_access_token` (consent link, non-blocking) | identity |
 | "call service X with our API key", "each user brings their own key" | Identity Static API Key (`agent_api_key`) / Delegated API Key (`user_api_key`) | identity |
-| "the data must stay in our network / data center" | Private MCP Gateway (VPC Peering; VPN for on-prem) + MCP server | mcp-server + mcp (`references/private-networking.md`) |
+| "the data must stay in our network / data center" | All of: GreenNode **self-host** models only (Third-party MaaS models forward requests to the vendor) incl. fallbacks; **self-hosted Langfuse** in the VPC (default `LANGFUSE_BASE_URL` is Langfuse Cloud) + VPC Runtime to reach it, or tracing off; PII masking on; Private MCP Gateway (VPC Peering; VPN for on-prem) + MCP server for internal data | llm + tracing + mcp-server + mcp (`references/private-networking.md`) |
 | "cap cost / usage per agent" | One LLM API key per agent per env + Protect & Govern Rate Limit, Usage & Budget | llm |
 | "mobile app", "chat interface" | Expo React Native | frontend |
 | "answers must be accurate", "must not make things up" | Eval dataset + correctness judge, consider the self-eval loop | eval |

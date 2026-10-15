@@ -29,15 +29,17 @@
    4. `collect_tools()` → local tools + memory tools + MCP tools (5-minute cache for non-per-user servers).
    5. `build_graph()` (cheap; built per request because tools may differ per user) with a shared checkpointer.
    6. Check whether a HITL interrupt is pending (chat ⇒ 409, resume ⇒ one is required).
-   7. `graph.ainvoke` / `graph.astream` with `configurable = {thread_id: session_id, actor_id: user_id}`.
+   7. `graph.ainvoke` / `graph.astream` with `configurable = {thread_id, actor_id: user_id, session_id}` (`memory/short_term.py::thread_config`): `session_id` is the raw session id (also the A2A `contextId`); `thread_id` is the checkpointer key — `user::session` with the in-memory backend — and is never sent to other services.
    8. Build the result from the graph OUTPUT (`__interrupt__` in the ainvoke/astream output — `aget_state` may miss it with AgentBase Memory) → `success` (response, tools_used) or `interrupted` (interrupt payload).
 3. Graph:
 
 ```
-START → compress → recall → [route] → agent ─┬─ no tool call ──▶ [reflect] ──▶ END
+START → compress → recall → [route] → agent ─┬─ no tool call ──▶ [reflect] ─┬─ pass / retries used ──▶ END
+                                   │                       └─ critique ─▶ agent (retry, REFLECTION_MAX_RETRIES)
                                    ├─ HITL tool ─▶ approval (interrupt) ─▶ tools ─▶ agent
                                    └─ regular tool ────────────────────▶ tools ─▶ agent
 ```
+`[route]` only with `LLM_ADAPTIVE_ROUTING`, `[reflect]` only with `REFLECTION_ENABLED` (skipped for "simple" turns when `REFLECTION_SKIP_SIMPLE`).
 
 ## 3. Module responsibilities (what you may change)
 
@@ -71,7 +73,7 @@ START → compress → recall → [route] → agent ─┬─ no tool call ─�
 
 ## 5. Common extensions
 
-- **Router / multi-agent within one agent:** `LLM_ADAPTIVE_ROUTING` provides a `route` node; for other business routers add a node using `get_llm("router")` + `with_structured_output`; sub-agents are subgraphs compiled **without** their own checkpointer (they share the parent graph's). An agent owned / deployed separately by another team ⇒ A2A.
+- **Router / multi-agent within one agent:** `LLM_ADAPTIVE_ROUTING` provides a `route` node; for other business routers add a node that calls `get_llm("<task>", schema=MyModel)` (a Pydantic model): `get_llm` applies structured output to **every model of the fallback chain** (`method="function_calling"` by default) and keeps tiers and tracing. Never call `.with_structured_output()` / `.bind_tools()` on what `get_llm` returns (tools go in `get_llm(task, tools=…)`): for internal tasks it is a wrapper runnable (`RunnableLambda`, for the trace layout), not a `ChatOpenAI`, so those methods fail — and they would bypass the fallbacks. For a cheap free-form classification, the JSON-prompt pattern of `app/llm/routing.py::classify` also works (prompt for JSON only → `re.search(r"\{.*\}", …)` → `json.loads` → validate → safe default on any error, inside `tracing.step(...)`). Add the new task to `DEFAULT_TASK_TIERS` and its module to `LLM_MODULES` (`tests/conftest.py`). Sub-agents are subgraphs compiled **without** their own checkpointer (they share the parent graph's). An agent owned / deployed separately by another team ⇒ A2A.
 - **RAG:** the retriever is a tool (`app/tools/`) or an MCP server; do not stuff documents into the system prompt.
 - **Background / batch jobs:** call `service.run_chat()` in-process (skips inbound auth) — internal jobs only.
 - **Multiple channels (Zalo/Telegram):** a channel is an adapter calling `/invocations`; if only a template chatbot is needed, consider OpenClaw (`/agentbase-deploy`).

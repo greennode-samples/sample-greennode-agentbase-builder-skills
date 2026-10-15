@@ -1,6 +1,6 @@
 # Decision guide — when to enable which component
 
-Principle: **build minimal by default; every enabled component must have a reason recorded in the Agent Spec.** The template ships code for every component, but optional components are all disabled via env. Every added layer brings latency, cost, attack surface and operational work.
+Principle: **build minimal by default; every enabled component must have a reason recorded in the Agent Spec.** The template ships code for every component, but optional components are all disabled via env. "Off" means **disabled via env, not removed**: the modules import each other (`app/tools` → `app/a2a`, the graph → `app/reflection` / `app/hitl`, `app/service` → `app/tools.mcp` / `app/hitl`…), so all ten backend skills' assets stay in the project; only `app/identity.py` (+ its test) may be deleted when no tool uses outbound credentials. Every added layer brings latency, cost, attack surface and operational work.
 
 ## 0. Always present (no decision needed)
 
@@ -22,7 +22,7 @@ Principle: **build minimal by default; every enabled component must have a reaso
 **Do not enable when**:
 - FAQ / document lookup: answers do not depend on the user.
 - One-off tasks (batch, stateless API), or an agent shared by a whole department under one account.
-- There is no data policy yet: you need user consent, a retention period (`eventExpiryDuration`), a right to deletion, and a list of data that must never be stored (health, finance, passwords…). State it explicitly in the system prompt.
+- There is no data policy yet: you need user consent, a retention period (`eventExpiryDuration`), a right to deletion (an enumeration runbook — `references/security.md` → *Right to erasure*), and a list of data that must never be stored (health, finance, passwords…). State it explicitly in the system prompt.
 
 **Choosing a strategy**: `USER_PREFERENCE` (preferences, form of address, language) → `SEMANTIC` (events/facts) → `CUSTOM` (only when specific business fields must be extracted, with a prompt). The template recalls from ONE strategy per agent (`MEMORY_STRATEGY_ID`).
 **Auto-recall vs tool**: `LTM_AUTO_RECALL=true` when every turn needs personalization. If it is only needed occasionally, disable auto-recall and let the LLM call `recall_memory` itself, saving 1 search per turn.
@@ -81,7 +81,7 @@ Details and measurements: `/agentbase-build-llm`.
 | Internal system, shared by many agents, needs policy/audit | **Build an MCP server** (`/agentbase-build-mcp-server`) + Custom Connector |
 | Needs per-user data in the target system | MCP server using OAuth 3LO or inbound JWT forwarding so `current_user()` comes from the token |
 | Internal document lookup (RAG), POC / ≤ a few dozen files | Local `search_knowledge`: drop `.md/.txt` into `app/knowledge/` (auto-registered when files exist) |
-| Prod RAG: many documents, semantic search, frequent updates | MCP server with a vector store, **keep the tool name `search_knowledge`** and the `[Source: …]` format |
+| Prod RAG: many documents, semantic search, frequent updates | MCP server with a vector store, **keep the tool name `search_knowledge`** (set `"prefix": false` on that server in `mcp_servers.json` — MCP tools are otherwise exposed as `<server>_<tool>`; a name collision fails `collect_tools`) and the `[Source: …]` format |
 | POC while the internal system has no API yet | Local mock adapter, **use the final tool name** (keeps `HITL_TOOLS`/eval), blocked in prod via a setting |
 | The system is only reachable inside your VPC or data center | MCP server + **Private MCP Gateway** (VPC Peering; VPN Site-to-Site for on-prem) — `references/private-networking.md`. Private Runtime only if agent code itself must call the internal API |
 

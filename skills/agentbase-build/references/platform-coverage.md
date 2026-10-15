@@ -11,15 +11,15 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 | Access Control / Identity (API key, OAuth2, delegated) | `/agentbase-identity` | `agentbase-build-identity` (`app/identity.py`: M2M + per-user, non-blocking 3LO), `-mcp-server` (connector OAuth) | 🧪 fake Identity API against SDK 1.0.3 source · ⏳ live 3LO round-trip |
 | MCP Gateway | `/agentbase-gateway` | `agentbase-build-mcp` | ✅ real calls through the gateway, IAM inbound |
 | MCP Connectors (catalog + custom) | — (API `GET /gateway/api/v1/mcp-connectors` not yet in the platform skill) | `agentbase-build-mcp`, `-mcp-server` (custom connector) | ✅ API read + real connector calls |
-| Policy Groups | `/agentbase-policy` | `agentbase-build-mcp` (principal `iam:<sub>`, action, deny guard) | ✅ real ALLOW/DENY · ⏳ policy not yet granted to the runtime principal |
+| Policy Groups | `/agentbase-policy` | `agentbase-build-mcp` (principal `iam:<sub>`, action, deny guard), `agentbase-build` Step 9b (runtime principal per environment) | ✅ real ALLOW/DENY · ⏳ policy not yet granted to the runtime principal |
 | Memory (events, records, strategies) | `/agentbase-memory` | `agentbase-build-memory`, `-hitl` | ✅ short/long-term, isolation, HITL on real memory |
 | AI Platform LLM (MaaS, API key, models) | `/agentbase-llm` | `agentbase-build-llm` (tiers, flows, fallback, routing) | ✅ 10 models, real fallback, prompt cache |
 | Protect & Govern — Rate limit | console | `-llm` (Rate Limit per API key / per model, MaaS 10 RPM account limit, one key per agent per env) | 📄 docs |
 | Sidecar LLM Proxy (`localhost:18080`) | — | `-llm` (needs verification) | 📄 not verified |
 | Private Networking (VPC Peering) | `/agentbase-deploy`, `/agentbase-gateway` | `agentbase-build` `references/private-networking.md`, `-deploy`, `-mcp`, `-mcp-server`; sample `greennode-samples/sample-onprem-mcp-vpn` | 📄 docs + sample |
 | Team & Permissions / Service Accounts | console / `/agentbase` | `agentbase-build` `references/iam-permissions.md`, `-deploy` (CI SA, reset-service-account, orphaned SAs) | 📄 docs |
-| GreenNode CLI (`grn`) / GreenNode MCP | docs | `-deploy` (`grn agentbase deploy up`, pinned install, manifest rules), scaffold `ci.yml` + `deploy/agent.yaml.tpl` | 🧪 actionlint + YAML render · ⏳ not run against a live account |
-| Teardown | `/agentbase-teardown` | `-deploy` (cleanup after tests) | 📄 |
+| GreenNode CLI (`grn`) / GreenNode MCP | docs | `-deploy` (`grn agentbase deploy up`, pinned install, manifest rules, network/security gate — grn cannot carry them), scaffold `ci.yml` + `deploy/` | 🧪 mock `grn` + YAML render · ⏳ not run against a live account |
+| Teardown | `/agentbase-teardown` (runtime, identity, memory, registry, API keys) | `-deploy` (*Teardown checklist*: also gateways, Policy Groups, connectors, orphaned SAs, API key hashes) | 📄 |
 | (off-platform) Langfuse | — | `agentbase-build-tracing`, `-eval` | ✅ self-hosted server v4.49: trace tree, cost, cache, reasoning, TTFT, prompt version, scores v3, dataset + experiment |
 | (off-platform) A2A | — (the platform has no A2A gateway) | `agentbase-build-a2a` | ✅ card, auth, isolation on runtime |
 | (off-platform) RN frontend | — | `agentbase-build-frontend` | 🧪 tsc + Android bundle · ⏳ OIDC with a real IdP |
@@ -30,13 +30,16 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 2. `greennode-agentbase` 1.0.3: `insert_memory_records_directly` needs a `MemoryRecordInsertDirectlyRequest` (the official sample passes a list ⇒ TypeError); `search` returns `list[dict]`.
 3. `AgentBaseMemoryEvents`: reading state right after an interrupt may miss the `__interrupt__` write, and the bridge inserts a fake ToolMessage ⇒ take the interrupt from the graph output, treat `next=('approval',)` as pending approval.
 4. SDK `IAMCredentials` falls back per field ⇒ mismatched ID/secret pair ⇒ 401 ⇒ `.greennode.json` is the only source locally.
-5. Each MCP Connector has its own `connectUrl` (`<gateway>/<connector>`); the gateway root is unusable; policy principal = `iam:<sub>` (not client_id); a gateway without a Policy Group ⇒ 403 for everything; policy deny comes back as a ToolException ⇒ the LLM retries unless there is a guard.
+5. Each MCP Connector has its own `connectUrl` (`<gateway>/<connector>`); the gateway root is unusable; policy principal = `iam:<sub>` (not client_id) — the developer's locally, the runtime service account's on AgentBase; a gateway without a Policy Group ⇒ 403 for everything; a policy deny comes back primarily as **HTTP 403** on `tools/call` ("No policy allows this request"; the MCP adapter raises an `ExceptionGroup[HTTPStatusError]`), sometimes as an MCP error "Request denied by policy." (`ToolException`) ⇒ the LLM retries unless there is a guard (`app/tools/mcp.py` handles both).
 6. GreenNode IAM does not publish JWKS ⇒ IAM tokens cannot be used as inbound JWT.
 7. Memory API: search query ≤ 1000 characters (400 if longer); checkpoint reads sometimes hang ~7 minutes with the SDK's default timeout/retry ⇒ 10s timeout, 3 retries (`MEMORY_MAX_RETRIES`), `REQUEST_TIMEOUT_S`.
 8. MaaS sometimes returns 503 (glm-5.3-flash) ⇒ a fallback model is mandatory for prod.
 9. Memory API limits 10 concurrent requests per IAM account (429), shared across all replicas ⇒ `MEMORY_MAX_CONCURRENCY` + retry backoff.
 10. Memory API concatenates `actorId`/`sessionId` straight into the path ⇒ a Session-Id containing `../` can point to another actor ⇒ the template validates Session-Id (`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`) at every entry point (invocations, A2A, eval).
 11. Memory record search by namespace is an **exact match**, not a prefix match (tested: parent namespace `/actors/` and another actor's prefix return 0 results) ⇒ no LTM leakage via parent namespaces.
+12. A runtime update is a full replacement and an omitted `networkConfig` makes the new version **PUBLIC** (endpoint recreated). `grn` v1.13.0 (manifest and `runtime update`) has no `networkConfig` / `allowedCidrs` / `inboundAuth` / `poc` fields, and `runtime.sh` has no flags for IP Access Control or Inbound Auth ⇒ CI refuses to update runtimes that use them; manual updates re-pass the VPC flags and are compared with the previous version (`agentbase-build-deploy`).
+13. `runtime.sh --env-file` (and `docker run --env-file`) read `KEY=VALUE` literally — quotes, inline comments and `export` end up in keys/values, unlike python-dotenv ⇒ `make check-env` (`deploy/env_file.py`).
+14. The platform docs roll back by pointing the DEFAULT endpoint at an older version; the platform skill reports 400 for DEFAULT ⇒ roll back with an update to the previous image + config.
 
 ## Open items (need the user's environment/decisions)
 

@@ -82,7 +82,8 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
 │                           metadata{request_id, llm_model_*, memory_backend, memory_id, auth_mode, hitl_tools, ...,
 │                                    tools_used}
 ├─ auth [event]             output{user_id, mode, iss, aud, exp, client}      (NO token)
-├─ tools.collect [span]     output{local, memory, mcp, mcp_errors} · level WARNING if MCP fails
+├─ tools.collect [span]     output{local, memory, mcp, a2a, mcp_errors, hitl_unmatched} · metadata{tool_count} ·
+│   │                       level WARNING if an MCP server fails or a HITL_TOOLS pattern matches no tool
 │   └─ mcp.list_tools [span] input{server, transport, url, auth, cached} · output[tool names]
 ├─ memory.checkpoint_load [span] output{messages, next, interrupts} · metadata{backend, session_id, kind}
 └─ agent.graph [chain]      (CallbackHandler; LangGraph chains carry NO input/output — see Session view)
@@ -110,6 +111,9 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     │       ├─ memory.save [span]    (tool remember) · memory.recall [retriever] (tool recall_memory)
     │       ├─ knowledge.search [retriever] (tool search_knowledge) output{hits[file, heading, score]}
     │       ├─ a2a.<agent> [agent]   {agent, url, message, state, text} (tool ask_<agent>)
+    │       ├─ identity.<kind> [span] input{provider} · output{status: ok|authorization_required} (WARNING when
+    │       │                        consent is needed) — kind = agent_api_key | agent_access_token | user_api_key |
+    │       │                        user_access_token (app/identity.py helpers; never the credential)
     │       └─ mcp.policy_denied [event, WARNING]  {server, tool} — blocked by the Gateway's Policy Group
     └─ reflect [chain]               reflection.judge [evaluator] → llm.judge [chain] → llm.judge.generate
     (internal LLM calls — router, summarize, judge — sit one level deeper than the agent's llm.<task>.generate)
