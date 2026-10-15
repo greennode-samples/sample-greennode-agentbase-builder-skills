@@ -62,6 +62,7 @@ Every failure names the file, the line and the fix. Fix the doc or the template;
 ```
 <project>/
 ├── Makefile  README.md  .agentbase-state.json   # state: standard/scaffold version + resource IDs per environment
+├── .agentbase-template.json   # owner class + template hash per generated file (scripts/upgrade.py upgrades the project)
 ├── .github/workflows/ci.yml   # lint + test, eval gate, manual deploy/redeploy (grn: deploy up first, runtime update after)
 ├── deploy/agent.yaml.tpl      # AgentBase manifest, rendered in CI
 ├── deploy/render_runtime_spec.py  # merges .env.<env>.example + CI secrets, derives the `runtime update` spec
