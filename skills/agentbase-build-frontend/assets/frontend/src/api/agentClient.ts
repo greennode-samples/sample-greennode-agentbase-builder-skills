@@ -3,54 +3,35 @@
 import { fetch as expoFetch } from 'expo/fetch';
 
 import { env } from '../config/env';
+import { type Body, type ChatResult, type Interrupt, interruptFrom, isTerminal, type StreamEvent } from './contract';
+import { createSseParser } from './sse';
 
-export type PendingToolCall = { id: string; name: string; args: Record<string, unknown> };
-export type Interrupt = {
-  id: string | null;
-  type: 'tool_approval';
-  message: string;
-  tool_calls: PendingToolCall[];
-};
-export type Decision = {
-  tool_call_id: string;
-  action: 'approve' | 'edit' | 'reject';
-  args?: Record<string, unknown>;
-  reason?: string;
-};
-
-export type ChatResult =
-  | {
-      status: 'success';
-      response: string;
-      tools_used: string[];
-      session_id: string;
-      trace_id: string | null;
-      feedback_token: string | null; // HMAC(user, trace) — required when sending feedback
-    }
-  | {
-      status: 'interrupted';
-      interrupt: Interrupt;
-      session_id: string;
-      trace_id: string | null;
-      feedback_token: string | null;
-    };
-
-export type StreamEvent =
-  | { event: 'token'; data: string }
-  | { event: 'tool_start'; name: string }
-  | { event: 'tool_end'; name: string; status?: string }
-  | { event: 'reset'; reason: string }
-  | ({ event: 'interrupt' } & Extract<ChatResult, { status: 'interrupted' }>)
-  | ({ event: 'done' } & Extract<ChatResult, { status: 'success' }>)
-  | { event: 'error'; message: string; status?: number };
+export * from './contract';
+export { createSseParser } from './sse';
 
 export class AgentError extends Error {
-  constructor(public status: number, message: string) {
+  /** 409 "an approval is pending": that approval (show it again instead of a dead end) */
+  readonly interrupt?: Interrupt;
+  /** no data from the agent for `EXPO_PUBLIC_IDLE_TIMEOUT_S` */
+  readonly timeout: boolean;
+  constructor(
+    public status: number,
+    message: string,
+    extra: { interrupt?: Interrupt; timeout?: boolean } = {},
+  ) {
     super(message);
+    this.interrupt = extra.interrupt;
+    this.timeout = !!extra.timeout;
   }
 }
 
 type Ctx = { sessionId: string; userId: string | null; accessToken: string | null };
+export type RequestOptions = {
+  /** cancel the request (Stop, New conversation) */
+  signal?: AbortSignal;
+  /** abort when NO data arrives for this long (re-armed on every chunk); 0 = no limit */
+  idleTimeoutMs?: number;
+};
 
 function headers({ sessionId, userId, accessToken }: Ctx): Record<string, string> {
   const h: Record<string, string> = {
@@ -72,97 +53,122 @@ async function post(body: unknown, ctx: Ctx, accept = 'application/json', signal
   });
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
+    let interrupt: Interrupt | undefined;
     try {
-      msg = ((await res.json()) as { error?: string }).error ?? msg;
+      const err = (await res.json()) as { error?: unknown };
+      if (typeof err.error === 'string' && err.error) msg = err.error;
+      interrupt = interruptFrom(err); // 409 while an approval is pending: details.interrupt
     } catch {}
-    throw new AgentError(res.status, msg);
+    throw new AgentError(res.status, msg, { interrupt });
   }
   return res;
 }
 
-type Body =
-  | { type: 'chat'; message: string }
-  | { type: 'resume'; decisions: Decision[]; interrupt_id?: string | null };
+/** AbortController linked to the caller's signal + an inactivity timer (`kick()` re-arms it on every chunk). */
+function watchdog(opts: RequestOptions) {
+  const ctrl = new AbortController();
+  const idleMs = opts.idleTimeoutMs ?? 0;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onAbort = () => ctrl.abort();
+  if (opts.signal?.aborted) ctrl.abort();
+  else opts.signal?.addEventListener('abort', onAbort);
+  const kick = () => {
+    if (!idleMs) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, idleMs);
+  };
+  kick();
+  return {
+    signal: ctrl.signal,
+    kick,
+    /** the abort caused by the idle timer ⇒ a readable AgentError; anything else unchanged */
+    wrap: (err: unknown) =>
+      timedOut
+        ? new AgentError(0, `No response from the agent for ${Math.round(idleMs / 1000)}s — stopped waiting.`, {
+            timeout: true,
+          })
+        : err,
+    dispose() {
+      if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+    },
+  };
+}
 
-export const chatBody = (message: string): Body => ({ type: 'chat', message });
-// interrupt_id: backend rejects (409) if the interrupt was already handled — prevents a double-tap running the tool twice
-export const resumeBody = (decisions: Decision[], interruptId?: string | null): Body => ({
-  type: 'resume',
-  decisions,
-  interrupt_id: interruptId ?? null,
-});
-
-// `signal` (AbortController): cancel the request, e.g. when the user starts a new conversation mid-turn.
-export async function invoke(body: Body, ctx: Ctx, signal?: AbortSignal): Promise<ChatResult> {
-  const res = await post({ ...body, stream: false }, ctx, 'application/json', signal);
-  return (await res.json()) as ChatResult;
+export async function invoke(body: Body, ctx: Ctx, opts: RequestOptions = {}): Promise<ChatResult> {
+  const wd = watchdog(opts);
+  try {
+    const res = await post({ ...body, stream: false }, ctx, 'application/json', wd.signal);
+    return (await res.json()) as ChatResult;
+  } catch (err) {
+    throw wd.wrap(err);
+  } finally {
+    wd.dispose();
+  }
 }
 
 /**
- * Incremental SSE parser (WHATWG event-stream framing): LF, CRLF or CR line endings (a CRLF split across two
- * chunks included), an event ends at a blank line, several `data:` lines are joined with "\n", `:` comment /
- * keep-alive lines and other fields are ignored. `end()` flushes a last event that lacks the closing blank line
- * (some proxies strip it) — otherwise the final `done`/`interrupt` would be lost.
+ * Streams one turn. Reading STOPS at the first final event (`done` / `interrupt` / `error`): anything after it —
+ * including a transport error while the connection closes — must never overwrite that result. If `onEvent` throws,
+ * the stream is cancelled too and the error propagates.
  */
-export function createSseParser(onData: (data: string) => void) {
-  let buffer = '';
-  let data: string[] = [];
-  const dispatch = () => {
-    if (data.length) onData(data.join('\n'));
-    data = [];
-  };
-  const line = (l: string) => {
-    if (l === '') return dispatch();
-    if (l.startsWith(':')) return;
-    const colon = l.indexOf(':');
-    const field = colon < 0 ? l : l.slice(0, colon);
-    const value = colon < 0 ? '' : l.slice(colon + 1).replace(/^ /, '');
-    if (field === 'data') data.push(value);
-  };
-  return {
-    push(chunk: string) {
-      buffer += chunk;
-      const held = buffer.endsWith('\r'); // maybe the first half of a CRLF: decide when the next chunk arrives
-      const lines = (held ? buffer.slice(0, -1) : buffer).split(/\r\n|\r|\n/);
-      buffer = lines.pop()! + (held ? '\r' : '');
-      lines.forEach(line);
-    },
-    end() {
-      if (buffer) line(buffer.replace(/\r$/, ''));
-      buffer = '';
-      dispatch();
-    },
-  };
-}
-
 export async function invokeStream(
   body: Body,
   ctx: Ctx,
   onEvent: (e: StreamEvent) => void,
-  signal?: AbortSignal,
+  opts: RequestOptions = {},
 ): Promise<void> {
-  const res = await post({ ...body, stream: true }, ctx, 'text/event-stream', signal);
-  const reader = res.body?.getReader();
-  if (!reader) throw new AgentError(0, 'Streaming not supported on this platform');
-  const parser = createSseParser((data) => {
-    let event: StreamEvent;
-    try {
-      event = JSON.parse(data) as StreamEvent;
-    } catch {
-      // Truncated/garbled frame: skip it (the caller notices a missing final event) instead of killing the stream
-      if (__DEV__) console.warn('[agent] unparsable SSE frame skipped:', data.slice(0, 200));
-      return;
+  const wd = watchdog(opts);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let eof = false;
+  try {
+    const res = await post({ ...body, stream: true }, ctx, 'text/event-stream', wd.signal);
+    reader = res.body?.getReader();
+    if (!reader) throw new AgentError(0, 'Streaming not supported on this platform');
+    let terminal = false;
+    const parser = createSseParser((data) => {
+      if (terminal) return; // nothing after the final event
+      let event: StreamEvent;
+      try {
+        event = JSON.parse(data) as StreamEvent;
+      } catch {
+        event = null as unknown as StreamEvent;
+      }
+      if (!event || typeof event !== 'object') {
+        // Truncated/garbled frame: skip it (the caller notices a missing final event) instead of killing the stream
+        if (__DEV__) console.warn('[agent] unparsable SSE frame skipped:', data.slice(0, 200));
+        return;
+      }
+      if (isTerminal(event)) terminal = true;
+      onEvent(event);
+    });
+    const decoder = new TextDecoder();
+    while (!terminal) {
+      const { value, done } = await reader.read();
+      wd.kick();
+      if (done) {
+        eof = true;
+        parser.push(decoder.decode()); // flush a trailing partial UTF-8 sequence
+        parser.end();
+        break;
+      }
+      parser.push(decoder.decode(value, { stream: true }));
     }
-    onEvent(event);
-  });
-  const decoder = new TextDecoder();
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    parser.push(decoder.decode(value, { stream: true }));
+  } catch (err) {
+    throw wd.wrap(err);
+  } finally {
+    wd.dispose();
+    if (reader && !eof) {
+      // final event received (or error): stop reading and release the connection
+      try {
+        void reader.cancel().catch(() => undefined);
+      } catch {}
+    }
   }
-  parser.push(decoder.decode()); // flush a trailing partial UTF-8 sequence
-  parser.end();
 }
 
 export async function sendFeedback(

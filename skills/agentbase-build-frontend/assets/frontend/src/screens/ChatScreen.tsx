@@ -1,7 +1,6 @@
-import * as Crypto from 'expo-crypto';
-import React, { useCallback, useRef, useState } from 'react';
+import Constants from 'expo-constants';
+import React, { useRef } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -12,216 +11,108 @@ import {
   View,
 } from 'react-native';
 
-import {
-  AgentError,
-  chatBody,
-  type ChatResult,
-  type Decision,
-  type Interrupt,
-  invoke,
-  invokeStream,
-  resumeBody,
-  sendFeedback,
-} from '../api/agentClient';
-import { useAuth } from '../auth/AuthProvider';
+import type { Interrupt } from '../api/agentClient';
+import { useConversation } from '../chat/ConversationProvider';
 import { ApprovalCard } from '../components/ApprovalCard';
 import { MessageBubble, type UiMessage } from '../components/MessageBubble';
 import { env } from '../config/env';
 
-type Body = ReturnType<typeof chatBody>;
-// ok: done/interrupt received · conflict: 409 — the backend has no such pending approval (already handled / expired)
-// failed: network, 5xx, dropped stream… · stale: "New" replaced the conversation while the request was in flight
-type Outcome = 'ok' | 'conflict' | 'failed' | 'stale';
+// Insets without an extra dependency: the status bar height (edge-to-edge on Android, notch on iOS) at the top and
+// room for the home indicator / gesture bar at the bottom. Exact insets: react-native-safe-area-context (SKILL.md).
+const TOP_INSET = Constants.statusBarHeight ?? 0;
+const BOTTOM_INSET = Platform.OS === 'web' ? 0 : 20;
 
-const APPROVAL_GONE = 'ℹ️ This approval request was already handled or has expired — you can keep chatting.';
+// A new interrupt (new id) must get a fresh card: choices / edits / reasons of the previous one never carry over
+const cardKey = (i: Interrupt) => i.id ?? i.tool_calls.map((t) => t.id).join(',');
 
 export function ChatScreen() {
-  const { userId, getAccessToken, signOut } = useAuth();
-  // 1 session = 1 conversation (short-term memory). "New" => new session.
-  const [sessionId, setSessionId] = useState(() => Crypto.randomUUID());
-  const [messages, setMessages] = useState<UiMessage[]>([]);
-  const [pending, setPending] = useState<Interrupt | null>(null);
-  const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
+  const c = useConversation();
+  const { state, busy } = c;
   const listRef = useRef<FlatList<UiMessage>>(null);
-  // Bumped by "New": callbacks of a request from the previous conversation are ignored (no late interrupt card)
-  const conversation = useRef(0);
-  const inflight = useRef<AbortController | null>(null);
-
-  const patch = (id: string, fn: (m: UiMessage) => UiMessage) =>
-    setMessages((ms) => ms.map((m) => (m.id === id ? fn(m) : m)));
-
-  const finish = (replyId: string, r: ChatResult) => {
-    if (r.status === 'interrupted') {
-      setPending(r.interrupt);
-      patch(replyId, (m) => ({ ...m, text: r.interrupt.message || 'Waiting for your confirmation…', pending: false }));
-    } else {
-      patch(replyId, (m) => ({
-        ...m,
-        text: r.response,
-        traceId: r.trace_id,
-        feedbackToken: r.feedback_token,
-        pending: false,
-      }));
-    }
-  };
-
-  // Run one turn (chat or resume), streaming or not
-  const run = useCallback(
-    async (body: Body | ReturnType<typeof resumeBody>): Promise<Outcome> => {
-      const gen = conversation.current;
-      const live = () => gen === conversation.current;
-      const abort = new AbortController();
-      inflight.current = abort;
-      setBusy(true);
-      let outcome: Outcome = 'ok';
-      const replyId = Crypto.randomUUID();
-      setMessages((ms) => [...ms, { id: replyId, role: 'assistant', text: '', pending: true, tools: [] }]);
-      const fail = (status: number | undefined, message: string) => {
-        outcome = status === 409 ? 'conflict' : 'failed';
-        if (status === 401) void signOut();
-        const text = status === 409 && body.type === 'resume' ? APPROVAL_GONE : `⚠️ ${message}`;
-        patch(replyId, (m) => ({ ...m, text, pending: false }));
-      };
-      try {
-        const ctx = { sessionId, userId, accessToken: await getAccessToken() };
-        if (!live()) return 'stale';
-        if (!env.streaming) {
-          const r = await invoke(body, ctx, abort.signal);
-          if (!live()) return 'stale';
-          finish(replyId, r);
-          return 'ok';
-        }
-        let ended = false; // done / interrupt / error received
-        await invokeStream(
-          body,
-          ctx,
-          (e) => {
-            if (!live()) return;
-            switch (e.event) {
-              case 'token':
-                patch(replyId, (m) => ({ ...m, text: m.text + e.data }));
-                break;
-              case 'reset': // self-eval requested a new answer
-                patch(replyId, (m) => ({ ...m, text: '' }));
-                break;
-              case 'tool_start':
-                patch(replyId, (m) => ({ ...m, tools: [...(m.tools ?? []), e.name] }));
-                break;
-              case 'interrupt':
-              case 'done':
-                ended = true;
-                finish(replyId, e as unknown as ChatResult);
-                break;
-              case 'error': // in-stream errors carry the HTTP-like status (409, 504…)
-                ended = true;
-                fail(e.status, e.message);
-                break;
-            }
-          },
-          abort.signal,
-        );
-        if (!live()) return 'stale';
-        if (!ended) {
-          // Stream closed without a final event (network drop, proxy timeout) — never leave the bubble pending
-          outcome = 'failed';
-          patch(replyId, (m) => ({
-            ...m,
-            text: `${m.text}\n⚠️ Connection closed before the answer completed.`,
-            pending: false,
-          }));
-        }
-      } catch (err) {
-        if (!live()) return 'stale'; // aborted by "New"
-        fail(err instanceof AgentError ? err.status : undefined, err instanceof Error ? err.message : String(err));
-      } finally {
-        if (inflight.current === abort) inflight.current = null;
-        if (live()) setBusy(false);
-      }
-      return outcome;
-    },
-    [sessionId, userId, getAccessToken, signOut],
-  );
-
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || busy || pending) return;
-    setInput('');
-    setMessages((ms) => [...ms, { id: Crypto.randomUUID(), role: 'user', text }]);
-    await run(chatBody(text));
-  }, [input, busy, pending, run]);
-
-  const decide = useCallback(
-    async (decisions: Decision[]) => {
-      const current = pending;
-      setPending(null);
-      const outcome = await run(resumeBody(decisions, current?.id));
-      // Network / 5xx / dropped stream ⇒ the backend most likely still waits: show the card again to retry.
-      // 409 ⇒ it does NOT (handled by a request whose answer we lost, double submit, expired): drop the card —
-      // re-showing it would 409 forever and lock the composer.
-      if (outcome === 'failed') setPending(current);
-    },
-    [run, pending],
-  );
-
-  const onFeedback = useCallback(
-    async (m: UiMessage, score: -1 | 1) => {
-      if (!m.traceId || !m.feedbackToken) return;
-      patch(m.id, (x) => ({ ...x, feedback: score }));
-      try {
-        const ctx = { sessionId, userId, accessToken: await getAccessToken() };
-        await sendFeedback(m.traceId, m.feedbackToken, score, ctx);
-      } catch {
-        // best effort (offline, token refresh failed…)
-      }
-    },
-    [sessionId, userId, getAccessToken],
-  );
-
-  const newSession = () => {
-    conversation.current += 1; // late events of the old conversation are dropped
-    inflight.current?.abort();
-    inflight.current = null;
-    setBusy(false);
-    setSessionId(Crypto.randomUUID());
-    setMessages([]);
-    setPending(null);
-  };
+  const notice = !busy && !state.pending ? state.notice : null;
 
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      // Android (SDK 57) is edge-to-edge: the window is no longer resized for the keyboard ⇒ pad on both platforms
+      behavior={Platform.OS === 'web' ? undefined : 'padding'}
     >
-      <View style={styles.header}>
-        <Text style={styles.title}>__PROJECT_NAME__</Text>
-        <Pressable onPress={newSession}>
-          <Text style={styles.link}>New</Text>
-        </Pressable>
+      <View style={[styles.header, { paddingTop: TOP_INSET + 12 }]}>
+        <Text style={styles.title} numberOfLines={1}>
+          __PROJECT_NAME__
+        </Text>
+        <View style={styles.headerActions}>
+          <Pressable onPress={c.newConversation} accessibilityRole="button" accessibilityLabel="New conversation">
+            <Text style={styles.link}>New</Text>
+          </Pressable>
+          {env.authMode === 'jwt' && (
+            <Pressable onPress={c.signOut} accessibilityRole="button">
+              <Text style={styles.link}>Sign out</Text>
+            </Pressable>
+          )}
+        </View>
       </View>
       <FlatList
         ref={listRef}
-        data={messages}
+        data={state.messages}
         keyExtractor={(m) => m.id}
-        renderItem={({ item }) => <MessageBubble message={item} onFeedback={onFeedback} />}
+        renderItem={({ item }) => <MessageBubble message={item} onFeedback={c.feedback} />}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
         contentContainerStyle={{ paddingVertical: 8 }}
+        keyboardShouldPersistTaps="handled"
         ListFooterComponent={
-          pending ? <ApprovalCard interrupt={pending} onSubmit={decide} busy={busy} /> : null
+          state.pending ? (
+            <ApprovalCard
+              key={cardKey(state.pending)}
+              interrupt={state.pending}
+              note={state.pendingNote}
+              onSubmit={c.decide}
+              busy={busy}
+            />
+          ) : null
         }
       />
-      <View style={styles.composer}>
+      {notice && (
+        <View style={styles.notice} accessibilityLiveRegion="polite">
+          <Text style={styles.noticeText}>{notice.text}</Text>
+          <Pressable
+            onPress={notice.action === 'retry' ? c.retry : c.newConversation}
+            accessibilityRole="button"
+            style={styles.noticeBtn}
+          >
+            <Text style={styles.link}>{notice.action === 'retry' ? 'Retry' : 'Start new conversation'}</Text>
+          </Pressable>
+          <Pressable onPress={c.dismissNotice} accessibilityRole="button" accessibilityLabel="Dismiss">
+            <Text style={styles.dismiss}>✕</Text>
+          </Pressable>
+        </View>
+      )}
+      <View style={[styles.composer, { paddingBottom: 8 + BOTTOM_INSET }]}>
         <TextInput
           style={styles.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder={pending ? 'Please confirm the request above…' : 'Type a message…'}
+          value={c.input}
+          onChangeText={c.setInput}
+          placeholder={state.pending ? 'Please confirm the request above…' : 'Type a message…'}
+          accessibilityLabel="Message"
           multiline
-          editable={!busy && !pending}
+          editable={!state.pending}
         />
-        <Pressable onPress={send} disabled={busy || !!pending} style={styles.send}>
-          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.sendText}>Send</Text>}
-        </Pressable>
+        {busy ? (
+          // Stop aborts this turn only — the session (and its memory) is kept
+          <Pressable onPress={c.stop} style={[styles.send, styles.stop]} accessibilityRole="button">
+            <Text style={styles.sendText}>Stop</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            onPress={c.send}
+            disabled={!!state.pending || !c.input.trim()}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !!state.pending || !c.input.trim() }}
+            style={[styles.send, (!!state.pending || !c.input.trim()) && { opacity: 0.5 }]}
+          >
+            <Text style={styles.sendText}>Send</Text>
+          </Pressable>
+        )}
       </View>
     </KeyboardAvoidingView>
   );
@@ -230,7 +121,6 @@ export function ChatScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   header: {
-    paddingTop: 56,
     paddingHorizontal: 16,
     paddingBottom: 12,
     flexDirection: 'row',
@@ -239,8 +129,22 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
   },
-  title: { fontSize: 18, fontWeight: '600' },
+  headerActions: { flexDirection: 'row', gap: 16 },
+  title: { fontSize: 18, fontWeight: '600', flexShrink: 1 },
   link: { color: '#1f6feb', fontSize: 15 },
+  notice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#fff4e6',
+    borderTopWidth: 1,
+    borderTopColor: '#ffd8a8',
+  },
+  noticeText: { flex: 1, color: '#7c4a03' },
+  noticeBtn: { paddingVertical: 4 },
+  dismiss: { color: '#7c4a03', fontSize: 16, paddingHorizontal: 4 },
   composer: { flexDirection: 'row', padding: 8, gap: 8, borderTopWidth: 1, borderTopColor: '#eee' },
   input: {
     flex: 1,
@@ -254,5 +158,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   send: { backgroundColor: '#1f6feb', borderRadius: 10, paddingHorizontal: 16, justifyContent: 'center' },
+  stop: { backgroundColor: '#e03131' },
   sendText: { color: '#fff', fontWeight: '600' },
 });
