@@ -949,6 +949,8 @@ def resolve_template_path(p: str) -> bool:
             return (ROOT_TPL / ROOT_MAP[p]).exists()
         if any(k.startswith(p.rstrip("/") + "/") for k in ROOT_MAP):  # deploy/, .github/workflows/
             return True
+        if any(ch in p for ch in "*?[") and any(fnmatch.fnmatchcase(k, p) for k in ROOT_MAP):  # deploy/*
+            return True
         bases = [
             ROOT,
             SKILLS,
