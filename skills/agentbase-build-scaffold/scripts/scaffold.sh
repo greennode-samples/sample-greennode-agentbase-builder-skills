@@ -175,5 +175,6 @@ echo "✔ Scaffolded '$NAME' at $TARGET (standard $STANDARD_VERSION, skills $SCA
 if [[ $SYNC -eq 0 ]]; then
   echo "  ⚠ --no-sync: no uv.lock yet — run 'cd src/backend && uv lock && uv sync' before make test / docker-build."
 fi
-echo "  Next: YOU fill in src/backend/.env (LLM_API_KEY, LLM_MODEL…) and src/backend/.greennode.json"
-echo "        (copy .greennode.json.example) — never paste secrets into a chat — then: make check-creds → make dev"
+echo "  Next: in YOUR own terminal (a coding agent cannot type into it), run: make set-secret — hidden prompt for"
+echo "        the IAM client_id/secret (→ src/backend/.greennode.json) and LLM_API_KEY (→ src/backend/.env)."
+echo "        Never paste secrets into a chat. Set LLM_MODEL in src/backend/.env, then: make check-creds → make dev"

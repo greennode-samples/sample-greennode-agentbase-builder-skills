@@ -71,7 +71,29 @@ def test_all_ok_shows_principal_and_no_secret(workdir, monkeypatch, capsys):
 def test_missing_iam_file_fails(workdir, monkeypatch, capsys):
     _fake_http(monkeypatch)
     assert check_creds.main() == 1
-    assert ".greennode.json.example" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "make set-secret NAME=iam" in out  # the user's terminal, never "paste it here"
+
+
+@pytest.mark.parametrize(
+    ("kw", "name"),
+    [({"iam": 401}, "iam"), ({"llm": 401}, "LLM_API_KEY"), ({"langfuse": 401}, "langfuse")],
+)
+def test_rejected_credentials_point_to_set_secret(workdir, monkeypatch, capsys, kw, name):
+    _creds_file(workdir)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", SECRETS["LANGFUSE_SECRET_KEY"])
+    _fake_http(monkeypatch, **kw)
+    assert check_creds.main() == 1
+    assert f"make set-secret NAME={name}" in capsys.readouterr().out
+
+
+def test_missing_llm_key_and_model_are_told_apart(workdir, monkeypatch, capsys):
+    _creds_file(workdir)
+    _fake_http(monkeypatch)
+    monkeypatch.setenv("LLM_API_KEY", "")
+    assert check_creds.main() == 1
+    assert "LLM_API_KEY not set in .env" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

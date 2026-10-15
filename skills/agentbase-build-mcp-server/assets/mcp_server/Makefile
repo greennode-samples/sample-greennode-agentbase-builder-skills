@@ -3,12 +3,18 @@ IMAGE ?= __SERVER_NAME__
 TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 # PORT=8081 when a local agent (`make dev` of the agent) already uses 8080: `make dev PORT=8081`, `make tools PORT=8081`
 URL ?= http://localhost:$(or $(PORT),8080)/mcp
+# A variable given on the make command line only (NAME, LIST… may also exist in the environment, e.g. WSL sets NAME)
+cli = $(if $(filter command line,$(origin $(1))),$($(1)))
 
-.PHONY: setup dev test lint fmt lock tools call inspector docker-build docker-run
+.PHONY: setup set-secret dev test lint fmt lock tools call inspector docker-build docker-run
 
 setup:            ## Install deps and create .env (local, MCP_AUTH_MODE=none) if missing
 	uv sync
 	@test -f .env || (cp .env.example .env && echo "created .env from .env.example")
+
+set-secret:       ## YOU run it in your own terminal: hidden prompt → .env (MCP_BACKEND_TOKEN…), never echoed: make set-secret [NAME=…] [ENV_FILE=.env.<env>] [LIST=1]
+	@# python3 + stdlib only (works before `make setup`). STDIN=1 reads ONE value from a pipe (secret managers), YES=1 replaces it
+	@python3 scripts/set_secret.py --env-file "$(or $(call cli,ENV_FILE),.env)" --name "$(call cli,NAME)" $(if $(call cli,LIST),--list) $(if $(call cli,STDIN),--stdin) $(if $(call cli,YES),--yes)
 
 dev:              ## Run the server locally on :8080 (MCP endpoint /mcp); PORT=8081 to run next to a local agent
 	$(if $(PORT),MCP_PORT=$(PORT) MCP_RESOURCE_URL=http://localhost:$(PORT)/mcp) uv run python server.py

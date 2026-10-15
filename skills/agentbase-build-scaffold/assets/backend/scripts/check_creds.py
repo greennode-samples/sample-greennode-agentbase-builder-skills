@@ -4,10 +4,12 @@
 
 A CLI tool, not app runtime code — hence it lives outside app/ and may read the environment directly.
 
-The USER fills these files in their editor (never paste secrets into a chat with a coding agent):
-    .greennode.json  IAM service account {"client_id", "client_secret"}  — /agentbase (IAM setup)
-    .env             LLM_API_KEY, LLM_MODEL (+ LLM_MODEL_* tiers, fallbacks) — /agentbase-llm
-                     LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY (optional) — Langfuse project settings
+The USER sets the secrets with `make set-secret` in their own terminal (hidden input, scripts/set_secret.py) — never
+by pasting them into a chat with a coding agent, which cannot type into that prompt:
+    .greennode.json  IAM service account {"client_id", "client_secret"}  — /agentbase (IAM setup)   NAME=iam
+    .env             LLM_API_KEY — /agentbase-llm (it can save the key itself)                    NAME=LLM_API_KEY
+                     LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY (optional) — Langfuse project      NAME=langfuse
+                     LLM_MODEL (+ LLM_MODEL_* tiers, fallbacks) are not secrets: plain .env values
 Every model the agent may call is pinged once (a key can be valid while one tier's model is not enabled for it).
 Exit code 1 if a required credential is missing or rejected (a fallback model failing is a WARN).
 """
@@ -25,6 +27,7 @@ from dotenv import dotenv_values
 from app.config import GREENNODE_LLM_BASE_URL, get_settings, normalize_iam_env
 
 Result = tuple[str, str]  # (status: OK | FAIL | WARN | SKIP, detail)
+SET = "YOU run `make set-secret NAME={}` in your own terminal"  # hint: never "paste it in the chat"
 TIER_NAMES = ("reasoning", "large", "small")
 
 
@@ -36,10 +39,7 @@ def _env() -> dict[str, str]:
 def check_iam() -> Result:
     normalize_iam_env()
     if not (os.getenv("GREENNODE_CLIENT_ID") and os.getenv("GREENNODE_CLIENT_SECRET")):
-        return (
-            "FAIL",
-            "not configured — copy .greennode.json.example to .greennode.json and fill it in",
-        )
+        return "FAIL", f"not configured — {SET.format('iam')} (writes .greennode.json)"
     from app.tools.mcp import IAMBearerAuth
 
     auth = IAMBearerAuth()
@@ -48,7 +48,8 @@ def check_iam() -> Result:
     except httpx.HTTPStatusError as e:
         return (
             "FAIL",
-            f"rejected by IAM (HTTP {e.response.status_code}) — wrong client_id/secret pair?",
+            f"rejected by IAM (HTTP {e.response.status_code}) — wrong client_id/secret pair? "
+            f"Re-enter both: {SET.format('iam')}",
         )
     except httpx.HTTPError as e:
         return "FAIL", f"IAM unreachable ({type(e).__name__})"
@@ -62,13 +63,14 @@ def check_agent_identity() -> Result:
     name = get_config_value("GREENNODE_AGENT_IDENTITY")
     if not name:
         return "SKIP", (
-            'not set — needed only for Identity providers; put "agent_identity" in .greennode.json '
+            "not set — needed only for Identity providers: `make set-secret NAME=agent_identity` "
             "(otherwise the SDK would create a NEW identity on first use)"
         )
     if name.startswith("<"):
         return (
             "FAIL",
-            "agent_identity still holds the .example placeholder — set the real name or remove the key",
+            "agent_identity still holds the .example placeholder — `make set-secret NAME=agent_identity` "
+            "(the dev identity's name) or remove the key",
         )
     return "OK", f"agent identity '{name}'"
 
@@ -133,7 +135,10 @@ def _ping_model(base: str, key: str, model: str) -> Result:
             f"model {model!r} not allowed for this LLM_API_KEY — enable it for the key on AIP",
         )
     if r.status_code in (401, 403):
-        return "FAIL", f"LLM_API_KEY rejected (HTTP {r.status_code})"
+        return (
+            "FAIL",
+            f"LLM_API_KEY rejected (HTTP {r.status_code}) — re-enter it: {SET.format('LLM_API_KEY')}",
+        )
     if r.status_code >= 400:
         return (
             "FAIL",
@@ -145,13 +150,12 @@ def _ping_model(base: str, key: str, model: str) -> Result:
 def check_llm(env: dict[str, str]) -> list[tuple[str, Result]]:
     """One line per model: FAIL if a tier's primary is unusable, WARN if only a fallback is."""
     key, models = env.get("LLM_API_KEY"), llm_models(env)
-    if not (key and models):
-        return [
-            (
-                "LLM (MaaS)",
-                ("FAIL", "LLM_API_KEY / LLM_MODEL not set in .env (get them with /agentbase-llm)"),
-            )
-        ]
+    if not key:
+        hint = f"/agentbase-llm creates one and can save it, or {SET.format('LLM_API_KEY')}"
+        return [("LLM (MaaS)", ("FAIL", f"LLM_API_KEY not set in .env — {hint}"))]
+    if not models:
+        hint = "the model `path` from /agentbase-llm (not a secret)"
+        return [("LLM (MaaS)", ("FAIL", f"LLM_MODEL not set in .env — {hint}"))]
     base = env.get("LLM_BASE_URL", GREENNODE_LLM_BASE_URL).rstrip("/")
     lines = []
     for model, roles in models.items():  # one ping per distinct model
@@ -165,14 +169,17 @@ def check_llm(env: dict[str, str]) -> list[tuple[str, Result]]:
 def check_langfuse(env: dict[str, str]) -> Result:
     pk, sk = env.get("LANGFUSE_PUBLIC_KEY"), env.get("LANGFUSE_SECRET_KEY")
     if not (pk and sk):
-        return "SKIP", "LANGFUSE_* not set — tracing disabled (optional)"
+        return (
+            "SKIP",
+            "LANGFUSE_* not set — tracing disabled (optional: `make set-secret NAME=langfuse`)",
+        )
     base = env.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com").rstrip("/")
     try:
         r = httpx.get(f"{base}/api/public/projects", auth=(pk, sk), timeout=15)
     except httpx.HTTPError as e:
         return "FAIL", f"Langfuse unreachable ({type(e).__name__})"
     if r.status_code != 200:
-        return "FAIL", f"Langfuse keys rejected (HTTP {r.status_code})"
+        return "FAIL", f"Langfuse keys rejected (HTTP {r.status_code}) — {SET.format('langfuse')}"
     return "OK", f"keys accepted · {base}"
 
 

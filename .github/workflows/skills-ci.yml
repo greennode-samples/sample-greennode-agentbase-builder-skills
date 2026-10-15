@@ -33,6 +33,10 @@ jobs:
         run: find skills -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: Python syntax of scripts and templates outside the generated backend
         run: python3 -m py_compile skills/agentbase-build-scaffold/assets/root/*.py skills/agentbase-build-tracing/scripts/*.py .github/scripts/*.py
+      - name: make set-secret is one script, identical in the agent and MCP server templates
+        run: |
+          cmp skills/agentbase-build-scaffold/assets/backend/scripts/set_secret.py \
+            skills/agentbase-build-mcp-server/assets/mcp_server/scripts/set_secret.py
 
   scaffold:
     runs-on: ubuntu-24.04

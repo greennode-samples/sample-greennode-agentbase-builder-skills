@@ -7,12 +7,18 @@ TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 ENV_FILE ?= $(BACKEND)/.env
 # eval concurrency: MaaS allows 10 requests/min per account (all models) — keep 1 unless whitelisted
 CONCURRENCY ?= 1
+# A variable given on the make command line only (NAME, LIST… may also exist in the environment, e.g. WSL sets NAME)
+cli = $(if $(filter command line,$(origin $(1))),$($(1)))
 
-.PHONY: setup check-creds check-env dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev invoke
+.PHONY: setup set-secret check-creds check-env dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev invoke
 
 setup:            ## Install backend deps (+ frontend if present)
 	cd $(BACKEND) && uv sync
 	@if [ -d $(FRONTEND) ]; then cd $(FRONTEND) && npm install; fi
+
+set-secret:       ## YOU run it in your own terminal: hidden prompt → .greennode.json / .env (never echoed): make set-secret [NAME=LLM_API_KEY|iam|langfuse] [ENV_FILE=src/backend/.env.<env>] [LIST=1]
+	@# python3 + stdlib only: works before `make setup`. STDIN=1 reads ONE value from a pipe (secret managers), YES=1 replaces it
+	@python3 $(BACKEND)/scripts/set_secret.py --env-file "$(ENV_FILE)" --name "$(call cli,NAME)" $(if $(call cli,LIST),--list) $(if $(call cli,STDIN),--stdin) $(if $(call cli,YES),--yes)
 
 check-creds:      ## Verify IAM / LLM / Langfuse credentials (prints OK/FAIL only, never secrets)
 	cd $(BACKEND) && uv run python -m scripts.check_creds
