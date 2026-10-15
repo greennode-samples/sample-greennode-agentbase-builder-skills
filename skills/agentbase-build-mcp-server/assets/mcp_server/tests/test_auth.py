@@ -174,6 +174,19 @@ def test_metadata_endpoint(jwt_server, api_key_server):
     assert r.status_code == 404
 
 
+def test_jwt_algorithms_must_be_asymmetric():
+    """Same rule as the agent (AUTH_ALGORITHMS): HS256 with a public JWKS = anyone can sign; none = unsigned."""
+    sys.modules.pop("settings", None)
+    from settings import Settings
+
+    env = {k.removeprefix("MCP_").lower(): v for k, v in JWT_ENV.items()}
+    for bad in (["HS256"], ["RS256", "none"], []):
+        with pytest.raises(ValueError, match="MCP_JWT_ALGORITHMS"):
+            Settings(**{**env, "jwt_algorithms": bad})
+    ok = Settings(**{**env, "jwt_algorithms": ["RS256", "EdDSA"]})
+    assert ok.jwt_algorithms == ["RS256", "EdDSA"]
+
+
 def test_jwt_outside_local_requires_https_resource_url(monkeypatch):
     sys.modules.pop("settings", None)
     from settings import Settings

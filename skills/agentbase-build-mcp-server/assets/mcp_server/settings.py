@@ -7,6 +7,10 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LOOPBACK = "127.0.0.1"
+# Tokens are verified with keys from the IdP's public JWKS ⇒ only asymmetric algorithms (PyJWT names)
+ASYMMETRIC_JWT_ALGORITHMS = frozenset(
+    "RS256 RS384 RS512 PS256 PS384 PS512 ES256 ES256K ES384 ES512 EdDSA".split()
+)
 
 
 class Settings(BaseSettings):
@@ -64,6 +68,14 @@ class Settings(BaseSettings):
         if self.auth_mode == "api_key" and not self.api_key_sha256:
             raise ValueError(
                 "MCP_AUTH_MODE=api_key requires MCP_API_KEY_SHA256 (JSON list of SHA-256 hex)"
+            )
+        # Any mode: HS* would make the public JWKS a shared secret, "none" accepts unsigned tokens
+        if not self.jwt_algorithms or any(
+            a not in ASYMMETRIC_JWT_ALGORITHMS for a in self.jwt_algorithms
+        ):
+            raise ValueError(
+                f"MCP_JWT_ALGORITHMS must be a non-empty subset of {sorted(ASYMMETRIC_JWT_ALGORITHMS)}"
+                " (asymmetric only — never HS*/none)"
             )
         if self.auth_mode == "jwt" and not (self.jwks_url and self.issuer and self.audience):
             raise ValueError(
