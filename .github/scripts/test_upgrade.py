@@ -12,7 +12,8 @@ Scenarios — every project is a git repo, as `upgrade.py --apply` requires:
 
     python3 .github/scripts/test_upgrade.py [--from REF] [--version-ref REF] [--pytest] [--keep DIR]
 
-Needs the skills' git history (actions/checkout with fetch-depth: 0). Standard library only.
+Needs the skills' git history (actions/checkout with fetch-depth: 0); run it on committed changes — in a dirty checkout
+the base rebuilt from git differs from what this checkout's scaffold.sh wrote. Standard library only.
 """
 
 from __future__ import annotations
