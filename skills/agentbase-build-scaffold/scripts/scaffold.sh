@@ -21,6 +21,7 @@
 # Root files (agentbase-build-scaffold/assets/root): Makefile, README.md, .gitignore, .agentbase-state.json,
 #   .github/workflows/ci.yml, deploy/{agent.yaml.tpl, render_runtime_spec.py, env_file.py} and
 #   src/backend/.env.{dev,staging,prod}.example (from env.deploy.example — committed non-secret config per environment).
+# .agentbase-template.json records what the template wrote; scripts/upgrade.py upgrades a project to newer skills.
 set -eEuo pipefail # -E: the ERR trap below also fires inside functions
 
 STANDARD_VERSION="0.3.1" # the agentbase-build standard (CHANGELOG.md, plugin manifests) — bump together
@@ -147,6 +148,16 @@ for f in ${CREATED[@]+"${CREATED[@]}"}; do
       -e "s/__SCAFFOLD_VERSION__/$SCAFFOLD_VERSION/g" "$f" && rm -f "$f.bak"
   fi
 done
+
+# What the template wrote (ownership class + SHA-256 per file) → .agentbase-template.json, so upgrade.py can tell your
+# edits from the template's later. Optional: without it, upgrades rebuild the base from the skills' git history.
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$SKILLS_DIR/agentbase-build-scaffold/scripts/template_files.py" record "$TARGET" "$NAME" "$STANDARD_VERSION" \
+    "$SCAFFOLD_VERSION" "$WITH_FE" ${CREATED[@]+"${CREATED[@]}"} \
+    || echo "⚠ $TARGET/.agentbase-template.json not written — upgrades will need the skills' git history." >&2
+else
+  echo "⚠ python3 not found: no $TARGET/.agentbase-template.json — upgrades will need the skills' git history." >&2
+fi
 
 [[ -f "$TARGET/src/backend/.env" ]] || cp "$TARGET/src/backend/.env.example" "$TARGET/src/backend/.env"
 
