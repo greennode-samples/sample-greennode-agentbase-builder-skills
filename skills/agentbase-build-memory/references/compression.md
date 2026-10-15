@@ -28,4 +28,4 @@ Compression shrinks the **prompt** and each **new** checkpoint. It does not shri
 | KB read per turn, no compression | 43 | 828 | 2,780 | 9,918 |
 | KB read per turn, compression at 1,500 tokens | 43 | 724 | 1,672 | 3,570 |
 
-The template writes about 23 events per tool-less turn. The events API pages with an offset (`from`) of at most 5000, so after roughly 200 such turns a session can no longer be fully read. The remedy is **session rotation**: a new `session_id` seeded with the old `summary`. A shorter `eventExpiryDuration` only helps idle sessions. See SKILL.md Step 4, "Long sessions".
+The template writes about 23 events per tool-less turn. If the events API has the 5000 offset limit documented for Runtime logs (**unverified** for Memory), a session could no longer be fully read after roughly 200 such turns. Read cost grows with every turn either way. The remedy is **session rotation**: a new `session_id` seeded with the old `summary`. A shorter `eventExpiryDuration` only helps idle sessions. See SKILL.md Step 4, "Long sessions".

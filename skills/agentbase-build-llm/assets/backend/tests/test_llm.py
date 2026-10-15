@@ -537,10 +537,11 @@ _SSE_ERROR = {"error": {"message": "engine overloaded", "type": "InternalServerE
 @pytest.fixture
 def mock_llm_server(monkeypatch):
     """OpenAI-compatible /v1/chat/completions over real HTTP. `scripts[model]` = list of SSE payloads (dicts,
-    `_DONE`), a dict (a whole non-streamed chat.completion) or an int HTTP status (error JSON body). `calls` records
+    `_DONE`, a float = pause in seconds), a dict (a whole non-streamed chat.completion) or an int HTTP status (error JSON body). `calls` records
     the model of each request, `calls.bodies` the request bodies."""
     import json
     import threading
+    import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class _Calls(list):
@@ -577,11 +578,16 @@ def mock_llm_server(monkeypatch):
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             for item in script:
+                if isinstance(item, float):  # a pause between chunks (seconds)
+                    time.sleep(item)
+                    continue
                 data = "[DONE]" if item is _DONE else json.dumps(item)
                 self.wfile.write(f"data: {data}\n\n".encode())
                 self.wfile.flush()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # a client that hung up (timeout test) ⇒ no traceback on stderr
+    server.handle_error = lambda request, client_address: None
     threading.Thread(target=server.serve_forever, daemon=True).start()
     llm._chat.cache_clear()
     llm._warn_if_over_budget.cache_clear()
@@ -609,6 +615,21 @@ async def test_sse_error_chunk_mid_stream_falls_back(mock_llm_server):
     out = await llm.get_llm("agent").ainvoke("hi")
     assert out.content == "backup model answer"
     assert calls == ["primary", "backup"]
+
+
+async def test_streaming_timeout_is_an_inactivity_timeout(mock_llm_server, monkeypatch):
+    """LLM_TIMEOUT_S never cuts a model that keeps streaming (e.g. its thinking): a 3× longer stream completes —
+    why the time budget must be sized per TURN from real latencies, not from LLM_TIMEOUT_S (SKILL §4)."""
+    scripts, calls = mock_llm_server
+    _env(monkeypatch, LLM_TIMEOUT_S="0.5", LLM_FALLBACK_MODELS="[]")
+    llm._chat.cache_clear()
+    thinking = [x for _ in range(5) for x in (0.3, _chunk(reasoning="hmm "))]
+    scripts["primary"] = [*thinking, *_answer("done")]  # 1.5 s in total, never 0.5 s silent
+    assert (await llm.get_llm("agent").ainvoke("hi")).content == "done"
+    assert calls == ["primary"]
+    scripts["primary"] = [1.0, *_answer("too late")]  # silent longer than the timeout ⇒ cut
+    with pytest.raises(openai.APITimeoutError):
+        await llm.get_llm("agent").ainvoke("hi")
 
 
 async def test_sse_error_before_first_token_falls_back(mock_llm_server):
