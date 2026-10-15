@@ -2,8 +2,8 @@
 
 Declared in a2a_agents.json (`${ENV}` is expanded inside string values only, after JSON parsing; an unset or
 empty variable skips that agent with an error log):
-  {"agents": {"stock": {"url": "https://<endpoint>", "description": "Stock agent...",
-                        "auth": "api_key", "api_key": "${A2A_STOCK_API_KEY}"}}}
+  {"agents": {"stock-agent": {"url": "${A2A_STOCK_AGENT_URL}", "description": "Stock agent...",
+                              "auth": "api_key", "api_key": "${A2A_STOCK_AGENT_API_KEY}"}}}
   auth: api_key  — sends header X-GreenNode-AgentBase-Custom-Api-Key (target agent built from this template)
         user_jwt — forwards the end-user's JWT (target agent on the same IdP)
         none     — local only
