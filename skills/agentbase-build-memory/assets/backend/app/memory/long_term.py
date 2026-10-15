@@ -195,7 +195,8 @@ def build_memory_tools(ltm: LongTermMemory, settings: Settings) -> list[BaseTool
         preference about themselves (name, role, language, recurring needs). Never call it for greetings, small
         talk, thanks, one-off requests, your own inferences or guesses, or secrets (passwords, keys, card or ID
         numbers). Store only what the user actually said: never add dates, times or details they did not give.
-        Write the fact in the user's language.
+        A relative time they gave ("last week", "next month") goes stale: write the absolute date it means, from
+        the current date in the context, or leave the time out. Write the fact in the user's language.
 
         Args:
             fact: One short, self-contained sentence in the user's own words, e.g. "Prefers short answers".

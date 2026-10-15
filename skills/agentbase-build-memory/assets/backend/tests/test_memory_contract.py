@@ -470,6 +470,7 @@ def test_memory_tool_descriptions_guard_against_misuse(monkeypatch):
         "inferences",
         "secrets",
         "never add dates",
+        "absolute date",  # "joined last week" saved as is was wrong a week later
     ):
         assert rule in desc, rule
     assert "user's language" in desc

@@ -221,13 +221,22 @@ def main() -> None:
     c = client()
     if a.trace_id:
         sys.exit(1 if print_tree(c, a.trace_id, do_audit=a.audit) else 0)
-    roots = observations(c, name="agent.invoke", limit=100)
     if a.session:
+        # Server-side filter: every turn of the session (up to 300), not just the newest roots of the project
+        roots = observations(c, name="agent.invoke", sessionId=a.session)
         roots = [o for o in roots if o.get("sessionId") == a.session]
         session_links(c, a.session)
+        print(f"  traces: {len(roots)} (oldest first)")
+        # The whole conversation in order unless --latest N is given
+        picked = sorted(roots, key=lambda o: o["startTime"])[-(a.latest or len(roots)) :]
+    else:
+        roots = observations(c, name="agent.invoke", limit=100)
+        picked = sorted(roots, key=lambda o: o["startTime"], reverse=True)[: a.latest or 3]
     fails = 0
-    for o in sorted(roots, key=lambda o: o["startTime"], reverse=True)[: a.latest or 3]:
+    for o in picked:
         fails += print_tree(c, o["traceId"], do_audit=a.audit)
+    if a.audit and len(picked) > 1:
+        print(f"\naudit summary: {len(picked)} trace(s), {fails} FAIL finding(s)")
     sys.exit(1 if fails else 0)
 
 

@@ -222,7 +222,7 @@ Server v4 **drops** the old `/api/public/traces`, `/sessions`, `/scores`, `/metr
 - `GET /api/public/v2/observations?traceId=<id>&fields=core,basic,time,io,metadata,model,usage,prompt,metrics` (CLI: `observations`, not `traces` or `legacy-*`)
 - `GET /api/public/v3/scores?traceId=<id>&fields=core,details` (without `details` no `comment`) · datasets: `GET /api/public/v2/datasets`
 
-Bundled script: `uv run python <skill-dir>/scripts/lf_trace.py <trace_id> | --latest N | --session S [--audit]`. It prints the tree with latency, model (+ `llm_role`), usage (input/output/reasoning/cache), cost, TTFT, prompt version, statusMessage of failed observations, plus scores; `--audit` adds the best-practice findings. **Use it first when debugging "slow / wrong / expensive"**.
+Bundled script: `uv run python <skill-dir>/scripts/lf_trace.py <trace_id> | --latest N | --session S [--latest N] [--audit]` (`--session` = every turn of that conversation, oldest first; without it the 3 newest traces of the project). It prints the tree with latency, model (+ `llm_role`), usage (input/output/reasoning/cache), cost, TTFT, prompt version, statusMessage of failed observations, plus scores; `--audit` adds the best-practice findings. **Use it first when debugging "slow / wrong / expensive"**.
 
 Real example (a "Hello" message took 55s); the trace showed it immediately: `mcp.list_tools` connector failed for 15s (sequential loading, failures not cached); `reflect` ran for a greeting and retried (+27s); judge glm 503 ⇒ fallback. After fixing (parallel MCP loading + negative cache, skip reflection for simple messages) it dropped to 11s.
 
