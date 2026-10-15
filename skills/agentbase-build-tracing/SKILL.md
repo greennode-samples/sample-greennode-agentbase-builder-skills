@@ -105,7 +105,9 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     │       └─ llm.<task>.generate   2nd generation only when the primary fails: metadata llm_role=fallback, other
     │                                model; the primary one is at level ERROR + statusMessage (e.g. 503)
     ├─ approval [chain]              hitl.request [event] · hitl.decision [event] (the node re-runs on resume ⇒ the
-    │                                resume trace shows both: what was asked and what was decided)
+    │   │                            resume trace shows both: what was asked and what was decided)
+    │   ├─ hitl.stale_decision [event, WARNING]  {tool_call_ids} — decisions for an earlier card; asked again
+    │   └─ hitl.invalid_edit [event, WARNING]    {tool} — edited arguments fail the tool schema ⇒ rejected
     ├─ tools [chain]
     │   └─ <tool_name> [tool]        input=args · output=result · level ERROR when the tool fails
     │       ├─ memory.save [span]    (tool remember) · memory.recall [retriever] (tool recall_memory)
@@ -114,9 +116,13 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
     │       ├─ identity.<kind> [span] input{provider} · output{status: ok|authorization_required} (WARNING when
     │       │                        consent is needed) — kind = agent_api_key | agent_access_token | user_api_key |
     │       │                        user_access_token (app/identity.py helpers; never the credential)
-    │       └─ mcp.policy_denied [event, WARNING]  {server, tool} — blocked by the Gateway's Policy Group
+    │       ├─ mcp.policy_denied [event, WARNING]  {server, tool} — blocked by the Gateway's Policy Group
+    │       ├─ mcp.scope_error [event, WARNING]    {server, tool, www_authenticate} — insufficient_scope (config)
+    │       └─ mcp.tool_error [event, WARNING]     {server, tool, error} — upstream failure of an MCP tool
     └─ reflect [chain]               reflection.judge [evaluator] → llm.judge [chain] → llm.judge.generate
-    (internal LLM calls — router, summarize, judge — sit one level deeper than the agent's llm.<task>.generate)
+        └─ reflection.judge_timeout · reflection.judge_failed [event, WARNING] — the answer is kept
+    (internal LLM calls — router, summarize, judge — sit one level deeper than the agent's llm.<task>.generate:
+     <caller run_name> or, without one, <task>.call [chain] → llm.<task> [chain] → llm.<task>.generate)
 scores: user_feedback (-1|0|1, from frontend) · self_eval (0..1) · hitl_requested
 ```
 
