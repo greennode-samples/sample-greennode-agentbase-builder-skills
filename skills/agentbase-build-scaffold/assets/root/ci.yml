@@ -1,15 +1,24 @@
 # __PROJECT_NAME__ — CI: lint + test on every push/PR, eval gate, manual deploy to AgentBase.
 #
+# Config vs secrets: each environment's NON-secret runtime config is committed in src/backend/.env.<env>.example
+# (reviewed in PRs; strict KEY=VALUE — `make check-env`). Secrets live only in the CI secret store and are merged in
+# at deploy time by deploy/render_runtime_spec.py. See /agentbase-build-deploy (CI/CD).
+#
 # Repository-level (Settings → Secrets and variables → Actions), used by `eval`:
 #   secrets: EVAL_LLM_API_KEY (dedicated key — eval traffic gets its own rate limit), LANGFUSE_PUBLIC_KEY,
 #            LANGFUSE_SECRET_KEY (optional)
-#   vars:    EVAL_LLM_MODEL (or LLM_MODEL), LANGFUSE_BASE_URL (optional), EVAL_MIN_PASS_RATE (default 0.8)
+#   vars:    EVAL_CONFIG_ENV (default prod — eval uses the LLM tiers/fallbacks/routing/token caps, reflection, LTM and
+#            time zone of src/backend/.env.<EVAL_CONFIG_ENV>.example), EVAL_LLM_MODEL (optional override of its LLM_MODEL),
+#            LANGFUSE_BASE_URL (optional), EVAL_MIN_PASS_RATE (default 0.8)
 # Per GitHub Environment dev / staging / prod (Settings → Environments; add required reviewers on prod), used by
 # `deploy` — environment-scoped values are only visible to jobs that declare `environment:`:
 #   secrets: GRN_ACCESS_KEY_ID, GRN_SECRET_ACCESS_KEY (dedicated CI service account), VCR_USERNAME, VCR_PASSWORD
-#            (vCR robot account), LLM_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
-#   vars:    AGENT_NAME, VCR_REGISTRY, VCR_REPO, RUNTIME_FLAVOR, LLM_MODEL, MEMORY_ID, MEMORY_STRATEGY_ID,
-#            AUTH_JWKS_URL, AUTH_ISSUER, AUTH_AUDIENCE, LANGFUSE_BASE_URL, AGENT_ENDPOINT, GRN_DEFAULT_REGION
+#            (vCR robot account), LLM_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY (optional),
+#            FEEDBACK_SIGNING_KEY (optional), RUNTIME_ENV_SECRETS (optional: multi-line KEY=VALUE for other runtime
+#            secrets, e.g. static MCP / A2A keys referenced as ${VAR} in mcp_servers.json / a2a_agents.json)
+#   vars:    AGENT_NAME (the project name — the image is <VCR_REPO>/<AGENT_NAME>; identity + runtime are named
+#            <AGENT_NAME>-<env>, one per environment), VCR_REGISTRY, VCR_REPO, RUNTIME_FLAVOR, AGENT_ENDPOINT,
+#            GRN_DEFAULT_REGION
 # See /agentbase-build-deploy (CI/CD) and /agentbase-build references/iam-permissions.md.
 name: ci
 
@@ -24,6 +33,10 @@ on:
         type: choice
         options: [none, dev, staging, prod]
         default: none
+      image_tag:
+        description: "Redeploy this EXISTING image tag without rebuilding (rollback: the previous release's tag). Empty = build this commit"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -47,9 +60,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --frozen
+      - run: uv sync --locked # fails when uv.lock no longer matches pyproject.toml (--frozen would not)
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run pytest -q
+      - name: Lint the committed per-environment config
+        run: |
+          shopt -s nullglob
+          files=(.env.*.example)
+          if [ ${#files[@]} -gt 0 ]; then uv run python ../../deploy/env_file.py check "${files[@]}"; fi
 
   eval:
     needs: test
@@ -61,29 +79,44 @@ jobs:
       run:
         working-directory: src/backend
     env:
+      # In-process eval: no runtime, no IAM. MCP servers filtered to deployed environments and `user_jwt` servers are
+      # not loaded — keep eval items that need them in a separate dataset (/agentbase-build-eval).
       APP_ENV: local
       AUTH_MODE: none
       MEMORY_BACKEND: inmemory
-      LLM_API_KEY: ${{ secrets.EVAL_LLM_API_KEY }}
-      LLM_MODEL: ${{ vars.EVAL_LLM_MODEL || vars.LLM_MODEL }}
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
+      EVAL_CONFIG: .env.${{ vars.EVAL_CONFIG_ENV || 'prod' }}.example
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --frozen
+      - run: uv sync --locked
+      - name: Use the evaluated environment's config (LLM tiers/fallbacks/routing/token caps, reflection, LTM, time zone)
+        run: |
+          if [ -f "$EVAL_CONFIG" ]; then
+            uv run python ../../deploy/env_file.py export "$EVAL_CONFIG" \
+              --keys 'LLM_*,REFLECTION_*,LTM_*,APP_TIMEZONE,MAX_TOOL_ROUNDS,HITL_TOOLS,CONTEXT_*' --exclude 'LLM_API_KEY' >> "$GITHUB_ENV"
+          else
+            echo "::notice::$EVAL_CONFIG not found — eval runs on EVAL_LLM_MODEL only"
+          fi
       - name: Eval gate
         id: gate
+        env:
+          EVAL_LLM_API_KEY: ${{ secrets.EVAL_LLM_API_KEY }}
+          EVAL_LLM_MODEL: ${{ vars.EVAL_LLM_MODEL || vars.LLM_MODEL }}
+          MIN_PASS_RATE: ${{ vars.EVAL_MIN_PASS_RATE || '0.8' }}
         # --concurrency 1: MaaS allows 10 requests/min per account
         run: |
+          export LLM_API_KEY="$EVAL_LLM_API_KEY"
+          export LLM_MODEL="${EVAL_LLM_MODEL:-${LLM_MODEL:-}}"
           if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_MODEL" ]; then
-            echo "::notice::EVAL_LLM_API_KEY / EVAL_LLM_MODEL not set — eval gate skipped (deploy allowed to dev only)"
+            echo "::notice::EVAL_LLM_API_KEY / a model (EVAL_LLM_MODEL or LLM_MODEL in $EVAL_CONFIG) not set — eval gate skipped (deploy allowed to dev only)"
             echo "gate=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl \
-            --min-pass-rate "${{ vars.EVAL_MIN_PASS_RATE || '0.8' }}" --concurrency 1
+            --min-pass-rate "$MIN_PASS_RATE" --concurrency 1
           echo "gate=passed" >> "$GITHUB_OUTPUT"
 
   deploy:
@@ -96,18 +129,36 @@ jobs:
       cancel-in-progress: false
     env:
       GRN_VERSION: v1.13.0 # pinned; release assets carry the version suffix (latest/download/grn-linux-amd64 is 404)
+      APP_ENV: ${{ inputs.deploy_env }}
+      IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
       AGENT_NAME: ${{ vars.AGENT_NAME }}
-      IMAGE: ${{ vars.VCR_REGISTRY }}/${{ vars.VCR_REPO }}/${{ vars.AGENT_NAME }}:${{ github.sha }}
+      VCR_REGISTRY: ${{ vars.VCR_REGISTRY }}
+      VCR_REPO: ${{ vars.VCR_REPO }}
+      AGENT_ENDPOINT: ${{ vars.AGENT_ENDPOINT }}
       GRN_DEFAULT_REGION: ${{ vars.GRN_DEFAULT_REGION || 'HCM-3' }}
     steps:
       - name: Require the eval gate outside dev
         if: needs.eval.outputs.gate != 'passed' && inputs.deploy_env != 'dev'
         run: |
-          echo "::error::The eval gate did not run (EVAL_LLM_API_KEY / EVAL_LLM_MODEL missing) — refusing to deploy to ${{ inputs.deploy_env }}"
+          echo "::error::The eval gate did not run (EVAL_LLM_API_KEY / model missing) — refusing to deploy to $APP_ENV"
           exit 1
 
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+
+      - name: Resolve the image (tag = AGENT_VERSION = Langfuse release) and this environment's runtime/identity name
+        run: |
+          TAG="${IMAGE_TAG_INPUT:-$(git rev-parse --short HEAD)}"
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::'$TAG' is not a valid image tag"; exit 1
+          fi
+          RUNTIME_NAME="$AGENT_NAME-$APP_ENV" # one identity + runtime per environment, never shared
+          if [[ ! "$RUNTIME_NAME" =~ ^[a-zA-Z0-9_-]{3,50}$ ]]; then
+            echo "::error::runtime/identity name '$RUNTIME_NAME' must match ^[a-zA-Z0-9_-]{3,50}$ (check vars.AGENT_NAME)"; exit 1
+          fi
+          echo "RUNTIME_NAME=$RUNTIME_NAME" >> "$GITHUB_ENV"
+          echo "AGENT_VERSION=$TAG" >> "$GITHUB_ENV"
+          echo "IMAGE=$VCR_REGISTRY/$VCR_REPO/$AGENT_NAME:$TAG" >> "$GITHUB_ENV"
 
       - name: Install grn (pinned version + SHA256 check)
         run: |
@@ -117,62 +168,127 @@ jobs:
           grep " grn-linux-amd64-${GRN_VERSION}$" SHA256SUMS | awk '{print $1"  grn"}' | sha256sum -c -
           chmod +x grn && sudo mv grn /usr/local/bin/ && grn --version
 
-      - name: Build and push the image (linux/amd64)
+      - name: Log in to vCR
         env:
           VCR_USERNAME: ${{ secrets.VCR_USERNAME }}
           VCR_PASSWORD: ${{ secrets.VCR_PASSWORD }}
+        run: echo "$VCR_PASSWORD" | docker login "$VCR_REGISTRY" -u "$VCR_USERNAME" --password-stdin
+
+      - name: Build and push the image (linux/amd64)
+        if: inputs.image_tag == ''
         run: |
-          echo "$VCR_PASSWORD" | docker login "${{ vars.VCR_REGISTRY }}" -u "$VCR_USERNAME" --password-stdin
-          docker build --platform linux/amd64 -t "$IMAGE" src/backend
+          docker build --platform linux/amd64 --build-arg "AGENT_VERSION=$AGENT_VERSION" -t "$IMAGE" src/backend
           docker push "$IMAGE"
+
+      - name: Check that the image to redeploy exists (no rebuild)
+        if: inputs.image_tag != ''
+        run: |
+          docker manifest inspect "$IMAGE" > /dev/null || { echo "::error::$IMAGE not found in the registry"; exit 1; }
+          echo "::notice::Redeploying $IMAGE with the config of $GITHUB_REF_NAME (src/backend/.env.$APP_ENV.example) — dispatch from the release's ref to roll back config too"
 
       - name: Render the manifest and runtime spec (secrets stay in the CI secret store; files never committed)
         env:
-          APP_ENV: ${{ inputs.deploy_env }}
           RUNTIME_FLAVOR: ${{ vars.RUNTIME_FLAVOR }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-          MEMORY_ID: ${{ vars.MEMORY_ID }}
-          MEMORY_STRATEGY_ID: ${{ vars.MEMORY_STRATEGY_ID }}
-          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
-          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
-          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
-          LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
+          FEEDBACK_SIGNING_KEY: ${{ secrets.FEEDBACK_SIGNING_KEY }}
+          RUNTIME_ENV_SECRETS: ${{ secrets.RUNTIME_ENV_SECRETS }}
           VCR_USERNAME: ${{ secrets.VCR_USERNAME }}
           VCR_PASSWORD: ${{ secrets.VCR_PASSWORD }}
         run: |
-          envsubst < deploy/agent.yaml.tpl > "$RUNNER_TEMP/agent.yaml"
+          umask 077
+          config="src/backend/.env.$APP_ENV.example"
+          [ -f "$config" ] || { echo "::error::$config is missing — commit this environment's non-secret config"; exit 1; }
+          extra=()
+          if [ -n "$RUNTIME_ENV_SECRETS" ]; then
+            printf '%s\n' "$RUNTIME_ENV_SECRETS" > "$RUNNER_TEMP/secrets.env"
+            extra=(--env-file "$RUNNER_TEMP/secrets.env")
+          fi
+          envsubst '${AGENT_NAME} ${RUNTIME_NAME} ${IMAGE} ${RUNTIME_FLAVOR} ${APP_ENV} ${AGENT_VERSION}' \
+            < deploy/agent.yaml.tpl > "$RUNNER_TEMP/agent.yaml"
           uv run --no-project --with 'pyyaml==6.0.2' python deploy/render_runtime_spec.py \
-            "$RUNNER_TEMP/agent.yaml" "$RUNNER_TEMP/runtime.yaml"
+            "$RUNNER_TEMP/agent.yaml" "$RUNNER_TEMP/runtime.yaml" --env-file "$config" "${extra[@]}" \
+            --secrets LLM_API_KEY,LANGFUSE_PUBLIC_KEY,LANGFUSE_SECRET_KEY,FEEDBACK_SIGNING_KEY
 
       # `deploy up` only CREATES a runtime — an existing one is "converged, not re-applied", so a new image/env would
       # silently not ship. Existing runtime ⇒ full-spec `runtime update` (new version, DEFAULT endpoint rolls forward).
-      # Never add `-o json` to commands that print specs: it prints secrets in clear text into the CI log.
+      # grn's update body has NO networkConfig / allowedCidrs / inboundAuth (grn v1.13.0 UpdateAgentRuntimeRequest):
+      # the server applies its defaults (networkConfig omitted ⇒ PUBLIC). So the step refuses runtimes that use them,
+      # and diffs the new version against the previous one. Never print raw `-o json` output (env = secrets).
       - name: Deploy (create on first run, update afterwards)
         env: # the privileged CI service account is visible to this step only
           GRN_ACCESS_KEY_ID: ${{ secrets.GRN_ACCESS_KEY_ID }}
           GRN_SECRET_ACCESS_KEY: ${{ secrets.GRN_SECRET_ACCESS_KEY }}
         run: |
-          # A failing `runtime list` must FAIL the step — never fall through to `deploy up`, which would succeed
-          # without re-applying an existing runtime (old image shipped "green")
-          LIST_JSON=$(grn agentbase runtime list --size 100 -o json)
-          RUNTIME_ID=$(jq -er --arg n "$AGENT_NAME" '[.listData[] | select(.name == $n) | .id][0] // ""' <<< "$LIST_JSON")
+          shopt -s inherit_errexit # a failing grn inside $(…) must fail the step, never fall through to `deploy up`
+
+          # grn_all <jq projection> <grn command…>: rows of EVERY page (1-based, totalPage), projected page by page so
+          # secrets (version rows carry environmentVariables) never stay in a variable or reach the log
+          grn_all() {
+            local proj="$1" page=1 pages=1 acc='[]' resp
+            shift
+            while [ "$page" -le "$pages" ]; do
+              resp=$("$@" --page "$page" --size 100 -o json) || return 1
+              pages=$(jq -er '.totalPage // 1' <<< "$resp") || return 1
+              acc=$(jq -c --argjson acc "$acc" "\$acc + [(.listData // [])[] | $proj]" <<< "$resp") || return 1
+              page=$((page + 1))
+            done
+            printf '%s\n' "$acc"
+          }
+          SETTINGS='((.networkConfig.mode // "PUBLIC") | ascii_upcase) as $mode
+            | ((.inboundAuth.mode // "NONE") | ascii_upcase) as $inbound
+            | {version, image: .imageUrl, mode: $mode, inbound: $inbound,
+               network: (if $mode == "PUBLIC" then null else .networkConfig | {vpcId, subnetId, routeCidrs} end),
+               allowedCidrs: (.allowedCidrs // []),
+               inboundJwt: (if $inbound == "NONE" then null else .inboundAuth.jwt end)}'
+          latest_version() {  # latest_version <runtime id> ⇒ projected settings of the highest version
+            local rows
+            rows=$(grn_all "$SETTINGS" grn agentbase runtime versions "$1") || return 1
+            jq -ec 'max_by(.version)' <<< "$rows"
+          }
+
+          RUNTIMES=$(grn_all '{id, name}' grn agentbase runtime list)
+          RUNTIME_ID=$(jq -er --arg n "$RUNTIME_NAME" '[.[] | select(.name == $n) | .id][0] // ""' <<< "$RUNTIMES")
           if [ -z "$RUNTIME_ID" ]; then
-            echo "No runtime named $AGENT_NAME yet — creating identity + runtime"
+            echo "No runtime named $RUNTIME_NAME yet — creating identity + runtime (Public, Inbound Auth: No authorization)"
             grn agentbase deploy up --file "$RUNNER_TEMP/agent.yaml"
+            RUNTIMES=$(grn_all '{id, name}' grn agentbase runtime list)
+            RUNTIME_ID=$(jq -er --arg n "$RUNTIME_NAME" '[.[] | select(.name == $n) | .id][0]' <<< "$RUNTIMES")
           else
-            echo "Updating runtime $RUNTIME_ID to $IMAGE"
+            PREV=$(latest_version "$RUNTIME_ID")
+            problems=$(jq -r '[
+                (select(.mode != "PUBLIC") | "network mode \(.mode) (an update without networkConfig switches it to PUBLIC)"),
+                (select(.allowedCidrs | length > 0) | "IP Access Control (\(.allowedCidrs | length) allowed CIDRs)"),
+                (select(.inbound != "NONE") | "Runtime Inbound Auth \(.inbound)")
+              ] | join("; ")' <<< "$PREV")
+            if [ -n "$problems" ]; then
+              echo "::error::Runtime $RUNTIME_ID v$(jq -r .version <<< "$PREV") uses settings 'grn agentbase runtime update' cannot carry: $problems. Update this environment outside CI — VPC: /agentbase-deploy re-passing --network-mode VPC --vpc-id/--subnet-id/--route-cidrs; IP Access Control / Inbound Auth: the Console (runtime.sh cannot carry them either) — then check the new version kept them (/agentbase-build-deploy)."
+              exit 1
+            fi
+            echo "Updating runtime $RUNTIME_ID (v$(jq -r .version <<< "$PREV")) to $IMAGE"
             grn agentbase runtime update "$RUNTIME_ID" --file "$RUNNER_TEMP/runtime.yaml"
             grn agentbase runtime wait "$RUNTIME_ID" --timeout 15m
+            NEW=$(latest_version "$RUNTIME_ID")
+            drift=$(jq -r --argjson prev "$PREV" \
+              '[to_entries[] | select(.key != "version" and .key != "image" and .value != $prev[.key]) | .key] | join(", ")' <<< "$NEW")
+            if [ -n "$drift" ]; then
+              echo "::error::v$(jq -r .version <<< "$NEW") changed $drift compared with v$(jq -r .version <<< "$PREV") — restore them in the Console now"
+              exit 1
+            fi
           fi
-          grn agentbase deploy status "$AGENT_NAME"
+          NEW=$(latest_version "$RUNTIME_ID")
+          if ! jq -e --arg img "$IMAGE" '.image == $img' <<< "$NEW" > /dev/null; then
+            echo "::error::The latest version of $RUNTIME_ID does not run $IMAGE — the deploy did not ship"
+            exit 1
+          fi
+          echo "Runtime $RUNTIME_ID serves v$(jq -r .version <<< "$NEW") = $IMAGE (mode $(jq -r .mode <<< "$NEW"), inbound $(jq -r .inbound <<< "$NEW"))"
+          grn agentbase deploy status "$RUNTIME_NAME"
 
       - name: Smoke test
         if: vars.AGENT_ENDPOINT != ''
-        run: curl -fsS --retry 5 --retry-delay 10 "${{ vars.AGENT_ENDPOINT }}/health"
+        run: curl -fsS --retry 5 --retry-delay 10 "$AGENT_ENDPOINT/health"
 
       - name: Remove the rendered files
         if: always()
-        run: rm -f "$RUNNER_TEMP/agent.yaml" "$RUNNER_TEMP/runtime.yaml"
+        run: rm -f "$RUNNER_TEMP/agent.yaml" "$RUNNER_TEMP/runtime.yaml" "$RUNNER_TEMP/secrets.env"

@@ -3,23 +3,31 @@
 #
 #   bash scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]
 #
-# Each skill owns part of the code (assets/backend/... mirrors the exact paths in src/backend):
+# Each skill owns part of the code (assets/backend/... mirrors the exact paths in src/backend). ALL backend skills
+# are required: the modules import each other (tools → a2a, graph → reflection/hitl, service → mcp/hitl…); optional
+# components are switched off via env, not removed. Only agentbase-build-identity (app/identity.py + its test) may
+# be dropped when no tool uses outbound credentials.
 #   agentbase-build-scaffold : pyproject, main.py, config, service, graph, Dockerfile, tests
 #   agentbase-build-llm      : app/llm
 #   agentbase-build-memory   : app/memory (short-term, long-term, compression)
 #   agentbase-build-tracing  : app/observability, app/prompts/__init__.py (Langfuse v4)
-#   agentbase-build-mcp      : app/tools, mcp_servers.json, tests/test_mcp.py
+#   agentbase-build-mcp      : app/tools, app/knowledge, mcp_servers.json, tests/test_mcp.py
 #   agentbase-build-auth     : app/auth, tests/test_auth.py
 #   agentbase-build-identity : app/identity.py (outbound credentials: Static/Delegated API key, OAuth2 M2M/3LO)
 #   agentbase-build-hitl     : app/hitl.py, tests/test_hitl.py
 #   agentbase-build-eval     : app/reflection.py, evals/, tests/test_reflection.py, tests/test_eval.py
 #   agentbase-build-a2a      : app/a2a (A2A server + client tools), a2a_agents.json, tests/test_a2a.py
 #   agentbase-build-frontend : src/frontend (Expo React Native) — only with --with-frontend
-set -euo pipefail
+# Root files (agentbase-build-scaffold/assets/root): Makefile, README.md, .gitignore, .agentbase-state.json,
+#   .github/workflows/ci.yml, deploy/{agent.yaml.tpl, render_runtime_spec.py, env_file.py} and
+#   src/backend/.env.{dev,staging,prod}.example (from env.deploy.example — committed non-secret config per environment).
+set -eEuo pipefail # -E: the ERR trap below also fires inside functions
 
+STANDARD_VERSION="0.3.0" # the agentbase-build standard (CHANGELOG.md, plugin manifests) — bump together
 SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKEND_SKILLS=(agentbase-build-scaffold agentbase-build-llm agentbase-build-memory agentbase-build-tracing
   agentbase-build-mcp agentbase-build-auth agentbase-build-identity agentbase-build-hitl agentbase-build-eval agentbase-build-a2a)
+DEPLOY_ENVS=(dev staging prod)
 
 USAGE="Usage: scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]"
 if [[ $# -lt 2 ]]; then
@@ -39,8 +47,9 @@ done
 if [[ -z "$NAME" || -z "$TARGET" ]]; then
   echo "$USAGE" >&2; exit 2
 fi
-if [[ ! "$NAME" =~ ^[a-z][a-z0-9-]{2,39}$ ]]; then
-  echo "project-name must match ^[a-z][a-z0-9-]{2,39}$ (lowercase, hyphen)" >&2; exit 2
+# 3–40 chars, lowercase/digits/hyphen, starts with a letter, does not end with '-' (valid docker repo, Langfuse tag)
+if [[ ! "$NAME" =~ ^[a-z][a-z0-9-]{1,38}[a-z0-9]$ ]]; then
+  echo "project-name must match ^[a-z][a-z0-9-]{1,38}[a-z0-9]$ (3–40 chars: lowercase, digits, '-'; not ending in '-')" >&2; exit 2
 fi
 if [[ -e "$TARGET/src/backend" ]]; then
   echo "$TARGET/src/backend already exists — stopping to avoid overwriting." >&2; exit 1
@@ -55,6 +64,31 @@ fi
 if [[ $WITH_FE -eq 1 && ! -f "$TARGET/src/frontend/package.json" ]]; then
   command -v npx >/dev/null || { echo "--with-frontend needs Node.js (npx) — install it or drop the flag" >&2; exit 1; }
 fi
+
+# Which revision of the skills built this project (recorded in .agentbase-state.json for later reviews/upgrades)
+# (git SHA only when the skills are a checkout of their own repo — not when copied into another project's git tree)
+SCAFFOLD_VERSION="$STANDARD_VERSION"
+REPO_DIR="$(cd "$SKILLS_DIR/.." && pwd -P)"
+if [[ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" == "$REPO_DIR" ]] \
+  && sha=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null); then
+  SCAFFOLD_VERSION="$STANDARD_VERSION+git.$sha"
+  [[ -z "$(git -C "$REPO_DIR" status --porcelain -- skills 2>/dev/null)" ]] || SCAFFOLD_VERSION="$SCAFFOLD_VERSION.dirty"
+fi
+
+# Tell the user how to recover if anything below fails (set -e stops at the first error)
+PHASE=files
+on_error() {
+  local code=$?
+  [[ $BASH_SUBSHELL -eq 0 ]] || return 0 # report once, from the main shell
+  if [[ $PHASE == files ]]; then
+    echo "✖ Scaffold stopped while writing files (exit $code) — $TARGET is incomplete. Fix the error above, remove" >&2
+    echo "  $TARGET/src/backend (and any root files listed above as created), then re-run the same command." >&2
+  else
+    echo "✖ The project files are complete, but '$PHASE' failed (exit $code). Fix the error above, then run:" >&2
+    echo "    cd \"$TARGET/src/backend\" && uv sync && uv run pytest" >&2
+  fi
+}
+trap on_error ERR
 
 # Files THIS run wrote — the only ones the placeholder pass may touch (never the user's existing files)
 CREATED=()
@@ -88,6 +122,12 @@ copy_new "$ROOT_TPL/agentbase-state.json" "$TARGET/.agentbase-state.json"
 copy_new "$ROOT_TPL/ci.yml" "$TARGET/.github/workflows/ci.yml"
 copy_new "$ROOT_TPL/agent.yaml.tpl" "$TARGET/deploy/agent.yaml.tpl"
 copy_new "$ROOT_TPL/render_runtime_spec.py" "$TARGET/deploy/render_runtime_spec.py"
+copy_new "$ROOT_TPL/env_file.py" "$TARGET/deploy/env_file.py"
+for env in "${DEPLOY_ENVS[@]}"; do
+  dst="$TARGET/src/backend/.env.$env.example"
+  sed "s/__APP_ENV__/$env/g" "$ROOT_TPL/env.deploy.example" > "$dst"  # src/backend is new: nothing to overwrite
+  CREATED+=("$dst")
+done
 for secret_file in .env .greennode.json deploy/agent.yaml; do
   if ! grep -qxF "$secret_file" "$TARGET/.gitignore" && ! grep -qxF "/$secret_file" "$TARGET/.gitignore"; then
     echo "⚠ $TARGET/.gitignore does not ignore '$secret_file' — add it (it holds secrets)." >&2
@@ -100,20 +140,27 @@ if [[ $WITH_FE -eq 1 ]]; then
     $([[ $SYNC -eq 0 ]] && echo --no-install)
 fi
 
-# Replace the placeholder — only in files created above that contain it (untouched files keep inode & mtime)
+# Replace the placeholders — only in files created above that contain them (untouched files keep inode & mtime)
 for f in ${CREATED[@]+"${CREATED[@]}"}; do
-  if grep -q "__PROJECT_NAME__" "$f" 2>/dev/null; then
-    sed -i.bak "s/__PROJECT_NAME__/$NAME/g" "$f" && rm -f "$f.bak"
+  if grep -q "__PROJECT_NAME__\|__STANDARD_VERSION__\|__SCAFFOLD_VERSION__" "$f" 2>/dev/null; then
+    sed -i.bak -e "s/__PROJECT_NAME__/$NAME/g" -e "s/__STANDARD_VERSION__/$STANDARD_VERSION/g" \
+      -e "s/__SCAFFOLD_VERSION__/$SCAFFOLD_VERSION/g" "$f" && rm -f "$f.bak"
   fi
 done
 
 [[ -f "$TARGET/src/backend/.env" ]] || cp "$TARGET/src/backend/.env.example" "$TARGET/src/backend/.env"
 
 if [[ $SYNC -eq 1 ]]; then
-  (cd "$TARGET/src/backend" && uv sync && uv run pytest -q -p no:warnings)
+  cd "$TARGET/src/backend" # no subshell: bash 3.2 (macOS) does not run the ERR trap for a failed ( … )
+  PHASE="uv sync"
+  uv sync
+  PHASE="uv run pytest"
+  uv run pytest -q -p no:warnings
+  cd - >/dev/null
 fi
+trap - ERR
 
-echo "✔ Scaffolded '$NAME' at $TARGET"
+echo "✔ Scaffolded '$NAME' at $TARGET (standard $STANDARD_VERSION, skills $SCAFFOLD_VERSION)"
 if [[ $SYNC -eq 0 ]]; then
   echo "  ⚠ --no-sync: no uv.lock yet — run 'cd src/backend && uv lock && uv sync' before make test / docker-build."
 fi

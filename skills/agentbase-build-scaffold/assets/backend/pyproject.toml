@@ -3,33 +3,46 @@ name = "__PROJECT_NAME__-backend"
 version = "0.1.0"
 description = "__PROJECT_NAME__ — AgentBase agent backend on GreenNode AgentBase"
 requires-python = ">=3.13,<3.14"
+# Every package the code imports directly is declared here (not only reached transitively) with an upper bound at
+# the next major version — or the next minor where the code relies on internals. Last resolved and tested:
+# greennode-agentbase 1.0.3, langgraph 1.2, langchain-core 1.6, langchain-openai 1.7, openai 3.31, langfuse 4.18,
+# starlette 1.8, opentelemetry 1.45, a2a-sdk 1.2.
 dependencies = [
     # GreenNode AgentBase runtime + memory bridge
-    "greennode-agentbase>=1.0.3",
-    "greennode-agent-bridge[langgraph]>=1.0.5",
+    "greennode-agentbase>=1.0.3,<1.1",  # app/identity + app/memory rely on SDK internals — re-verify before 1.1
+    "greennode-agent-bridge[langgraph]>=1.0.5,<2",
     # Agent framework
     "langgraph>=1.0.0,<2.0.0",
     "langchain>=1.0.0,<2.0.0",  # required by langfuse.langchain CallbackHandler
     "langchain-core>=1.0.0,<2.0.0",
     "langchain-openai>=1.1.0,<2.0.0",
     "langchain-mcp-adapters>=0.3.0,<0.4.0",
+    "openai>=2.45.0,<4",  # app/llm + app/service: error classes for fallback / HTTP status mapping
+    # HTTP app (main.py middleware, A2A server)
+    "starlette>=0.46.2,<2",
     # Observability
     "langfuse>=4.17.0,<5.0.0",  # mask_otel_spans (status_message masking) verified on 4.17
+    "opentelemetry-api>=1.45.0,<2",  # tracing.py reads the current span
     # Config + auth
     "pydantic>=2.6,<3",  # greennode-agentbase 1.0.x still uses class-based Config (removed in pydantic 3)
-    "pydantic-settings>=2.6.0",
-    "pyjwt[crypto]>=2.14",  # PyJWKClient refetch cooldown (random-kid tokens must not hammer the IdP JWKS)
-    "httpx>=0.27.0",
-    "jsonschema>=4.0",  # validates HITL-edited args of MCP tools (JSON-Schema dicts)
-    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.6.0,<3",
+    "pyjwt[crypto]>=2.14,<3",  # PyJWKClient refetch cooldown (random-kid tokens must not hammer the IdP JWKS)
+    "httpx>=0.27.0,<1",
+    "jsonschema>=4.0,<5",  # validates HITL-edited args of MCP tools (JSON-Schema dicts)
+    "python-dotenv>=1.0.0,<2",
+    "tzdata>=2024.1",  # IANA time zones for zoneinfo (APP_TIMEZONE) even where the OS has none (Windows, minimal images)
     "a2a-sdk[http-server]>=1.2,<2",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
+    "pytest>=8.3.0,<10",
+    "pytest-asyncio>=0.24.0,<2",
     "ruff>=0.8.0",
+    # imported directly by tests
+    "opentelemetry-sdk>=1.45.0,<2",  # in-memory span exporter (tracing tree tests)
+    "uvicorn>=0.34.2,<1",  # real HTTP servers in MCP / A2A tests
+    "cryptography>=46.0.5",  # test JWT signing keys
 ]
 
 [tool.uv]

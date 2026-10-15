@@ -1,4 +1,6 @@
 {
+  "standard_version": "__STANDARD_VERSION__",
+  "scaffold_version": "__SCAFFOLD_VERSION__",
   "wizard_step": 0,
   "project_name": "__PROJECT_NAME__",
   "framework": "langgraph",
@@ -9,5 +11,52 @@
   "aip_key_name": null,
   "cr_repo_name": null,
   "gateway_name": null,
-  "langfuse_project": null
+  "langfuse_project": null,
+  "environments": {
+    "dev": {
+      "runtime_id": null,
+      "endpoint": null,
+      "image": null,
+      "network_mode": null,
+      "allowed_cidrs": [],
+      "inbound_auth": null,
+      "identity": null,
+      "memory_id": null,
+      "memory_strategy_id": null,
+      "llm_key_name": null,
+      "mcp_gateway": null,
+      "policy_group": null,
+      "principal": null
+    },
+    "staging": {
+      "runtime_id": null,
+      "endpoint": null,
+      "image": null,
+      "network_mode": null,
+      "allowed_cidrs": [],
+      "inbound_auth": null,
+      "identity": null,
+      "memory_id": null,
+      "memory_strategy_id": null,
+      "llm_key_name": null,
+      "mcp_gateway": null,
+      "policy_group": null,
+      "principal": null
+    },
+    "prod": {
+      "runtime_id": null,
+      "endpoint": null,
+      "image": null,
+      "network_mode": null,
+      "allowed_cidrs": [],
+      "inbound_auth": null,
+      "identity": null,
+      "memory_id": null,
+      "memory_strategy_id": null,
+      "llm_key_name": null,
+      "mcp_gateway": null,
+      "policy_group": null,
+      "principal": null
+    }
+  }
 }

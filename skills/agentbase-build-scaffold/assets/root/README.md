@@ -31,4 +31,6 @@ See `src/backend/app/*` — each module has a docstring describing its responsib
 
 ## Deploy
 
-`make docker-build`, then use `/agentbase-deploy` (push to AgentBase Container Registry → create a Runtime with env file `src/backend/.env.<env>`).
+- Per-environment config is committed in `src/backend/.env.<env>.example` (non-secret; secrets are `<set-in-deploy>`). Lint with `make check-env ENV_FILE=src/backend/.env.<env>.example` — the platform reads env files literally (no quotes, no inline comments, no `export`).
+- CI (`.github/workflows/ci.yml`): run the workflow manually with `deploy_env` (and `image_tag` to redeploy an existing image) — secrets come from the GitHub Environment.
+- Manual: copy the example to `src/backend/.env.<env>` and fill the secrets yourself, `make docker-build TAG=<tag>`, then `/agentbase-deploy` (push + create/update only — the image is built). Details: skill `agentbase-build-deploy`.

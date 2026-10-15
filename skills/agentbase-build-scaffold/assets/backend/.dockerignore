@@ -1,21 +1,27 @@
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.ruff_cache/
-.env
-.env.*
-!.env.example
-.greennode.json
-.agentbase/
-.agentbase-state.json
-*.credentials.json
+# `**/` = at any depth (a bare pattern only matches at the context root)
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.DS_Store
 .git/
 tests/
 evals/
-*.md
+scripts/
+**/*.md
 !app/prompts/*.md
+!app/prompts/**/*.md
 # Documents for search_knowledge must be in the image
 !app/knowledge/**
-scripts/
+Dockerfile
+.dockerignore
+# Secrets and local state LAST, so no `!` rule above can re-include them
+**/.env
+**/.env.*
+**/.greennode.json
+**/.greennode_runtime.json
+**/.agentbase/
+**/.agentbase-state.json
+**/*.credentials.json
