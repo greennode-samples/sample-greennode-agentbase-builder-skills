@@ -37,6 +37,9 @@ NON_ENV_TOKENS: dict[str, str] = {
 # --- Trace names ---------------------------------------------------------------------------------------------------
 # Emitted names that need not appear in the tracing SKILL.md tree (normalized: placeholders written as <*>).
 TRACE_NOT_IN_TREE: dict[str, str] = {}
+# (file path relative to the repo root, the name expression as written) → reason, for a trace name that cannot be a
+# literal (e.g. a helper wrapping tracing.step(name)) — the names it receives must then be documented by hand.
+TRACE_DYNAMIC_NAMES: dict[tuple[str, str], str] = {}
 
 # --- `make <target>` mentions -------------------------------------------------------------------------------------
 # (file path relative to the repo root, target) → reason, for a mention that is right although the Makefile of its

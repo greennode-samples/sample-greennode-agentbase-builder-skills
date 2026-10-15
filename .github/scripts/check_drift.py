@@ -91,6 +91,7 @@ EXCEPTION_LISTS = (
     "EXTERNAL_ENV_PATTERNS",
     "NON_ENV_TOKENS",
     "TRACE_NOT_IN_TREE",
+    "TRACE_DYNAMIC_NAMES",
     "MAKE_TARGET_EXCEPTIONS",
     "NON_TEMPLATE_PATHS",
     "NON_TEMPLATE_PATH_PATTERNS",
@@ -582,13 +583,17 @@ def emitted_names(errors: list[str]) -> dict[str, Emitted]:
 
         def need(node: ast.AST | None, what: str, at: int) -> str | None:
             name = lit(node)
-            if name is None and scope == "app":  # evals/: run_experiment(run_name=…) is a dataset run, not a span
-                err(
-                    path,
-                    at,
-                    f"{what} is not a string literal or f-string — the trace-name check "
-                    "cannot see it; use one (names are an API: stable, `<domain>.<action>`)",
-                )
+            # evals/: run_experiment(run_name=…) names a dataset run, not a span
+            if name is None and scope == "app" and node is not None:
+                expr = ast.unparse(node)
+                if not allowed((rel(path), expr), "TRACE_DYNAMIC_NAMES"):
+                    err(
+                        path,
+                        at,
+                        f"{what} is `{expr}`, not a string literal or f-string — the trace-name check cannot see "
+                        "it: use one (names are an API: stable, `<domain>.<action>`), or allowlist "
+                        f"({rel(path)!r}, {expr!r}) in {ALLOWLIST} TRACE_DYNAMIC_NAMES and document the names",
+                    )
             return name
 
         for node in ast.walk(tree):
