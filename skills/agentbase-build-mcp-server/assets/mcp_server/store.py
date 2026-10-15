@@ -1,18 +1,25 @@
 """Per-user data access. EVERY method takes `owner` (= current_user()) and filters by it — never by a tool argument.
 
-SQLite (stdlib) keeps the template dependency-free and runnable locally. It is a local file ⇒ NOT shared
-across Runtime replicas: before deploying with more than 1 replica, keep this interface and swap the bodies for
-Postgres (asyncpg / SQLAlchemy async), e.g. `SELECT ... FROM notes WHERE owner = $1`.
+SQLite (stdlib) keeps the template dependency-free and runnable locally. It is a file inside the container:
+the Runtime filesystem is NOT persistent (wiped on every redeploy/restart) and each replica (autoscaling, up to
+10) has its own ⇒ notes are lost or split between replicas. `open_store()` therefore refuses SQLite outside
+MCP_APP_ENV=local unless MCP_ALLOW_SQLITE=true (throwaway demo). Prod ⇒ Postgres, even with 1 replica: keep
+this interface and swap the bodies (asyncpg / SQLAlchemy async), e.g. `SELECT ... FROM notes WHERE owner = $1`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+from settings import Settings
+
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -86,3 +93,19 @@ class NotesStore:
         with closing(self._connect()) as c, c:
             cur = c.execute("DELETE FROM notes WHERE owner = ? AND id = ?", (owner, note_id))
             return cur.rowcount > 0
+
+
+def open_store(settings: Settings) -> NotesStore:
+    """The notes store for this environment. Replace with your Postgres store before deploying."""
+    if settings.app_env != "local":
+        if not settings.allow_sqlite:
+            raise RuntimeError(
+                f"SQLite store (MCP_DB_PATH) refused with MCP_APP_ENV={settings.app_env}: the Runtime "
+                "filesystem is wiped on every redeploy and replicas don't share it ⇒ data loss. Switch "
+                "store.py to Postgres (even with 1 replica), or set MCP_ALLOW_SQLITE=true for a throwaway demo."
+            )
+        log.error(
+            "MCP_ALLOW_SQLITE=true: notes live in a container-local SQLite file — LOST on every redeploy "
+            "and NOT shared between replicas. Demo only; use Postgres in production."
+        )
+    return NotesStore(settings.db_path)

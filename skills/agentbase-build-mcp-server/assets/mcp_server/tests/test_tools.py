@@ -109,6 +109,11 @@ def _catalog(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=request)
     if sku == "SKU-BOOM":
         return httpx.Response(500, text="Traceback ... db password=hunter2")
+    if sku == "SKU-DRIFT":  # contract drift: `name` renamed, internal fields in the record
+        body = {"sku": sku, "title": "Lamp", "price": 1, "currency": "USD", "in_stock": True}
+        return httpx.Response(200, json={**body, "db_dsn": "postgres://u:hunter2@db.internal"})
+    if sku == "SKU-HTML":  # e.g. an SSO login page in front of the internal API
+        return httpx.Response(200, text="<html>login at sso.internal.corp hunter2</html>")
     return httpx.Response(404)
 
 
@@ -121,11 +126,18 @@ async def test_get_product_ok(start_server):
 async def test_get_product_upstream_failures_are_clean(start_server):
     base = start_server(JWT_ENV, backend=_catalog)
     tok = make_token("alice")
-    cases = {"SKU-404": "not found", "SKU-SLOW": "timed out", "SKU-BOOM": "error (500)"}
+    cases = {
+        "SKU-404": "not found",
+        "SKU-SLOW": "timed out",
+        "SKU-BOOM": "error (500)",
+        "SKU-DRIFT": "unexpected response",  # pydantic error would echo the raw record (DSN)
+        "SKU-HTML": "unexpected response",  # r.json() error would echo the body
+    }
     for sku, expected in cases.items():
         res = await call(base, tok, "get_product", {"sku": sku})
-        assert res.isError and expected in text(res).lower()
-        assert "hunter2" not in text(res) and "backend.test" not in text(res)  # no leaks
+        assert res.isError and expected in text(res).lower(), text(res)
+        for leak in ("hunter2", "backend.test", "internal", "title", "Traceback"):
+            assert leak not in text(res), (sku, text(res))
 
 
 async def test_get_product_validation_and_scope(start_server):

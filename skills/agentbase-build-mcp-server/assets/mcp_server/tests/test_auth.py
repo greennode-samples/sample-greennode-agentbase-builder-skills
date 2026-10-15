@@ -21,6 +21,7 @@ from conftest import (
     JWKS,
     JWT_ENV,
     LOCAL_ENV,
+    RESOURCE_URL,
     ROOT,
     call,
     free_port,
@@ -31,16 +32,22 @@ from conftest import (
 from cryptography.hazmat.primitives.asymmetric import ec
 
 LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+ALL_ROLES = ["notes.read", "notes.write"]
 
 
 def test_health_is_public(api_key_server):
     assert httpx.get(f"{api_key_server}/health").status_code == 200
 
 
-def test_mcp_requires_auth(api_key_server):
-    r = httpx.post(f"{api_key_server}/mcp", json=LIST)
+def test_mcp_requires_auth(api_key_server, jwt_server):
+    r = httpx.post(f"{jwt_server}/mcp", json=LIST)
     assert r.status_code == 401
-    assert "resource_metadata" in r.headers.get("www-authenticate", "")  # RFC 9728 discovery
+    # RFC 9728 discovery points at the public https resource URL (MCP_RESOURCE_URL), never localhost
+    www = r.headers.get("www-authenticate", "")
+    assert 'resource_metadata="https://mcp.test/.well-known/oauth-protected-resource/mcp"' in www
+    # api_key: no authorization server to advertise ⇒ no resource_metadata
+    r = httpx.post(f"{api_key_server}/mcp", json=LIST)
+    assert r.status_code == 401 and "resource_metadata" not in r.headers.get("www-authenticate", "")
 
 
 def test_wrong_api_key_rejected(api_key_server):
@@ -156,11 +163,101 @@ async def test_slow_jwks_fetch_does_not_block_other_requests(jwt_server):
         assert (await slow).status_code == 200  # and the token is still verified
 
 
-def test_metadata_endpoint(jwt_server):
+def test_metadata_endpoint(jwt_server, api_key_server):
     r = httpx.get(f"{jwt_server}/.well-known/oauth-protected-resource/mcp")
-    if r.status_code == 404:
-        r = httpx.get(f"{jwt_server}/.well-known/oauth-protected-resource")
-    assert r.status_code == 200 and "https://idp.test" in r.text
+    assert r.status_code == 200
+    meta = r.json()
+    assert meta["resource"] == RESOURCE_URL
+    assert meta["authorization_servers"] == ["https://idp.test/"]
+    # api_key mode used to advertise ITSELF (http://localhost…) as the authorization server
+    r = httpx.get(f"{api_key_server}/.well-known/oauth-protected-resource/mcp")
+    assert r.status_code == 404
+
+
+def test_jwt_outside_local_requires_https_resource_url(monkeypatch):
+    sys.modules.pop("settings", None)
+    from settings import Settings
+
+    env = {k.removeprefix("MCP_").lower(): v for k, v in JWT_ENV.items()}
+    for bad in ("http://localhost:8080/mcp", "http://mcp.example.com/mcp"):
+        with pytest.raises(ValueError, match="MCP_RESOURCE_URL"):
+            Settings(**{**env, "resource_url": bad})
+    assert Settings(**{**env, "resource_url": "http://localhost:8081/mcp", "app_env": "local"})
+    for k, v in API_KEY_ENV.items():
+        monkeypatch.setenv(k, v)
+    # api_key never publishes it ⇒ not required
+    assert Settings().resource_url.startswith("http://")
+
+
+# ----------------------------------------------------------------------------- OAuth 2LO = no user
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"sub": "agent-client@clients", "gty": "client-credentials"},  # Auth0
+        {"sub": "agent-client"},  # Okta & most IdPs: sub = client id (azp="agent-client")
+        {"sub": "0oa1", "cid": "0oa1", "azp": None},  # Okta `cid`
+        {"sub": "sa-uuid", "preferred_username": "service-account-agent-client"},  # Keycloak
+        {"sub": "sp-oid", "oid": "sp-oid", "scope": None, "roles": ALL_ROLES},  # Entra app-only
+        {"sub": "sp-oid", "idtyp": "app"},  # Entra with the idtyp optional claim
+    ],
+    ids=["auth0-gty", "sub-is-azp", "okta-cid", "keycloak-sa", "entra-sub-oid", "entra-idtyp"],
+)
+async def test_oauth_2lo_token_has_no_user(jwt_server, claims):
+    """A client-credentials token carries `sub` (the client's): accepting it as a user would put every user of
+    the agent in ONE notes bucket. Shared tools still work for it."""
+    tok = make_token(**claims)
+    assert not (await call(jwt_server, tok, "server_time")).isError
+    for tool, args in (("list_notes", {}), ("add_note", {"text": "x"})):
+        res = await call(jwt_server, tok, tool, args)
+        assert res.isError and "requires user identity" in text(res), text(res)
+
+
+async def test_user_token_claim_required_when_configured(start_server):
+    base = start_server({**JWT_ENV, "MCP_USER_TOKEN_CLAIM": "email"})
+    machine = await call(base, make_token("svc-123"), "list_notes")  # no email ⇒ 2LO
+    assert machine.isError and "requires user identity" in text(machine)
+    user = await call(base, make_token("alice", email="alice@vng.com.vn"), "list_notes")
+    assert not user.isError and user.structuredContent["total"] == 0
+
+
+async def test_entra_app_roles_are_scopes(start_server):
+    """Entra app-only tokens carry application permissions in `roles` (no `scp`)."""
+
+    def catalog(request: httpx.Request) -> httpx.Response:
+        body = {"sku": "SKU-1", "name": "Lamp", "price": 1.0, "currency": "USD", "in_stock": True}
+        return httpx.Response(200, json=body)
+
+    base = start_server(JWT_ENV, backend=catalog)
+    tok = make_token("sp-oid", oid="sp-oid", scope=None, roles=["catalog.read"])
+    res = await call(base, tok, "get_product", {"sku": "SKU-1"})
+    assert not res.isError and res.structuredContent["name"] == "Lamp", text(res)
+    no_role = make_token("sp-oid", oid="sp-oid", scope=None, roles=["other.read"])
+    res = await call(base, no_role, "get_product", {"sku": "SKU-1"})
+    assert res.isError and "catalog.read" in text(res)
+
+
+def test_jwks_unreachable_is_401_not_500(start_server):
+    base = start_server({**JWT_ENV, "MCP_JWKS_URL": f"http://127.0.0.1:{free_port()}/jwks.json"})
+    assert _status(base, make_token("carol")) == 401
+
+
+def test_require_scope_fails_closed_without_token(load_server):
+    """Outside a request carrying a verified token (get_access_token() is None) ⇒ refused, not allowed."""
+    server = load_server(JWT_ENV)
+    with pytest.raises(server.Forbidden, match="catalog.read"):
+        server.require_scope("catalog.read")
+    load_server(LOCAL_ENV).require_scope("catalog.read")  # auth none (local only): always passes
+
+
+def test_sqlite_refused_outside_local(load_server, monkeypatch, caplog):
+    """Runtime FS is wiped on redeploy and replicas don't share it ⇒ SQLite only with an explicit opt-in."""
+    monkeypatch.delenv("MCP_ALLOW_SQLITE", raising=False)
+    env = {k: v for k, v in JWT_ENV.items() if k != "MCP_ALLOW_SQLITE"}
+    with pytest.raises(RuntimeError, match="Postgres"):
+        load_server(env)
+    with caplog.at_level(logging.ERROR):
+        load_server({**env, "MCP_ALLOW_SQLITE": "true"})
+    assert "LOST on every redeploy" in caplog.text
 
 
 def test_settings_fail_closed_without_env(monkeypatch):

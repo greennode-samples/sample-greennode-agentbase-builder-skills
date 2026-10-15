@@ -23,7 +23,7 @@ from starlette.responses import JSONResponse
 from auth import build_verifier
 from backend import Backend
 from settings import get_settings
-from store import NotesStore
+from store import open_store
 
 settings = get_settings()
 logging.basicConfig(level="INFO")
@@ -38,7 +38,7 @@ if verifier is None:
         settings.host,
         settings.port,
     )
-store = NotesStore(settings.db_path)
+store = open_store(settings)  # SQLite: MCP_APP_ENV=local only (store.py) — prod ⇒ Postgres
 backend = Backend(settings.backend_url, settings.backend_timeout_s, settings.backend_token)
 mcp = FastMCP(
     settings.server_name,
@@ -51,7 +51,10 @@ mcp = FastMCP(
     token_verifier=verifier,
     auth=AuthSettings(
         issuer_url=settings.issuer or settings.resource_url,
-        resource_server_url=settings.resource_url,
+        # RFC 9728 protected resource metadata (+ `resource_metadata` in WWW-Authenticate) tells OAuth
+        # clients which authorization server issues tokens for this server ⇒ jwt mode only. An API key has
+        # no authorization server: advertising one (this server itself) would be wrong.
+        resource_server_url=settings.resource_url if settings.auth_mode == "jwt" else None,
         required_scopes=settings.required_scopes or None,
         validate_token_resource=False,  # JwtVerifier checks `aud` itself (MCP_AUDIENCE)
     )
@@ -71,13 +74,17 @@ class Forbidden(ToolError):
 
 
 def require_scope(scope: str) -> None:
+    """Fails closed: with auth on, no verified token (e.g. a code path outside the auth middleware) ⇒ refused."""
+    if settings.auth_mode == "none":  # local dev only (Settings blocks it elsewhere)
+        return
     tok = get_access_token()
-    if tok is not None and settings.auth_mode != "none" and scope not in tok.scopes:
+    if tok is None or scope not in tok.scopes:
         raise Forbidden(f"Missing scope '{scope}'")
 
 
 def current_user() -> str:
-    """End-user identity from the verified token (OAuth 3LO / inbound forward). NEVER from parameters."""
+    """End-user identity from the verified token (OAuth 3LO / inbound forward). NEVER from parameters.
+    API keys and OAuth 2LO (client-credentials) tokens have no user (subject=None, auth.py) ⇒ refused."""
     if settings.auth_mode == "none":  # local dev only (Settings blocks it elsewhere)
         return settings.dev_user
     tok = get_access_token()
@@ -116,7 +123,8 @@ async def get_product(
     """Look up one product in the catalog by SKU: name, price, stock. Use when the user asks about a
     specific product. Requires scope `catalog.read`."""
     require_scope("catalog.read")
-    return Product.model_validate(await backend.get_json(f"/products/{sku}"))
+    # get_model validates the upstream contract: drift / non-JSON ⇒ clean ToolError, nothing leaked
+    return await backend.get_model(Product, f"/products/{sku}")
 
 
 # --- per-user data (identity from the token, every query filtered by owner)

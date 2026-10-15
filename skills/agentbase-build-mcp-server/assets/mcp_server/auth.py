@@ -5,7 +5,8 @@ Who calls the MCP server? In the AgentBase standard it is the **MCP Gateway** (c
 | Connector outbound auth | Gateway sends to server              | MCP_AUTH_MODE on server |
 |-------------------------|--------------------------------------|-------------------------|
 | API Key 2LO             | `Authorization: Bearer <api key>`    | api_key                 |
-| OAuth 2LO (M2M)         | `Bearer <client access token>`       | jwt (or introspect)     |
+| OAuth 2LO (M2M)         | `Bearer <client access token>`       | jwt — NO user (see      |
+|                         |                                      | is_machine_token)       |
 | OAuth 3LO               | `Bearer <USER access token>`         | jwt — has user `sub`    |
 | Inbound forward         | the same JWT agent/user sent to GW   | jwt (same IdP) — JWT    |
 |                         |                                      | inbound only, see below |
@@ -94,16 +95,48 @@ class JwtVerifier(TokenVerifier):
         # unauthenticated 500.
         except (jwt.PyJWTError, TypeError, ValueError):
             return None
-        scope = claims.get("scope") or claims.get("scp") or []
-        scopes = scope.split() if isinstance(scope, str) else list(scope)
         return AccessToken(
             token=token,
             client_id=str(claims.get("azp") or claims.get("client_id") or ""),
-            scopes=scopes,
+            scopes=token_scopes(claims),
             expires_at=claims.get("exp"),
             resource=s.audience,  # verified above
-            subject=claims.get(s.user_claim),
+            # 2LO (client credentials) has a `sub` too — the CLIENT's. Giving it a user identity would put
+            # every caller of that client (all users of the agent) in ONE per-user bucket ⇒ subject=None.
+            subject=None
+            if is_machine_token(claims, s.user_token_claim)
+            else claims.get(s.user_claim),
         )
+
+
+def token_scopes(claims: dict) -> list[str]:
+    """`scope` (space-separated, RFC 8693/9068) or `scp` (string or list), plus `roles`: Entra app-only
+    (client credentials) tokens carry their application permissions in `roles` and have no `scp`."""
+    scope = claims.get("scope") or claims.get("scp") or []
+    scopes = scope.split() if isinstance(scope, str) else [str(x) for x in scope]
+    roles = claims.get("roles")
+    if isinstance(roles, list):
+        scopes += [r for r in roles if isinstance(r, str)]
+    return list(dict.fromkeys(scopes))
+
+
+def is_machine_token(claims: dict, user_token_claim: str = "") -> bool:
+    """True for OAuth 2LO / client-credentials tokens: no end user behind them, only a client.
+
+    Most reliable: MCP_USER_TOKEN_CLAIM = a claim only user tokens carry at your IdP (e.g. `email`, Entra
+    `scp`). Built-in signals (any one ⇒ machine): Auth0 `gty=client-credentials`, Entra `idtyp=app` or
+    `sub == oid` (user tokens carry a pairwise `sub`), `sub` equal to the client id (`azp` / `client_id` /
+    `cid` / `appid` — Okta and most IdPs), Keycloak `preferred_username=service-account-<client>`.
+    """
+    if user_token_claim and not claims.get(user_token_claim):
+        return True
+    if claims.get("gty") == "client-credentials" or claims.get("idtyp") == "app":
+        return True
+    sub = claims.get("sub")
+    # The client's own id (Okta & most IdPs: sub = client id) or Entra's object id (app-only: sub = oid)
+    if sub and any(sub == claims.get(k) for k in ("azp", "client_id", "cid", "appid", "oid")):
+        return True
+    return str(claims.get("preferred_username", "")).startswith("service-account-")
 
 
 def build_verifier(settings: Settings) -> TokenVerifier | None:

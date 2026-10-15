@@ -1,7 +1,8 @@
 # __SERVER_NAME__ — MCP server. All Python commands run through uv.
 IMAGE ?= __SERVER_NAME__
 TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-URL ?= http://localhost:8080/mcp
+# PORT=8081 when a local agent (`make dev` of the agent) already uses 8080: `make dev PORT=8081`, `make tools PORT=8081`
+URL ?= http://localhost:$(or $(PORT),8080)/mcp
 
 .PHONY: setup dev test lint fmt lock tools call inspector docker-build docker-run
 
@@ -9,8 +10,8 @@ setup:            ## Install deps and create .env (local, MCP_AUTH_MODE=none) if
 	uv sync
 	@test -f .env || (cp .env.example .env && echo "created .env from .env.example")
 
-dev:              ## Run the server locally on :8080 (MCP endpoint /mcp)
-	uv run python server.py
+dev:              ## Run the server locally on :8080 (MCP endpoint /mcp); PORT=8081 to run next to a local agent
+	$(if $(PORT),MCP_PORT=$(PORT) MCP_RESOURCE_URL=http://localhost:$(PORT)/mcp) uv run python server.py
 
 test:             ## End-to-end tests (real server + real MCP client)
 	uv run pytest -q
@@ -37,4 +38,4 @@ docker-build:     ## Build a linux/amd64 image for AgentBase Runtime
 	docker build --platform linux/amd64 -t $(IMAGE):$(TAG) .
 
 docker-run:       ## Run the image locally with .env, published on this machine's loopback only
-	docker run --rm -p 127.0.0.1:8080:8080 --env-file .env -e MCP_HOST=0.0.0.0 $(IMAGE):$(TAG)
+	docker run --rm -p 127.0.0.1:$(or $(PORT),8080):8080 --env-file .env -e MCP_HOST=0.0.0.0 $(IMAGE):$(TAG)

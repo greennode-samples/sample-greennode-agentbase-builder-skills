@@ -11,8 +11,11 @@ from typing import Any
 
 import httpx
 from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import BaseModel, ValidationError
 
 log = logging.getLogger(__name__)
+
+UNEXPECTED = "Internal system returned an unexpected response."
 
 
 class Backend:
@@ -51,4 +54,30 @@ class Backend:
         if r.status_code >= 400:
             log.error("backend error status=%s path=%s", r.status_code, path)
             raise ToolError(f"Internal system error ({r.status_code}). Try again later.")
-        return r.json()
+        try:
+            return r.json()
+        except ValueError:  # an HTML login/error page, truncated body… — never echo it to the LLM
+            log.error(
+                "backend returned non-JSON status=%s path=%s content-type=%s",
+                r.status_code,
+                path,
+                r.headers.get("content-type"),
+            )
+            raise ToolError(UNEXPECTED) from None
+
+    async def get_model[M: BaseModel](
+        self, model: type[M], path: str, params: dict[str, Any] | None = None
+    ) -> M:
+        """GET + validate against the contract `model`. Upstream contract drift (renamed / missing fields)
+        becomes a clean ToolError; the pydantic error (it embeds the raw upstream record, which may hold
+        internal fields or credentials) is logged without input values and never reaches the LLM."""
+        data = await self.get_json(path, params)
+        try:
+            return model.model_validate(data)
+        except ValidationError as e:
+            fields = [
+                (".".join(map(str, err["loc"])), err["type"])
+                for err in e.errors(include_url=False, include_input=False, include_context=False)
+            ]
+            log.error("backend contract drift %s path=%s errors=%s", model.__name__, path, fields)
+            raise ToolError(UNEXPECTED) from None

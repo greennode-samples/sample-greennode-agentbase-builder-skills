@@ -3,7 +3,8 @@
 Adding a tool? Write its tests in tests/test_tools.py with these fixtures — no harness code needed:
   local_server  — MCP_AUTH_MODE=none, user = "dev-user"
   jwt_server    — MCP_AUTH_MODE=jwt; mint tokens with make_token("alice", scope="…"), aud=None drops a claim.
-                  Keys come from JWKS, a real local JWKS endpoint (JWKS.add("k2"), JWKS.published = [...])
+                  Keys come from JWKS, a real local JWKS endpoint (JWKS.add("k2"), JWKS.published = [...]).
+                  An OAuth 2LO (client-credentials) token: make_token("cli@clients", gty="client-credentials")
   api_key_server— MCP_AUTH_MODE=api_key; token = API_KEY (no user identity; scopes = MCP_API_KEY_SCOPES,
                   `catalog.read` in API_KEY_ENV)
   start_server(env, backend=handler) — any env + a fake internal system (httpx.MockTransport handler)
@@ -94,14 +95,19 @@ class JwksServer:
 JWKS = JwksServer()  # one for the test run; reset after every test
 
 LOCAL_ENV = {"MCP_APP_ENV": "local", "MCP_AUTH_MODE": "none"}
+# Deployed-like envs (MCP_APP_ENV=dev). Tests use a throwaway SQLite file ⇒ MCP_ALLOW_SQLITE (store.py).
 API_KEY_ENV = {
     "MCP_APP_ENV": "dev",
+    "MCP_ALLOW_SQLITE": "true",
     "MCP_AUTH_MODE": "api_key",
     "MCP_API_KEY_SHA256": f'["{hashlib.sha256(API_KEY.encode()).hexdigest()}"]',
     "MCP_API_KEY_SCOPES": '["catalog.read"]',  # as in .env.example: shared-data tools only
 }
+RESOURCE_URL = "https://mcp.test/mcp"
 JWT_ENV = {
     "MCP_APP_ENV": "dev",
+    "MCP_ALLOW_SQLITE": "true",
+    "MCP_RESOURCE_URL": RESOURCE_URL,  # https required outside local (jwt mode)
     "MCP_AUTH_MODE": "jwt",
     "MCP_ISSUER": ISSUER,
     "MCP_JWKS_URL": JWKS.url,
