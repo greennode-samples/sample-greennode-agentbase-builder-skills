@@ -30,7 +30,7 @@ route → approval → interrupt({type: tool_approval, tool_calls, message})
 client shows approval card → user Approve / Edit args / Reject (with reason)
 client POST {"type":"resume","interrupt_id":"<interrupt.id>","decisions":[{tool_call_id, action, args?, reason?}]}
 approval reruns, receives decisions → tools run approved calls (with edited args),
-rejected calls ⇒ error ToolMessage "Not executed: <reason>" → agent continues answering
+rejected calls ⇒ error ToolMessage "Not executed: the user declined… <reason>" (`rejection_note`) → agent continues answering
 ⇒ "success" — OR another "interrupted" (the model asks for the next action: a NEW interrupt id)
 ```
 
@@ -43,6 +43,7 @@ Rules enforced in code:
 - `resume` with no pending interrupt ⇒ **409**. A resume for an **earlier card** ⇒ **409 "already been handled"** with `details.interrupt` = the card that is pending now — detected by the `interrupt_id` (when the snapshot exposes the interrupt) **and** by the decision ids: they must name tool calls of the pending card. The id check works without `interrupt_id` (A2A, eval) and with AgentBase Memory hiding the interrupt, so a double-tap/retried "approve card 1" is never applied to card 2 (it used to silently reject card 2's calls). If a stale resume still reaches the `approval` node (race across replicas), the node does not apply it and asks the same card again.
 - A session runs only 1 request at a time (lock per user+session) ⇒ approving twice in parallel doesn't run the tool twice (across replicas: see the checks above).
 - `edit` requires `args` to be an object and is validated against the tool's schema in the approval node (`edited_args_error`: Pydantic for local tools, JSON Schema for MCP tools, whose adapter does NOT validate). Invalid ⇒ the call is rejected with `Edited arguments are invalid (…)`, never executed.
+- A rejected call's ToolMessage (`rejection_note`) says **the user** declined it (with their reason) and tells the model not to retry it or a reworded variant in that turn. A bare "Not executed: <reason>" made real models open a 2nd card for the same declined request and tell the user "the memory system refused".
 - The `approval` node **reruns from the start on resume** ⇒ don't put side effects before `interrupt()` (and `hitl.request` is emitted again on every resume — expected).
 - A `HITL_TOOLS` pattern that matches no tool (typo, renamed MCP tool, connector down) logs a WARNING and appears as `tools.collect.output.hitl_unmatched` — approval is NOT enforced for it, so check that list after adding patterns.
 

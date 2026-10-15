@@ -106,6 +106,24 @@ def validate_decisions(decisions: Any) -> list[dict]:
     return out
 
 
+def rejection_note(decision: dict | None, reason: str) -> str:
+    """What the LLM reads for a call that did not run. It says WHO decided: a bare "Not executed: <reason>" reads
+    like a tool/system refusal ⇒ models retried with reworded args (a 2nd card for a request the user already
+    declined) and told the user "the system refused"."""
+    if decision is None:
+        why = "no approval decision was received for this call, so it was treated as declined"
+    elif decision["action"] == "edit":
+        why = f"the user edited the arguments but they are invalid — {reason}"
+    elif decision.get("reason"):
+        why = f'the user declined this call (their own decision, not a system error). Their reason: "{reason}"'
+    else:
+        why = "the user declined this call (their own decision, not a system error)"
+    return (
+        f"{REJECTED_PREFIX} {why}. Do not call this tool again, or a reworded variant of the call, in this turn "
+        "unless the user asks; tell the user plainly that it was not done."
+    )
+
+
 def stale_decision_ids(decisions: list[dict], pending_tool_calls: list[dict]) -> set[str]:
     """Decision ids that are not pending. Non-empty ⇒ the decisions were made for another (earlier) card."""
     pending = {tc.get("id") for tc in pending_tool_calls}
@@ -177,7 +195,7 @@ def build_approval_node(settings: Settings, tools: list | None = None):
             elif action == "reject":
                 reason = d.get("reason") or "Rejected by the user"
             if reason is not None:
-                rejected[tc["id"]] = reason
+                rejected[tc["id"]] = rejection_note(by_id.get(tc["id"]), reason)
             resolved.append(
                 {"tool_call_id": tc["id"], "tool": tc["name"], "action": action}
                 | ({"reason": reason} if reason else {})
@@ -210,7 +228,7 @@ def build_tools_node(tools: list):
             if tc["id"] in rejected:
                 out.append(
                     ToolMessage(
-                        content=f"{REJECTED_PREFIX} {rejected[tc['id']]}. Ask the user again if needed.",
+                        content=rejected[tc["id"]],
                         tool_call_id=tc["id"],
                         name=tc["name"],
                         status="error",

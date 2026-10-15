@@ -345,6 +345,17 @@ async def test_rejected_call_never_runs_when_hitl_tools_changed_before_resume(
     assert tool_msg.status == "error" and tool_msg.content.startswith("Not executed:")
 
 
+async def test_rejected_call_message_names_the_user_and_forbids_a_retry(fake_llm):
+    """Real run: "Not executed: <reason>" read like a system refusal ⇒ the model re-asked with reworded args."""
+    model = fake_llm(_call("Fridays remote"), AIMessage("OK, not saved."))
+    await service.handle({"message": "remember"}, ctx("hitl-note"))
+    reject = {"tool_call_id": "c1", "action": "reject", "reason": "schedule changes often"}
+    await service.handle({"type": "resume", "decisions": [reject]}, ctx("hitl-note"))
+    [tool_msg] = [m for m in model.calls[-1] if isinstance(m, ToolMessage)]
+    assert tool_msg.content.startswith("Not executed: the user declined this call")
+    assert '"schedule changes often"' in tool_msg.content and "Do not call this tool again" in tool_msg.content
+
+
 async def test_decision_event_lists_every_call_with_its_tool_and_implicit_rejects(
     fake_llm, monkeypatch
 ):
