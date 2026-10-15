@@ -53,16 +53,14 @@ DOCKERFILES = (SCAFFOLD / "assets/backend/Dockerfile", MCP_SERVER / "Dockerfile"
 SECRET_PLACEHOLDER = "<set-in-deploy>"
 ALLOWLIST = ".github/scripts/drift_allowlist.py"
 
-# Where a generated project's root files come from (scaffold.sh copy_new lines)
-ROOT_MAP = {
-    ".github/workflows/ci.yml": "ci.yml",
-    "deploy/agent.yaml.tpl": "agent.yaml.tpl",
-    "deploy/render_runtime_spec.py": "render_runtime_spec.py",
-    "deploy/env_file.py": "env_file.py",
-    ".agentbase-state.json": "agentbase-state.json",
-    ".gitignore": "gitignore",
-    "Makefile": "Makefile",
-}
+# Where a generated project's root files come from: `copy_new|cp "$ROOT_TPL/<template>" "$TARGET/<path>"` in scaffold.sh
+ROOT_MAP = dict(
+    (dst, src)
+    for src, dst in re.findall(
+        r'(?:copy_new|cp)\s+"\$ROOT_TPL/([^"]+)"\s+"\$TARGET/([^"]+)"',
+        (SCAFFOLD / "scripts/scaffold.sh").read_text(encoding="utf-8"),
+    )
+)
 
 
 def rel(p: Path) -> str:
@@ -341,8 +339,8 @@ def env_world() -> EnvWorld:
         for env_line in re.findall(r"^ENV\s+(.*(?:\\\n.*)*)", text, re.M):
             other |= set(re.findall(r"([A-Z][A-Z0-9_]*)=", env_line))
     other |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)\}", read(ROOT_TPL / "agent.yaml.tpl")))
-    for sh in SKILLS.glob("*/scripts/*.sh"):  # env overrides of the skill scripts, e.g. EXPO_SDK=<n>
-        other |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)[:}]", read(sh)))
+    for sh in SKILLS.glob("*/scripts/*.sh"):  # variables of the skill scripts, incl. env overrides (EXPO_SDK=<n>)
+        other |= set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", read(sh)))
     env_files = {
         p: env_keys(p) for p in (BACKEND_ENV, DEPLOY_ENV, MCP_SERVER / ".env.example", FRONTEND / ".env.example")
     }
