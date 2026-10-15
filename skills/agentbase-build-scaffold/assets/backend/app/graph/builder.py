@@ -11,7 +11,8 @@
 - agent    : call the LLM per lane (agent | agent_simple | agent_complex → tier). (agentbase-build-llm)
 - approval : HITL interrupt() for tools matching HITL_TOOLS.               (agentbase-build-hitl)
 - tools    : local / memory / MCP tools; rejected tool => error ToolMessage. (agentbase-build-mcp)
-- reflect  : self-evaluation, only when REFLECTION_ENABLED (should_reflect). (agentbase-build-eval)
+- reflect  : self-evaluation the user waits for (REFLECTION_ENABLED, mode gate — should_reflect); a background
+             judgment runs after the response instead (app/service.py → judge_after_response). (agentbase-build-eval)
 
 Every agent call gets [system prompt (static), *history, latest user message, per-turn CONTEXT message, *this turn's
 tool rounds]: the context (current date/time, summary, recalled notes, critique) is never persisted and never

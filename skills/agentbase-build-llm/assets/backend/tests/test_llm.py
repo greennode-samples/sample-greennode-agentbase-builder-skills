@@ -88,6 +88,7 @@ def test_task_to_tier_mapping_and_override(monkeypatch):
         ({"LLM_TASK_TIERS": '{"agent": "huge"}'}, "LLM_TASK_TIERS"),
         ({"LLM_TIER_FALLBACKS": '{"larg": ["b1"]}'}, "LLM_TIER_FALLBACKS"),  # key typo was ignored
         ({"LLM_TASK_MAX_TOKENS": '{"router": -1}'}, "LLM_TASK_MAX_TOKENS"),
+        ({"LLM_THINKING_BUDGET": '{"agent": -5}'}, "LLM_THINKING_BUDGET"),
     ],
 )
 def test_llm_table_typos_fail_at_startup(monkeypatch, env, match):
@@ -814,3 +815,76 @@ async def test_structured_output_through_the_fallback_chain(mock_llm_server, tas
     assert body.get("max_completion_tokens", body.get("max_tokens")) == cap
     with pytest.raises(ValueError, match="tools or schema"):
         llm.get_llm(task, tools=[object()], schema=Verdict)  # type: ignore[list-item]
+
+
+# --- Thinking controls (LLM_THINKING_BUDGET): request fields MaaS honors (skill §6) -----------------------------------
+@pytest.mark.parametrize(
+    ("env", "task", "expected"),
+    [
+        ({}, "router", 0),  # internal JSON flows: thinking off by default
+        ({}, "judge", 0),
+        ({}, "agent", None),  # conversation: the model's own thinking
+        ({}, "agent_complex", None),
+        ({"LLM_THINKING_BUDGET": '{"reasoning": 2048}'}, "agent_complex", 2048),  # by tier
+        (
+            {"LLM_THINKING_BUDGET": '{"reasoning": 2048, "agent_complex": 512}'},
+            "agent_complex",
+            512,
+        ),
+        ({"LLM_THINKING_BUDGET": '{"judge": -1}'}, "judge", None),  # -1 ⇒ back to the model default
+        (
+            {"LLM_THINKING_BUDGET": '{"small": 256}'},
+            "router",
+            256,
+        ),  # tier key beats the task default
+    ],
+)
+def test_thinking_budget_per_task_or_tier(monkeypatch, env, task, expected):
+    _env(monkeypatch, **env)
+    assert llm.thinking_budget_for(task) == expected
+
+
+def test_thinking_params():
+    assert llm.thinking_params(None) == {}
+    assert llm.thinking_params(0) == {"enable_thinking": False}
+    assert llm.thinking_params(512) == {"thinking_budget": 512}
+
+
+async def test_thinking_fields_reach_every_model_of_the_chain(mock_llm_server, monkeypatch):
+    """A fallback must not think longer than the primary: the fields are bound on every model of the task."""
+    scripts, calls = mock_llm_server
+    _env(monkeypatch, LLM_THINKING_BUDGET='{"agent": 512}')
+    scripts["primary"] = 503
+    scripts["backup"] = _answer("ok")
+    assert (await llm.get_llm("agent").ainvoke("hi")).content == "ok"
+    assert [b.get("thinking_budget") for b in calls.bodies] == [512, 512]
+    assert "enable_thinking" not in calls.bodies[-1]
+
+    scripts["primary"] = _answer('{"complexity": "simple"}')
+    await llm.get_llm("router").ainvoke("hi")
+    assert (
+        calls.bodies[-1]["enable_thinking"] is False and "thinking_budget" not in calls.bodies[-1]
+    )
+
+    _env(monkeypatch, LLM_THINKING_BUDGET="{}")
+    await llm.get_llm("agent").ainvoke("hi")  # nothing configured ⇒ the request is unchanged
+    assert not {"thinking_budget", "enable_thinking"} & set(calls.bodies[-1])
+
+
+async def test_stream_status_while_the_model_thinks(mock_llm_server):
+    """The user saw only a spinner for 52–69 s while a reasoning model thought. `thinking` comes at once; after a
+    fallback `reset` the backup's thinking brings the status line back."""
+    scripts, calls = mock_llm_server
+    scripts["primary"] = [_chunk(reasoning="Plan the answer."), _chunk("Xin "), _SSE_ERROR]
+    scripts["backup"] = [_chunk(reasoning="Again."), *_answer("Hello there")]
+    gen = await service.handle(
+        {"message": "hi", "stream": True}, RequestContext(session_id="sse-think", user_id="u")
+    )
+    events = [e async for e in gen]
+    seq = [e.get("phase") or e.get("reason") or e["event"] for e in events]
+    first_token = seq.index("token")
+    assert seq[:first_token] == ["thinking"]  # once: the reasoning chunks don't repeat it
+    assert seq[first_token:].count("thinking") == 1
+    after_reset = seq[seq.index("llm_fallback") :]
+    assert after_reset[:2] == ["llm_fallback", "thinking"], seq
+    assert events[-1]["event"] == "done" and events[-1]["response"] == "Hello there"

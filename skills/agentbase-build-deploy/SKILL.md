@@ -32,7 +32,7 @@ The scaffold commits one **non-secret** config file per environment: `src/backen
 | `LLM_*` | dev key, tiers, fallbacks | prod key (own Rate Limit), same tiers as evaluated |
 | `LANGFUSE_*` | dev project/env | prod project, `LANGFUSE_SAMPLE_RATE` per load |
 | `MCP_GATEWAY_URL`, `HITL_TOOLS`, `MEMORY_MAX_CONCURRENCY` | per environment (separate dev/prod gateways) | `≈ 10 / max replicas` |
-| `APP_TIMEZONE`, `LLM_TASK_MAX_TOKENS`, `LTM_MIN_SCORE`, `LTM_FACT_MAX_CHARS`, `REFLECTION_TIMEOUT_S` | as evaluated (empty = app default) | same as the eval config |
+| `APP_TIMEZONE`, `LLM_TASK_MAX_TOKENS`, `LLM_THINKING_BUDGET`, `LTM_MIN_SCORE`, `LTM_FACT_MAX_CHARS`, `REFLECTION_MODE`, `REFLECTION_TIMEOUT_S` | as evaluated (empty = app default) | same as the eval config |
 
 **Which secrets may be in the runtime env file** (rendered from the CI secret store, or the user's git-ignored `.env.<env>`): `LLM_API_KEY`, `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`, `FEEDBACK_SIGNING_KEY`, static keys the agent presents to its own MCP servers / A2A peers (`${VAR}` in `mcp_servers.json` / `a2a_agents.json`). **Never** there: credentials tools use to call external services (SaaS API keys, OAuth tokens) — those live in AgentBase Identity (`/agentbase-build-identity`); MCP Gateway outbound credentials live in Access Control. Never `GREENNODE_CLIENT_ID/SECRET/AGENT_IDENTITY` (injected) or `GREENNODE_ENDPOINT_URL` (reserved; set `A2A_PUBLIC_URL`). Remind the user to review the env file themselves; **do not** print secret-bearing files into chat.
 

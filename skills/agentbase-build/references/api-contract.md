@@ -61,17 +61,20 @@ Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` i
 
 ## SSE events (`stream: true`)
 
-Each frame is `data: {json}\n\n`. Clients must parse per the SSE spec (LF/CRLF/CR line endings, multi-line `data:` joined with "\n", flush the last event at EOF):
+Each frame is `data: {json}\n\n`. Clients must parse per the SSE spec (LF/CRLF/CR line endings, multi-line `data:` joined with "\n", flush the last event at EOF), and **ignore events and fields they don't know** (new progress events are added that way, without a contract break):
 
 | event | Fields | Frontend handling |
 |---|---|---|
+| `status` | `phase`: `thinking` (before the first LLM call, while a reasoning model thinks, after a tool or a reset) · `tool` (a tool is running; `tools` = their names) · `checking` (self-eval gate: the answer is being checked before it is final) — more phases may come; `label`: short English default text (never tool arguments or results) | show a small status line under the pending reply (localize by `phase` / tool name, else show `label`); **clear it when a `token` arrives**. Sent only when it changes. Not in the non-stream response |
 | `token` | `data` | append to the answer bubble |
 | `tool_start` | `name` | show "using tool …" |
 | `tool_end` | `name`, `status` | |
 | `reset` | `reason`: `self_eval_retry` (self-eval asked for a new answer) or `llm_fallback` (the primary model failed mid-answer and a backup restarts it) | **clear the displayed text** |
 | `interrupt` | same as the `interrupted` response | show the approval card (sample `ApprovalCard`: Approve / Edit — JSON args, validated — / Reject with a per-call reason); resume with its `id`; another `interrupt` may follow |
-| `done` | same as the `success` response | finalize the bubble, store `trace_id` + `feedback_token` for feedback |
+| `done` | same as the `success` response | finalize the bubble, store `trace_id` + `feedback_token` for feedback. The turn is over: the client may close the stream — work the backend does afterwards (background self-eval, `REFLECTION_MODE`) does not need the connection |
 | `error` | `message`, `status?`, `interrupt?` | `interrupt` present (409) ⇒ show that approval card, as for the non-stream 409 above; `409` without it on a resume ⇒ drop the card; `401` ⇒ log in again; otherwise show the error |
+
+Typical streamed turn with a tool: `status{thinking}` → `tool_start` → `status{tool, tools: ["search_knowledge"], label: "Searching the knowledge base…"}` → `tool_end` → `status{thinking}` → `token`… → `done`. With the self-eval gate: … `token`… → `status{checking}` → `done`, or → `reset{self_eval_retry}` → `status{thinking}` → `token`… → `done`.
 
 ## A2A (when `A2A_ENABLED=true`)
 

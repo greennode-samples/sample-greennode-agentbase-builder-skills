@@ -86,45 +86,59 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
 │   │                       level WARNING if an MCP server fails or a HITL_TOOLS pattern matches no tool
 │   └─ mcp.list_tools [span] input{server, transport, url, auth, cached} · output[tool names]
 ├─ memory.checkpoint_load [span] output{messages, next, interrupts} · metadata{backend, session_id, kind}
-└─ agent.graph [chain]      (CallbackHandler; LangGraph chains carry NO input/output — see Session view)
-    ├─ compress [chain]
-    │   ├─ context.compress [span]   metadata{tokens_before, threshold, keep_last, removed_messages,
-    │   │                             tokens_after, compression_ratio, latency_ms} · output{decision, summary}
-    │   └─ context.summarize [chain] → llm.summarize [chain] → llm.summarize.generate [generation]
-    ├─ recall [chain]
-    │   └─ memory.recall [retriever] input{query, namespace, limit, trigger:auto} · output{facts, count}
-    ├─ route [chain]                 (LLM_ADAPTIVE_ROUTING) llm.route [span] output{complexity, task, reason}
-    │   └─ router.call [chain] → llm.router [chain] → llm.router.generate [generation]   (tier small)
-    ├─ agent [chain]
-    │   ├─ context.hard_trim [event, WARNING]
-    │   └─ llm.<task> [chain]        metadata{llm_task, llm_tier} · links prompt version (agent flow only)
-    │       ├─ llm.<task>.generate [generation]  model attribute (e.g. qwen/qwen3.8-flash) · input = {messages,
-    │       │                        tools} (OpenAI chat request) · output = {role, content, tool_calls, thinking} ·
-    │       │                        model_parameters · usage{input, output, total, input_cache_read,
-    │       │                        cache_creation_*, output_reasoning} · cost · completion_start_time (TTFT)
-    │       └─ llm.<task>.generate   2nd generation only when the primary fails: metadata llm_role=fallback, other
-    │                                model; the primary one is at level ERROR + statusMessage (e.g. 503)
-    ├─ approval [chain]              hitl.request [event] · hitl.decision [event] (the node re-runs on resume ⇒ the
-    │   │                            resume trace shows both: what was asked and what was decided)
-    │   ├─ hitl.stale_decision [event, WARNING]  {tool_call_ids} — decisions for an earlier card; asked again
-    │   └─ hitl.invalid_edit [event, WARNING]    {tool} — edited arguments fail the tool schema ⇒ rejected
-    ├─ tools [chain]
-    │   └─ <tool_name> [tool]        input=args · output=result · level ERROR when the tool fails
-    │       ├─ memory.save [span]    (tool remember) · memory.recall [retriever] (tool recall_memory)
-    │       ├─ knowledge.search [retriever] (tool search_knowledge) output{hits[file, heading, score]}
-    │       ├─ a2a.<agent> [agent]   {agent, url, message, state, text} (tool ask_<agent>)
-    │       ├─ identity.<kind> [span] input{provider} · output{status: ok|authorization_required} (WARNING when
-    │       │                        consent is needed) — kind = agent_api_key | agent_access_token | user_api_key |
-    │       │                        user_access_token (app/identity.py helpers; never the credential)
-    │       ├─ mcp.policy_denied [event, WARNING]  {server, tool} — blocked by the Gateway's Policy Group
-    │       ├─ mcp.scope_error [event, WARNING]    {server, tool, www_authenticate} — insufficient_scope (config)
-    │       └─ mcp.tool_error [event, WARNING]     {server, tool, error} — upstream failure of an MCP tool
-    └─ reflect [chain]               reflection.judge [evaluator] → llm.judge [chain] → llm.judge.generate
-        └─ reflection.judge_timeout · reflection.judge_failed [event, WARNING] — the answer is kept
-    (internal LLM calls — router, summarize, judge — sit one level deeper than the agent's llm.<task>.generate:
-     <caller run_name> or, without one, <task>.call [chain] → llm.<task> [chain] → llm.<task>.generate)
-scores: user_feedback (-1|0|1, from frontend) · self_eval (0..1) · hitl_requested
+├─ agent.graph [chain]      (CallbackHandler; LangGraph chains carry NO input/output — see Session view)
+│   ├─ compress [chain]
+│   │   ├─ context.compress [span]   metadata{tokens_before, threshold, keep_last, removed_messages,
+│   │   │                             tokens_after, compression_ratio, latency_ms} · output{decision, summary}
+│   │   └─ context.summarize [chain] → llm.summarize [chain] → llm.summarize.generate [generation]
+│   ├─ recall [chain]
+│   │   └─ memory.recall [retriever] input{query, namespace, limit, trigger:auto} · output{facts, count}
+│   ├─ route [chain]                 (LLM_ADAPTIVE_ROUTING) llm.route [span] output{complexity, task, reason}
+│   │   └─ router.call [chain] → llm.router [chain] → llm.router.generate [generation]   (tier small)
+│   ├─ agent [chain]
+│   │   ├─ context.hard_trim [event, WARNING]
+│   │   └─ llm.<task> [chain]        metadata{llm_task, llm_tier} · links prompt version (agent flow only)
+│   │       ├─ llm.<task>.generate [generation]  model attribute (e.g. qwen/qwen3.8-flash) · input = {messages,
+│   │       │                        tools} (OpenAI chat request) · output = {role, content, tool_calls, thinking} ·
+│   │       │                        model_parameters · usage{input, output, total, input_cache_read,
+│   │       │                        cache_creation_*, output_reasoning} · cost · completion_start_time (TTFT)
+│   │       └─ llm.<task>.generate   2nd generation only when the primary fails: metadata llm_role=fallback, other
+│   │                                model; the primary one is at level ERROR + statusMessage (e.g. 503)
+│   ├─ approval [chain]              hitl.request [event] · hitl.decision [event] (the node re-runs on resume ⇒ the
+│   │   │                            resume trace shows both: what was asked and what was decided)
+│   │   ├─ hitl.stale_decision [event, WARNING]  {tool_call_ids} — decisions for an earlier card; asked again
+│   │   └─ hitl.invalid_edit [event, WARNING]    {tool} — edited arguments fail the tool schema ⇒ rejected
+│   ├─ tools [chain]
+│   │   └─ <tool_name> [tool]        input=args · output=result · level ERROR when the tool fails
+│   │       ├─ memory.save [span]    (tool remember) · memory.recall [retriever] (tool recall_memory)
+│   │       ├─ knowledge.search [retriever] (tool search_knowledge) output{hits[file, heading, score]}
+│   │       ├─ a2a.<agent> [agent]   {agent, url, message, state, text} (tool ask_<agent>)
+│   │       ├─ identity.<kind> [span] input{provider} · output{status: ok|authorization_required} (WARNING when
+│   │       │                        consent is needed) — kind = agent_api_key | agent_access_token | user_api_key |
+│   │       │                        user_access_token (app/identity.py helpers; never the credential)
+│   │       ├─ mcp.policy_denied [event, WARNING]  {server, tool} — blocked by the Gateway's Policy Group
+│   │       ├─ mcp.scope_error [event, WARNING]    {server, tool, www_authenticate} — insufficient_scope (config)
+│   │       └─ mcp.tool_error [event, WARNING]     {server, tool, error} — upstream failure of an MCP tool
+│   └─ reflect [chain]               (REFLECTION_MODE gate — the user waits) reflection.judge [evaluator] →
+│                                    llm.judge [chain] → llm.judge.generate · reflection.judge_timeout [event, WARNING]
+│                                    (REFLECTION_TIMEOUT_S) · reflection.judge_failed [event, WARNING] — the answer is kept
+│   (internal LLM calls — router, summarize, judge — sit one level deeper than the agent's llm.<task>.generate:
+│    <caller run_name> or, without one, <task>.call [chain] → llm.<task> [chain] → llm.<task>.generate)
+├─ reflection.judge [evaluator]  background self-eval AFTER the response (REFLECTION_MODE background / auto): a child
+│                                of agent.invoke that starts after the root ended · metadata{reflection_mode:
+│                                background, reflection_reason} → llm.judge [chain] → llm.judge.generate ·
+│                                reflection.judge_timeout / reflection.judge_failed [event, WARNING] beside it
+└─ reflection.background_skipped [event, WARNING]  background judges at REFLECTION_BACKGROUND_MAX_CONCURRENCY —
+                                 that answer is not scored
+scores: user_feedback (-1|0|1, from frontend) · self_eval (0..1, gate or background) · hitl_requested
 ```
+
+A background judge is the same trace: `app/service.py` starts it (`asyncio.create_task`) while the request's root span is
+current, so the task inherits the OTel context and the propagated user/session/tags — the evaluator is a child of
+`agent.invoke` although it starts after the root ended. Verified on the self-hosted Langfuse (SDK 4.18) with real MaaS:
+`agent.invoke` 63.27 s (= time to `done`), `reflection.judge` at +63.3 s for 8.8 s, `self_eval` on that trace,
+`lf_trace.py --audit` clean; offline: `tests/test_tracing_tree.py` (same trace id, parent = root, starts after the root
+ended, session attribute, streamed turn closed by the client at `done`).
 
 Field details, debug playbook, dashboards: `references/trace-schema.md`.
 

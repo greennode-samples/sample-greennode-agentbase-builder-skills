@@ -28,6 +28,11 @@ agentbase-build-llm.
 
 5) Output caps: LLM_TASK_MAX_TOKENS overrides DEFAULT_TASK_MAX_TOKENS (internal flows bounded — reasoning tokens
    count too); other tasks use LLM_MAX_TOKENS. Structured output: get_llm(task, schema=Model).
+
+6) Thinking: LLM_THINKING_BUDGET (per task or tier) overrides DEFAULT_THINKING_BUDGET ⇒ request fields MaaS honors
+   (measured, skill §6): N > 0 ⇒ `thinking_budget: N` (reasoning capped at N tokens), 0 ⇒ `enable_thinking: false`.
+   Sent to every model of the task's chain (fallbacks too). OpenAI `reasoning_effort` is NOT used: honored by some
+   MaaS models only (deepseek-v4-pro: low = off; qwen3.8-flash: ignored).
 """
 
 from __future__ import annotations
@@ -69,6 +74,11 @@ DEFAULT_TASK_TIERS: dict[str, Tier] = {
 # thinking model is used. LLM_TASK_MAX_TOKENS overrides (0 ⇒ no per-task cap); tasks not listed use LLM_MAX_TOKENS.
 # A capped answer ends with finish_reason=length ⇒ WARNING (router ⇒ "standard", judge ⇒ pass, summary ⇒ skipped).
 DEFAULT_TASK_MAX_TOKENS: dict[str, int] = {"router": 1024, "judge": 2048, "summarize": 4096}
+
+# Thinking per task (see 6). LLM_THINKING_BUDGET overrides by task or tier; -1 there ⇒ the model's own default.
+# Defaults from MaaS measurements (skill §6): internal JSON flows don't need to think — a cut thinking may continue in
+# the answer text, so they get thinking OFF rather than a budget. Conversation tasks keep the model's thinking.
+DEFAULT_THINKING_BUDGET: dict[str, int] = {"router": 0, "judge": 0}
 
 # Tasks whose generations ARE the conversation the user sees (node `agent`). Langfuse's session view shows, per
 # trace, only the generations at the SHALLOWEST tree depth as the conversation; every other task (router, summarize,
@@ -267,6 +277,23 @@ def max_tokens_for(task: str) -> int | None:
     return cap or None
 
 
+def thinking_budget_for(task: str) -> int | None:
+    """Thinking control of a task: N > 0 tokens, 0 = off, None = the model's default. LLM_THINKING_BUDGET by task,
+    then by the task's tier, then DEFAULT_THINKING_BUDGET."""
+    table = get_settings().llm_thinking_budget
+    for key in (task, tier_for(task)):
+        if key in table:
+            return None if table[key] < 0 else table[key]
+    return DEFAULT_THINKING_BUDGET.get(task)
+
+
+def thinking_params(budget: int | None) -> dict[str, Any]:
+    """Request fields (sent as `extra_body`) for a thinking budget — the ones MaaS was measured to honor."""
+    if budget is None:
+        return {}
+    return {"enable_thinking": False} if budget == 0 else {"thinking_budget": budget}
+
+
 def model_for(tier: Tier) -> str:
     s = get_settings()
     large = s.llm_model_large or s.llm_model
@@ -437,6 +464,8 @@ def get_llm(
     _warn_budgets()
     gen_name = f"llm.{task}.generate"
     cap = max_tokens_for(task)
+    thinking = thinking_budget_for(task)
+    extra_body = thinking_params(thinking)
 
     def _gen(model: str, role: str) -> Runnable:
         chat = _chat(model, tier, role)
@@ -447,6 +476,8 @@ def get_llm(
             r = chat.bind_tools(tools)
         if cap:
             r = r.bind(max_tokens=cap)
+        if extra_body:  # the whole chain: a fallback model must not think longer than the primary
+            r = r.bind(extra_body=extra_body)
         # RunnableWithFallbacks passes the chain's run_name down to child models (overriding with_config) ⇒ use
         # config_factories (applied LAST) so the generation keeps its own stable name whatever the caller sets.
         # The model is NOT part of the name (Langfuse best practice): it is the generation's `model` attribute.
@@ -466,8 +497,13 @@ def get_llm(
     # ALWAYS wrap in 1 chain (even without fallbacks) ⇒ a caller-set run_name only renames the chain,
     # the inner generation keeps `llm.<task>.generate`; `langfuse_prompt` metadata passed at call time
     # attaches to this chain ⇒ only that call's generation gets linked to the prompt.
+    meta: dict[str, Any] = {"llm_task": task, "llm_tier": tier}
+    if thinking is not None:
+        meta["llm_thinking_budget"] = (
+            thinking  # what the request asked for (0 = off) — debugging slow/odd answers
+        )
     chain = primary.with_fallbacks(backups, exceptions_to_handle=FALLBACK_ERRORS).with_config(
-        run_name=f"llm.{task}", metadata={"llm_task": task, "llm_tier": tier}
+        run_name=f"llm.{task}", metadata=meta
     )
     if task in CONVERSATION_TASKS:
         return chain

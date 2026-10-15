@@ -37,6 +37,7 @@ from langfuse.api import NotFoundError
 
 from app.config import get_settings
 from app.observability import tracing
+from app.reflection import drain_background
 from app.service import run_chat, run_resume
 from evals.evaluators import (
     ITEM_EVALUATORS,
@@ -131,6 +132,10 @@ def make_task(hitl_action: str):
                 "error": f"{type(e).__name__}: {e}",
                 "tools_requested": requested,
             }
+        finally:
+            # A background self-eval (REFLECTION_MODE) starts after the answer: let it score the item's trace inside
+            # this event loop (closing the loop would destroy it). Bounded by its own timeout.
+            await drain_background(get_settings().reflection_background_timeout_s, cancel=False)
         return {**result, "tools_requested": requested}
 
     return task

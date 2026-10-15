@@ -92,20 +92,30 @@ Actually run against self-hosted Langfuse v4.49: `--push` creates the dataset, `
 3. Add to dataset `<project>-regressions` (UI "Add to dataset" — keeps `source_trace_id`) or to the JSONL.
 4. Fix → `make eval` → compare runs → deploy.
 
-## In-graph self-evaluation loop (optional, asset `app/reflection.py`)
+## Self-evaluation loop (optional, asset `app/reflection.py`)
 
-- Enable: `REFLECTION_ENABLED=true`, `REFLECTION_MAX_RETRIES=1`, `REFLECTION_CRITERIA="..."` (written for the business), `REFLECTION_TIMEOUT_S` (default 20).
-- After the final answer, node `reflect` uses a judge (flow `judge`, **small** tier by default, output capped at 2048 tokens: the user is waiting, so give it a fast low-reasoning model, see `/agentbase-build-llm` §5) to grade JSON `{pass, score, critique}`. The judge sees the question, **this turn's tool results** (each clipped to 1,500 chars, 6,000 in total) and the answer. Criteria like "accurate to the tool data" can't be judged without the data; without it, correct answers failed and were reset. On fail with retries left ⇒ remove the poor answer from history, put the critique into the **per-turn context message** (after the latest user message, not the system prompt), `agent` answers again. Streaming sends a `reset` event so the frontend clears the old text.
-- Skipped (`should_reflect`) when the verdict can't change anything or would be wrong:
+- Enable: `REFLECTION_ENABLED=true`, `REFLECTION_MAX_RETRIES=1`, `REFLECTION_CRITERIA="..."` (written for the business), `REFLECTION_MODE` (default `auto`, below), `REFLECTION_TIMEOUT_S` (default 20).
+- The judge (flow `judge`, **small** tier by default, output capped at 2048 tokens, thinking off by default — `/agentbase-build-llm` §5–6) grades the final answer as JSON `{pass, score, critique}` and writes the `self_eval` score. It sees the question, **this turn's tool results** (each clipped to 1,500 chars, 6,000 in total) and the answer. Criteria like "accurate to the tool data" can't be judged without the data; without it, correct answers failed and were reset.
+- **When the judge runs** (`REFLECTION_MODE`, decided per turn by `reflection_plan`):
+
+  | Mode | The user… | On fail | Use when |
+  |---|---|---|---|
+  | `gate` | waits for the verdict: node `reflect` runs before `done` (SSE `status` `checking`) | retries left ⇒ the poor answer is removed from history, the critique goes into the **per-turn context message** (after the latest user message, not the system prompt), `agent` answers again; streaming sends `reset` so the frontend clears the old text | short answers where a wrong one is costly |
+  | `background` | gets `done` / the JSON response at once; the judge runs **after** it and only scores (`self_eval` on the same trace) | nothing — no retry (the user already has the answer) | monitoring quality without adding latency |
+  | `auto` (default) | `gate`, except **background** when a retry is not worth its wait: the turn ran on the **reasoning** tier (`reason=reasoning_tier`), the answer is longer than `REFLECTION_GATE_MAX_CHARS` (default 1200, `long_answer` — streamed, it has been read already, and regenerating it costs as long again), or `REFLECTION_MAX_RETRIES=0` (`no_retries`: a gate could only delay the answer) | as the chosen mode | most agents |
+
+  Why: on a real 10-turn session a 2-call reasoning turn (deepseek-v4-pro) took 85 s, then the small-tier judge hit `REFLECTION_TIMEOUT_S` (20 s) on the 1,369-char answer — the user waited 20 s more for nothing. Trade-off: in `background` a poor answer is only flagged (`self_eval` low ⇒ review loop (5) below), never replaced.
+- Background judges are started by `app/service.py` (`judge_after_response`) **inside the request's trace context**: the evaluator `reflection.judge` (metadata `reflection_mode=background`, `reflection_reason`) is a child of `agent.invoke` in the same trace and `self_eval` lands on that trace. They don't need the HTTP connection (the frontend closes the stream at `done`), are bounded per call by `REFLECTION_BACKGROUND_TIMEOUT_S` (default 60 — nobody waits) and by `REFLECTION_BACKGROUND_MAX_CONCURRENCY` per process (default 4; more ⇒ that answer is not scored, WARNING event `reflection.background_skipped` — never an unbounded queue), never raise into the request, and are drained at shutdown (`main.py` lifespan → `drain_background()`: up to 10 s, then cancelled, before the Langfuse flush). The eval runner waits for each item's background judge. They count against the MaaS rate limit like any call.
+- Not judged at all (`reflection_plan` → None) when the verdict can't change anything or would be wrong:
   - the turn was rated `simple` by adaptive routing (`REFLECTION_SKIP_SIMPLE`, **only effective with `LLM_ADAPTIVE_ROUTING=true`**: without the router no turn is rated simple);
   - the retries are used up (the retry answer is final whatever the verdict ⇒ no second judge call);
   - the user rejected a tool call in this turn (HITL): the answer explains what was not done.
-- Cost: +1 LLM call per turn (+2 per retry), higher latency ⇒ enable only for use cases needing high accuracy; decide by running `make eval` with/without it.
-- Judge error, non-JSON, timeout (`REFLECTION_TIMEOUT_S`, WARNING event `reflection.judge_timeout`) or a judge config error (`get_llm("judge")` is inside the `try`) ⇒ the answer is kept (never blocks the user). A non-finite score (`NaN`) counts as missing.
+- Cost: +1 LLM call per turn (+2 per gate retry) ⇒ enable only for use cases needing high accuracy; decide by running `make eval` with/without it.
+- Judge error, non-JSON, timeout (WARNING event `reflection.judge_timeout`; `REFLECTION_TIMEOUT_S` for the gate, `REFLECTION_BACKGROUND_TIMEOUT_S` after the response) or a judge config error (`get_llm("judge")` is inside the `try`, event `reflection.judge_failed`) ⇒ the answer is kept (never blocks the user). A non-finite score (`NaN`) counts as missing.
 
 ## Test
 
-`tests/test_reflection.py` (retry + removal of the poor answer, no second judge once retries are used up, the judge sees this turn's tool results, skipped after a HITL rejection, timeout and judge config error keep the answer, NaN scores, evaluators, CI gate over the whole dataset) and `tests/test_eval.py` (exit codes 1 vs 2, empty dataset ⇒ 2, namespaced `--push` ids, NaN scores, skipped empty averages, `--hitl reject` ⇒ rejected tools are not `tools_used` but count as `tools_requested`, forbidden tools rejected even with `--hitl approve`, CLI defaults and unique run names, `.env` loaded in `main()` only). Add tests for new evaluators.
+`tests/test_reflection.py` (retry + removal of the poor answer, no second judge once retries are used up, the judge sees this turn's tool results, skipped after a HITL rejection, timeout and judge config error keep the answer, NaN scores, the `reflection_plan` rules per mode, the gate's `checking` → `reset` → `thinking` stream, background: response before the judge and no retry on fail, judge still scores after the client closed the stream, concurrency limit, timeout / errors never raise, drain waits then cancels, evaluators, CI gate over the whole dataset) and `tests/test_eval.py` (exit codes 1 vs 2, empty dataset ⇒ 2, namespaced `--push` ids, NaN scores, skipped empty averages, `--hitl reject` ⇒ rejected tools are not `tools_used` but count as `tools_requested`, forbidden tools rejected even with `--hitl approve`, CLI defaults and unique run names, `.env` loaded in `main()` only). Add tests for new evaluators.
 
 ## Official docs
 

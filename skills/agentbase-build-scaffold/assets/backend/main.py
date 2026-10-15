@@ -24,6 +24,7 @@ from app.a2a.client import warn_if_timeouts_unsafe  # noqa: E402
 from app.auth.inbound import prefetch_jwks  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.observability import tracing  # noqa: E402
+from app.reflection import drain_background  # noqa: E402
 from app.tools.mcp import log_iam_principal  # noqa: E402
 
 settings = get_settings()
@@ -49,6 +50,8 @@ async def lifespan(_app):
     try:
         yield
     finally:
+        # Background self-evals (REFLECTION_MODE) run after their response: finish or cancel them BEFORE the flush
+        await drain_background()
         tracing.shutdown_tracing()
 
 

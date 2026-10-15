@@ -42,7 +42,7 @@ Principle: **build minimal by default; every enabled component must have a reaso
 3. 1–2 extra LLM calls and roughly 1–3 seconds of extra latency per turn are acceptable.
 4. Measured with `make eval`, reflection noticeably increases `pass_rate` compared to off.
 
-**Do not enable when**: plain chat or small talk; HITL already reviews the output (the reviewer is the check); the UX needs fast streaming (`reset` discards text already displayed); there is no eval to prove its value. Keep `REFLECTION_MAX_RETRIES` at 1; 2 is rarely needed.
+**Do not enable when**: plain chat or small talk; HITL already reviews the output (the reviewer is the check); there is no eval to prove its value. Fast streaming UX: the default `REFLECTION_MODE=auto` judges reasoning-tier turns and long answers **after** the response (score only, no wait, no `reset`); `REFLECTION_MODE=background` does that for every turn (monitoring only, no retry). Keep `REFLECTION_MAX_RETRIES` at 1; 2 is rarely needed.
 
 ## 2b. Model selection per flow (tier) & fallback
 

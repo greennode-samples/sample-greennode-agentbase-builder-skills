@@ -247,6 +247,51 @@ async def test_failed_turn_root_shows_what_the_user_got(spans, monkeypatch, stre
     assert any(s.startswith("Cancelled: the request was cancelled") for s in statuses), statuses
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_background_judge_lands_in_the_same_trace(_lf, monkeypatch, stream):
+    """REFLECTION_MODE background: the judge starts after the response (the root span has ENDED, the client may
+    have closed the stream) — its evaluator must still be a child of agent.invoke in the same trace, carry the
+    session, and the self_eval score must target that trace."""
+    from app import llm, reflection, service
+
+    client, exporter = _lf
+    exporter.clear()
+    monkeypatch.setattr(tracing, "_client", client)
+    monkeypatch.setenv("REFLECTION_ENABLED", "true")
+    monkeypatch.setenv("REFLECTION_MODE", "background")
+    get_settings.cache_clear()
+    monkeypatch.setattr(llm, "_chat", lambda model, tier, role: _ThinkingModel())
+    scored: list[str | None] = []
+    monkeypatch.setattr(
+        tracing, "score_trace", lambda name, value, **kw: scored.append(tracing.current_trace_id())
+    )
+    ctx = RequestContext(session_id=f"s-bg-{stream}", user_id="u-bg")
+    if stream:
+        gen = await service.handle({"message": "Capital of France?", "stream": True}, ctx)
+        async for ev in gen:
+            if ev["event"] == "done":
+                break
+        await gen.aclose()  # the frontend stops reading at `done`
+    else:
+        await service.handle({"message": "Capital of France?"}, ctx)
+    assert await reflection.drain_background() == 0
+    client.flush()
+    finished = exporter.get_finished_spans()
+    (root,) = [s for s in finished if s.name == "agent.invoke"]
+    (judge,) = [s for s in finished if s.name == "reflection.judge"]
+    assert judge.context.trace_id == root.context.trace_id
+    # directly under agent.invoke, not a new trace
+    assert judge.parent.span_id == root.context.span_id
+    assert judge.start_time >= root.end_time  # it really ran after the response
+    attrs = dict(judge.attributes)
+    assert _type(attrs) == "evaluator"
+    assert attrs.get("session.id") == dict(root.attributes).get("session.id") == f"s-bg-{stream}"
+    assert attrs["langfuse.observation.metadata.reflection_mode"] == "background"
+    gen_spans = [s for s in finished if s.name == "llm.judge.generate"]
+    assert gen_spans and all(s.context.trace_id == root.context.trace_id for s in gen_spans)
+    assert scored == [format(root.context.trace_id, "032x")]
+
+
 def test_status_text_is_readable():
     import asyncio
 

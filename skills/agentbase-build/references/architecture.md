@@ -39,7 +39,7 @@ START → compress → recall → [route] → agent ─┬─ no tool call ─�
                                    ├─ HITL tool ─▶ approval (interrupt) ─▶ tools ─▶ agent
                                    └─ regular tool ────────────────────▶ tools ─▶ agent
 ```
-`[route]` only with `LLM_ADAPTIVE_ROUTING`, `[reflect]` only with `REFLECTION_ENABLED` (skipped for "simple" turns when `REFLECTION_SKIP_SIMPLE`).
+`[route]` only with `LLM_ADAPTIVE_ROUTING`, `[reflect]` only with `REFLECTION_ENABLED` (skipped for "simple" turns when `REFLECTION_SKIP_SIMPLE`) and only when the user should wait for the verdict (`REFLECTION_MODE`: reasoning-tier turns and long answers are judged after the response instead, score only — `/agentbase-build-eval`).
 
 ## 3. Module responsibilities (what you may change)
 

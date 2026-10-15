@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from greennode_agentbase import RequestContext
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -236,3 +237,206 @@ def test_gate_fails_when_langfuse_drops_crashed_items(monkeypatch):
     monkeypatch.setattr(run_eval, "load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr(sys, "argv", ["run_eval", "--dataset", "d", "--min-pass-rate", "0.5"])
     assert run_eval.main() == run_eval.EXIT_GATE_FAILED
+
+
+# --- REFLECTION_MODE: gate (the user waits) vs background (after the response, score only)
+def _reflection_env(monkeypatch, **kv):
+    monkeypatch.setenv("REFLECTION_ENABLED", "true")
+    for k, v in kv.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("env", "state", "expected"),
+    [
+        ({}, {"llm_task": "agent"}, ("gate", "short_answer")),
+        ({}, {"llm_task": "agent_complex"}, ("background", "reasoning_tier")),
+        ({"LLM_TASK_TIERS": '{"agent": "reasoning"}'}, {}, ("background", "reasoning_tier")),
+        ({}, {"answer": "x" * 1201}, ("background", "long_answer")),
+        ({"REFLECTION_GATE_MAX_CHARS": "5000"}, {"answer": "x" * 1201}, ("gate", "short_answer")),
+        ({"REFLECTION_MAX_RETRIES": "0"}, {}, ("background", "no_retries")),
+        ({"REFLECTION_MODE": "gate"}, {"llm_task": "agent_complex"}, ("gate", "configured")),
+        ({"REFLECTION_MODE": "background"}, {}, ("background", "configured")),
+        ({}, {"llm_task": "agent_simple"}, None),  # REFLECTION_SKIP_SIMPLE
+        ({}, {"reflection_round": 1}, None),  # retries used up
+        ({"REFLECTION_ENABLED": "false"}, {}, None),
+    ],
+)
+def test_reflection_plan(monkeypatch, env, state, expected):
+    from app import reflection
+
+    _reflection_env(monkeypatch, **env)
+    answer = state.pop("answer", "short answer")
+    s = {"messages": [HumanMessage("q"), AIMessage(answer)], **state}
+    assert reflection.reflection_plan(s, get_settings()) == expected
+    assert reflection.should_reflect(s, get_settings()) == (
+        expected is not None and expected[0] == "gate"
+    )
+
+
+class _GatedJudge:
+    """Judge that answers only once `release` is set — shows what happens while it is still running."""
+
+    def __init__(self, verdict: str = '{"pass": false, "score": 0.3, "critique": "wrong"}'):
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+        self.verdict = verdict
+        self.configs: list[dict] = []
+
+    async def ainvoke(self, messages, config=None, **k):
+        self.configs.append(config or {})
+        self.started.set()
+        await self.release.wait()
+        return AIMessage(self.verdict)
+
+
+def _record_scores(monkeypatch) -> list[tuple[str, float]]:
+    from app import reflection
+
+    scores: list[tuple[str, float]] = []
+    monkeypatch.setattr(
+        reflection.tracing, "score_trace", lambda name, value, **kw: scores.append((name, value))
+    )
+    return scores
+
+
+async def test_background_judge_scores_after_the_response_without_retry(fake_llm, monkeypatch):
+    """Long / reasoning answers: the response must not wait for the judge — and a fail can't retry any more."""
+    from app import reflection
+
+    _reflection_env(monkeypatch, REFLECTION_MODE="background")
+    model = fake_llm(AIMessage("the answer"))
+    judge = _GatedJudge()
+    monkeypatch.setattr(reflection, "get_llm", lambda task="judge", tools=None: judge)
+    scores = _record_scores(monkeypatch)
+    ctx = RequestContext(session_id="bg-1", user_id="u1")
+
+    out = await service.handle({"message": "q"}, ctx)
+    assert out["status"] == "success" and out["response"] == "the answer"
+    assert reflection.background_pending() == 1 and scores == []  # the response did not wait
+    await judge.started.wait()
+    meta = judge.configs[0]["metadata"]
+    assert meta == {"reflection_mode": "background", "reflection_reason": "configured"}
+    judge.release.set()
+    assert await reflection.drain_background() == 0
+    assert scores == [("self_eval", 0.3)]
+    assert len(model.calls) == 1  # failed verdict, but no retry: the user already has the answer
+    # the answer stays in history (a gate fail would have removed it)
+    model = fake_llm(AIMessage("next"))
+    await service.handle({"message": "q2"}, ctx)
+    assert any(getattr(m, "content", "") == "the answer" for m in model.calls[0])
+    await reflection.drain_background()
+
+
+async def test_background_judge_survives_the_client_closing_the_stream(fake_llm, monkeypatch):
+    """The frontend cancels the reader at `done`: the judge must not depend on the connection."""
+    from app import reflection
+
+    _reflection_env(monkeypatch, LLM_TASK_TIERS='{"agent": "reasoning"}')  # auto ⇒ background
+    fake_llm(AIMessage("reasoned answer"))
+    judge = _GatedJudge('{"pass": true, "score": 0.8}')
+    monkeypatch.setattr(reflection, "get_llm", lambda task="judge", tools=None: judge)
+    scores = _record_scores(monkeypatch)
+
+    gen = await service.handle(
+        {"message": "q", "stream": True}, RequestContext(session_id="bg-2", user_id="u1")
+    )
+    events = []
+    async for ev in gen:
+        events.append(ev)
+        if ev["event"] == "done":
+            break
+    await gen.aclose()  # client gone
+    assert events[-1]["response"] == "reasoned answer"
+    assert not any(e.get("phase") == "checking" for e in events)  # nobody waited for a check
+    await judge.started.wait()
+    judge.release.set()
+    await reflection.drain_background()
+    assert scores == [("self_eval", 0.8)]
+
+
+async def test_gate_streams_checking_status_then_reset(fake_llm, monkeypatch):
+    _reflection_env(monkeypatch, REFLECTION_MODE="gate")
+    fake_llm(
+        AIMessage("bad answer"),
+        AIMessage('{"pass": false, "score": 0.2, "critique": "missing figures"}'),
+        AIMessage("good answer"),
+    )
+    gen = await service.handle(
+        {"message": "q", "stream": True}, RequestContext(session_id="gate-s", user_id="u1")
+    )
+    events = [e async for e in gen]
+    seq = [e.get("phase") or e.get("reason") or e["event"] for e in events if e["event"] != "token"]
+    # the user sees "checking" while the judge runs; a fail clears the answer and the agent thinks again
+    assert seq == ["thinking", "checking", "self_eval_retry", "thinking", "done"], seq
+    assert events[-1]["response"] == "good answer"
+
+
+async def test_background_judges_are_bounded(fake_llm, monkeypatch):
+    from app import reflection
+
+    _reflection_env(
+        monkeypatch, REFLECTION_MODE="background", REFLECTION_BACKGROUND_MAX_CONCURRENCY="1"
+    )
+    fake_llm(AIMessage("answer"))
+    judge = _GatedJudge()
+    monkeypatch.setattr(reflection, "get_llm", lambda task="judge", tools=None: judge)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        reflection.tracing,
+        "event",
+        lambda name, level=None, **kw: (
+            name.startswith("reflection.") and events.append((name, level))
+        ),
+    )
+    await service.handle({"message": "q"}, RequestContext(session_id="bound-1", user_id="u1"))
+    out = await service.handle({"message": "q"}, RequestContext(session_id="bound-2", user_id="u2"))
+    assert out["status"] == "success"  # the second answer is simply not scored
+    assert events == [("reflection.background_skipped", "WARNING")]
+    assert reflection.background_pending() == 1
+    judge.release.set()
+    await reflection.drain_background()
+
+
+async def test_background_judge_timeout_and_errors_never_raise(fake_llm, monkeypatch):
+    from app import reflection
+
+    _reflection_env(
+        monkeypatch, REFLECTION_MODE="background", REFLECTION_BACKGROUND_TIMEOUT_S="0.05"
+    )
+    fake_llm(AIMessage("answer"))
+    events: list[str] = []
+    monkeypatch.setattr(
+        reflection.tracing,
+        "event",
+        lambda name, **kw: name.startswith("reflection.") and events.append(name),
+    )
+    monkeypatch.setattr(reflection, "get_llm", lambda task="judge", tools=None: _GatedJudge())
+    await service.handle({"message": "q"}, RequestContext(session_id="bg-t", user_id="u1"))
+    await reflection.drain_background()
+    assert events == ["reflection.judge_timeout"]
+
+    def broken(task="judge", tools=None):
+        raise ValueError("bad judge config")
+
+    monkeypatch.setattr(reflection, "get_llm", broken)
+    out = await service.handle({"message": "q"}, RequestContext(session_id="bg-e", user_id="u1"))
+    await reflection.drain_background()
+    assert out["status"] == "success" and events[-1] == "reflection.judge_failed"
+
+
+async def test_drain_background_waits_then_cancels(fake_llm, monkeypatch):
+    """Shutdown (main.py lifespan): finish what can finish, cancel the rest — never hang the process."""
+    from app import reflection
+
+    _reflection_env(monkeypatch, REFLECTION_MODE="background")
+    fake_llm(AIMessage("answer"))
+    judge = _GatedJudge()
+    monkeypatch.setattr(reflection, "get_llm", lambda task="judge", tools=None: judge)
+    await service.handle({"message": "q"}, RequestContext(session_id="drain", user_id="u1"))
+    await judge.started.wait()
+    assert await reflection.drain_background(0.01, cancel=False) == 1  # eval runner: just wait
+    assert reflection.background_pending() == 1
+    assert await reflection.drain_background(0.01) == 1  # shutdown: cancelled
+    assert reflection.background_pending() == 0

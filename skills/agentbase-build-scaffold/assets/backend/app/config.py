@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # Output cap per task, overrides DEFAULT_TASK_MAX_TOKENS (internal flows are bounded by default; reasoning tokens
     # count too), e.g. {"router": 512, "judge": 0} — 0 ⇒ no per-task cap (LLM_MAX_TOKENS applies)
     llm_task_max_tokens: dict[str, int] = Field(default_factory=dict)
+    # Thinking (reasoning tokens) per task or tier, task wins, overrides DEFAULT_THINKING_BUDGET: N > 0 ⇒ capped at N
+    # tokens (MaaS `thinking_budget`), 0 ⇒ thinking off (`enable_thinking: false`), -1 ⇒ the model's default.
+    # e.g. {"summarize": 0, "reasoning": 2048} — a cut thinking can leak into the answer text (llm skill §6)
+    llm_thinking_budget: dict[str, int] = Field(default_factory=dict)
     # per attempt; streaming ⇒ INACTIVITY timeout (a model streaming its thinking is never cut) — llm skill §4
     llm_timeout_s: float = 25.0
     llm_max_retries: int = 1
@@ -171,11 +175,20 @@ class Settings(BaseSettings):
     # --- Self-evaluation loop (optional) ---
     reflection_enabled: bool = False
     reflection_max_retries: int = Field(default=1, ge=0)
+    # gate: judge BEFORE the answer is final (the user waits; a fail retries, SSE `reset`) · background: `done` first,
+    # then the judge only scores the answer (self_eval, no retry) · auto: gate, except background where a retry is not
+    # worth its wait — reasoning-tier turns, answers > REFLECTION_GATE_MAX_CHARS, no retries left (app/reflection.py)
+    reflection_mode: Literal["auto", "gate", "background"] = "auto"
+    reflection_gate_max_chars: int = Field(default=1200, ge=0)
     # Skip reflection when adaptive routing rates the message "simple" (greeting, 1 step) — saves 1–2 LLM calls.
     # Only effective with LLM_ADAPTIVE_ROUTING (without the router no turn is rated "simple").
     reflection_skip_simple: bool = True
     # Time limit of one judge call (the user is waiting); exceeded ⇒ the answer is kept (treated as a pass)
     reflection_timeout_s: float = Field(default=20.0, gt=0)
+    # Background judge (after `done`, nobody waits): time limit per call, and max judges running at once per process
+    # (more ⇒ that answer is not scored, WARNING event reflection.background_skipped — never an unbounded queue)
+    reflection_background_timeout_s: float = Field(default=60.0, gt=0)
+    reflection_background_max_concurrency: int = Field(default=4, ge=1)
     reflection_criteria: str = (
         "On point, accurate to the tool data, nothing made up, complete, in the user's language."
     )
@@ -264,6 +277,10 @@ class Settings(BaseSettings):
             )
         if bad := {t: v for t, v in self.llm_task_max_tokens.items() if v < 0}:
             raise ValueError(f"LLM_TASK_MAX_TOKENS: negative value in {bad} (0 = no per-task cap).")
+        if bad := {t: v for t, v in self.llm_thinking_budget.items() if v < -1}:
+            raise ValueError(
+                f"LLM_THINKING_BUDGET: invalid value in {bad} (N > 0 tokens, 0 = off, -1 = model default)."
+            )
         if self.memory_backend == "agentbase" and not self.memory_id:
             raise ValueError(
                 "MEMORY_BACKEND=agentbase requires MEMORY_ID (create it with /agentbase-memory)."

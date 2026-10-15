@@ -4,7 +4,10 @@
     standard → task agent         (large)      : normal conversation, a few tool calls
     complex  → task agent_complex (reasoning)  : multi-step, comparison/analysis, calculation, planning
 
-The router uses the small tier (1 short call, ~100 tokens). Error/unparseable ⇒ "standard" (safe).
+The router uses the small tier (1 short call, ~100 tokens) with thinking OFF by default (DEFAULT_THINKING_BUDGET: 1.1–2.1 s
+instead of 5–13 s per turn on qwen3.8-flash). Without thinking it rated a short multi-step leave-days calculation
+"standard" (2/2 real runs, 2/2 probes) — the explicit calculation rule in ROUTER_PROMPT brought it back to "complex"
+(3/3) while greetings / lookups stayed "simple". Error/unparseable ⇒ "standard" (safe).
 It sees the request (truncated) + the last exchanges (truncated) + the rolling summary: a follow-up such as "and the
 second one?" is only simple or complex in the light of what came before.
 Enable only for mixed traffic: mostly simple questions (savings) + some needing reasoning (quality).
@@ -35,7 +38,8 @@ ROUTER_PROMPT = """Classify the complexity of the request to pick a suitable mod
 - simple: greetings, thanks, single-step/single-fact questions, simple lookups.
 - standard: normal conversation, needs a few steps or a few tools.
 - complex: multi-step reasoning, analysis/comparison across sources, calculation, planning, writing/reviewing code,
-  questions with complex constraints."""
+  questions with complex constraints.
+Any request that needs a calculation (amounts, days, dates, splitting across periods) is complex, even when short."""
 
 
 # The router only needs the gist: a pasted document must not make it slow or expensive

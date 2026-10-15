@@ -23,7 +23,9 @@ Errors: HTTP status + {"error", "error_type", "details"}. 409 while an approval 
   whose decisions/interrupt_id belong to an earlier card): details.interrupt = the pending approval ⇒ show it.
 Response stream (SSE, one `data: {...}` per line):
   token | tool_start | tool_end | reset {reason: self_eval_retry | llm_fallback} (clear the shown text) |
-  interrupt {…same as interrupted} | done {…same as success} | error {message, status, interrupt?}
+  status {phase: thinking | tool | checking, label, tools?} (progress line until the next token; ignore unknown
+  phases/events) | interrupt {…same as interrupted} | done {…same as success} | error {message, status, interrupt?}
+  The turn is over at done/interrupt/error: work after it (background self-eval) never needs the connection.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import contextlib
 import hashlib
 import hmac
 import logging
+import re
 import time
 import weakref
 from collections.abc import AsyncIterator
@@ -67,6 +70,8 @@ from app.hitl import (
 from app.llm import TIERS, fallbacks_for, model_for
 from app.memory.short_term import get_checkpointer, thread_config
 from app.observability import tracing
+from app.observability.tracing import REASONING_KEY
+from app.reflection import judge_after_response
 from app.tools import collect_tools
 from app.tools.mcp import reset_policy_denials
 
@@ -367,6 +372,8 @@ class _Run:
         self.kind = kind
         self.graph_input = graph_input
         self.trace_input = trace_input
+        # tool name → its metadata["status_label"] (SSE status)
+        self.tool_labels: dict[str, str] = {}
 
     def _trace(self, tags: list[str]):
         return tracing.trace_request(
@@ -386,6 +393,11 @@ class _Run:
         GreenNodeAgentBaseContext.set_user_id(self.principal.user_id)
         _trace_auth(self.principal)
         tools = await collect_tools(self.settings, self.principal)
+        self.tool_labels = {
+            t.name: str(t.metadata["status_label"])
+            for t in tools
+            if isinstance(t.metadata, dict) and t.metadata.get("status_label")
+        }
         graph = build_graph(
             settings=self.settings, tools=tools, checkpointer=get_checkpointer(self.settings)
         )
@@ -456,8 +468,10 @@ class _Run:
     def _fb(self, trace_id: str | None) -> str | None:
         return feedback_token(self.principal.user_id, trace_id) if trace_id else None
 
-    async def _result(self, root, messages: list, interrupts: Any) -> dict:
-        """Result taken DIRECTLY from the graph output (no checkpoint re-read — see hitl.py)."""
+    async def _result(self, root, state: dict, interrupts: Any) -> dict:
+        """Result taken DIRECTLY from the graph output (no checkpoint re-read — see hitl.py). Runs inside the request's
+        trace: a background self-eval started here lands in the same trace, after the response went out."""
+        messages = state.get("messages", [])
         trace_id = tracing.current_trace_id()
         if interrupt := interrupt_payload(interrupts):
             if root is not None:
@@ -475,6 +489,8 @@ class _Run:
         if root is not None:
             # trace output = what a reviewer / evaluator / experiment compares: the answer text itself
             root.update(output=answer, metadata={"tools_used": tools_used})
+        # REFLECTION_MODE background/auto: score the answer AFTER it is sent (no retry, nobody waits) — never raises
+        judge_after_response(state, self.settings)
         return {
             "status": "success",
             "response": answer,
@@ -497,7 +513,7 @@ class _Run:
                     if mapped is e:
                         raise
                     raise mapped from e
-                return await self._result(root, out.get("messages", []), out.get("__interrupt__"))
+                return await self._result(root, out, out.get("__interrupt__"))
 
     async def stream(self) -> AsyncIterator[dict]:
         lock = _session_lock(self.principal.user_id, self.session_id)
@@ -508,14 +524,20 @@ class _Run:
                 self._trace(["stream"]) as root,
                 _deadline(self.settings.request_timeout_s) as left,
             ):
+                # progress line at once: the first LLM call may take seconds (a reasoning model: a minute)
+                status = _Status()
+                for event in status.show("thinking"):
+                    yield event
                 async with asyncio.timeout(max(left(), 0.001)):
                     self.root = root
                     graph, config = await self._prepare()
+                status.labels = self.tool_labels
                 interrupts, final = None, None
                 # langgraph_step → (id of the agent message being streamed, text already sent?)
                 streaming: dict[Any, tuple[str, bool]] = {}
+                # "tasks": node starts ⇒ status (tools running, answer being checked)
                 it = graph.astream(
-                    self.graph_input, config, stream_mode=["messages", "updates", "values"]
+                    self.graph_input, config, stream_mode=["messages", "updates", "values", "tasks"]
                 ).__aiter__()
                 while True:
                     # Enforce the limit even when the graph is "silent" (LLM/Memory/MCP hung, no events emitted)
@@ -528,9 +550,9 @@ class _Run:
                         continue
                     if mode == "updates" and isinstance(data, dict) and data.get("__interrupt__"):
                         interrupts = data["__interrupt__"]
-                    for event in _stream_events(mode, data, streaming):
+                    for event in _stream_events(mode, data, streaming, status):
                         yield event
-                result = await self._result(root, (final or {}).get("messages", []), interrupts)
+                result = await self._result(root, final or {}, interrupts)
                 if result["status"] == "interrupted":
                     yield {"event": "interrupt", **result}
                 else:
@@ -562,13 +584,87 @@ def _deadline(seconds: float):
     yield lambda: end - time.monotonic()
 
 
+# --------------------------------------------------------------------------- SSE progress status
+# Short user-facing labels of the `status` event. Clients may show their own (localized) text per phase / tool name;
+# `label` is the default. Never put tool arguments or results in a status (they may hold personal data / secrets).
+STATUS_LABELS = {"thinking": "Thinking…", "checking": "Checking the answer…"}
+# Built-in tools; any other tool: its `metadata["status_label"]` (set it on your @tool) or "Using <name>…"
+TOOL_STATUS_LABELS = {
+    "search_knowledge": "Searching the knowledge base…",
+    "remember": "Saving to memory…",
+    "recall_memory": "Looking through your saved notes…",
+    "get_current_time": "Checking the time…",
+}
+# graph node starting ⇒ phase shown (not listed: thinking). `approval` shows nothing: an interrupt follows.
+_NODE_PHASES = {"tools": "tool", "reflect": "checking", "approval": None}
+
+
+_NAME_SEPARATORS = re.compile(r"[_\-\s]+")
+
+
+def tool_status_label(name: str, labels: dict[str, str] | None = None) -> str:
+    """User-facing label of a running tool: its metadata label, a built-in one, else derived from the NAME only."""
+    if label := (labels or {}).get(name) or TOOL_STATUS_LABELS.get(name):
+        return label
+    if name.startswith("ask_"):  # A2A client tools (app/a2a/client.py)
+        return f"Asking {_NAME_SEPARATORS.sub(' ', name.removeprefix('ask_')).strip()}…"
+    return f"Using {_NAME_SEPARATORS.sub(' ', name).strip()}…"
+
+
+class _Status:
+    """Progress line of one stream: emits a `status` event only when what the client shows changes. The client
+    clears it when answer text arrives (a `token`), so `shown` is reset then too."""
+
+    def __init__(self, labels: dict[str, str] | None = None):
+        self.shown: tuple | None = None
+        self.labels = labels or {}
+
+    def show(self, phase: str, tools: list[str] | None = None) -> list[dict]:
+        if phase == "tool":
+            names = list(dict.fromkeys(tools or []))
+            if not names:
+                return []
+            label = " · ".join(dict.fromkeys(tool_status_label(n, self.labels) for n in names))
+            event = {"event": "status", "phase": "tool", "label": label, "tools": names}
+        else:
+            event = {"event": "status", "phase": phase, "label": STATUS_LABELS.get(phase, phase)}
+        key = (event["phase"], event["label"])
+        if key == self.shown:
+            return []
+        self.shown = key
+        return [event]
+
+    def cleared(self) -> None:
+        self.shown = None
+
+
+def _pending_tool_names(state: Any) -> list[str]:
+    """Tools the `tools` node is about to RUN: the last AI message's calls, minus those already answered and those
+    the user rejected (HITL — `hitl_rejected`, answered by the tools node with an error message, nothing runs)."""
+    if not isinstance(state, dict):
+        return []
+    messages = state.get("messages", [])
+    answered: set[str] = set(state.get("hitl_rejected") or {})
+    for m in reversed(messages):
+        if isinstance(m, ToolMessage):
+            answered.add(m.tool_call_id)
+        elif isinstance(m, AIMessage):
+            return [tc["name"] for tc in m.tool_calls if tc.get("id") not in answered]
+    return []
+
+
 def _stream_events(
-    mode: str, data: Any, streaming: dict[Any, tuple[str, bool]] | None = None
+    mode: str,
+    data: Any,
+    streaming: dict[Any, tuple[str, bool]] | None = None,
+    status: _Status | None = None,
 ) -> list[dict]:
     """`streaming` (per request) remembers, per agent step, the message being streamed and whether text was already
     sent. A DIFFERENT message in the SAME step after text went out means the primary model failed mid-answer and a
     fallback restarted it (with text OR a tool call) ⇒ `reset` first, so the client never shows
-    "partial primary answer + fallback answer" glued together."""
+    "partial primary answer + fallback answer" glued together.
+    `status` (per request, None ⇒ no status events): `thinking` when a node starts (or a reasoning model streams its
+    thinking after text was shown), `tool` when the tools node starts, `checking` when the reflect gate starts."""
     events: list[dict] = []
     if mode == "messages":
         chunk, meta = data
@@ -579,16 +675,35 @@ def _stream_events(
                 if previous_id is not None and chunk.id != previous_id:
                     if sent_text:
                         events.append({"event": "reset", "reason": "llm_fallback"})
+                        if status is not None:
+                            status.cleared()
                     sent_text = False
                 streaming[step] = (chunk.id, sent_text or bool(chunk.text))
             if chunk.text:
                 events.append({"event": "token", "data": chunk.text})
+                if status is not None:
+                    status.cleared()  # the client replaces the status line with the answer text
+            elif status is not None and status.shown is None:
+                # thinking streamed after the line was cleared, e.g. the fallback model after a reset
+                if chunk.response_metadata.get(REASONING_KEY):
+                    events.extend(status.show("thinking"))
+        return events
+    if mode == "tasks":
+        # task START payloads have "input" (results have "result"); custom nodes count as thinking
+        if status is not None and isinstance(data, dict) and "input" in data:
+            phase = _NODE_PHASES.get(data.get("name"), "thinking")
+            if phase == "tool":
+                events.extend(status.show("tool", _pending_tool_names(data["input"])))
+            elif phase:
+                events.extend(status.show(phase))
         return events
     for node, update in (data or {}).items():
         if not isinstance(update, dict):
             continue
         if node == "reflect" and update.get("critique"):
             events.append({"event": "reset", "reason": "self_eval_retry"})
+            if status is not None:
+                status.cleared()
         for m in update.get("messages", []):
             if node == "agent" and isinstance(m, AIMessage):
                 events.extend({"event": "tool_start", "name": tc["name"]} for tc in m.tool_calls)

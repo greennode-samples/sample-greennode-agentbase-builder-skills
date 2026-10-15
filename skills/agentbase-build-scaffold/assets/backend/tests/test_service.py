@@ -45,6 +45,12 @@ async def test_sdk_errors_never_reach_the_caller_verbatim(
     assert LEAK in caplog.text  # the original stays in the server log
 
     events = [ev async for ev in await service.handle({"message": "hi", "stream": True}, ctx())]
+    assert events[0] == {
+        "event": "status",
+        "phase": "thinking",
+        "label": "Thinking…",
+    }  # sent at once
+    events = events[1:]
     assert events == [{"event": "error", "message": events[0]["message"], "status": expected}]
     assert "iam:sa" not in events[0]["message"]
 
