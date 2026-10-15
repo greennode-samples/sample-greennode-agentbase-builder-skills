@@ -9,8 +9,8 @@
     {
       "name": "agentbase-build",
       "source": "./",
-      "description": "Skills that standardize agent building: scaffold, llm, memory, tracing, mcp, auth, hitl, eval, frontend, deploy.",
-      "version": "0.2.0",
+      "description": "Skills that standardize agent building: scaffold, llm, memory, tracing, mcp, mcp-server, auth, identity, hitl, eval, a2a, frontend, deploy — orchestrated by /agentbase-build.",
+      "version": "0.3.0",
       "keywords": [
         "agentbase",
         "greennode",

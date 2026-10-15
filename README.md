@@ -8,7 +8,7 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 
 | Skill | Responsible for |
 |---|---|
-| **`/agentbase-build`** | Entry point: standard stack, project structure, 9-step process, hard rules, Agent Spec, **decision guide (when to enable which component)**, API contract, DoD checklist, review |
+| **`/agentbase-build`** | Entry point: standard stack, project structure, 9-step process, hard rules, review mode. References: architecture, Agent Spec (requirements-to-spec), **decision guide (when to enable which component)**, API contract, DoD checklist, security (incl. right-to-erasure runbook), platform coverage, private networking, IAM & team permissions |
 | `/agentbase-build-scaffold` | Creates `src/backend` (+ `src/frontend`), env managed with **uv**, Makefile, Dockerfile |
 | `/agentbase-build-llm` | LLMs from GreenNode MaaS: **capability tiers** (reasoning/large/small), **flow → tier**, adaptive routing, **fallback model**, streaming/usage, prompt cache |
 | `/agentbase-build-memory` | Short-term (`AgentBaseMemoryEvents`), long-term (records + auto-recall + tools), **context compression** |
@@ -21,7 +21,7 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 | `/agentbase-build-hitl` | **Human-in-the-loop**: `interrupt()` to approve / edit / reject tool calls, resume |
 | `/agentbase-build-eval` | **Evaluation loop**: Langfuse Datasets/Experiments, LLM judge, CI gate, online scores, self-eval loop |
 | `/agentbase-build-frontend` | **Expo React Native**: OIDC PKCE, SSE streaming, HITL approval cards, 👍👎 feedback |
-| `/agentbase-build-deploy` | Pre-flight, per-environment env, linux/amd64 image, `/agentbase-deploy`, verify, rollback |
+| `/agentbase-build-deploy` | Pre-flight, per-environment env files (strict format, `make check-env`), linux/amd64 image, `/agentbase-deploy` or CI (`grn`) keeping network/security settings, verify, rollback, teardown checklist |
 
 ## Repo structure
 
@@ -29,10 +29,13 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 .claude-plugin/              plugin.json, marketplace.json      (Claude Code plugin)
 .codex-plugin/               plugin.json                        (Codex plugin)
 .agents/plugins/             marketplace.json                   (Codex marketplace)
+.github/workflows/           skills-ci.yml — checks THIS repo (scaffold + tests + ruff, SKILL.md frontmatter, links, bash -n)
+CHANGELOG.md                 versions of the standard (also recorded in each generated project's .agentbase-state.json)
 skills/
-  agentbase-build/           SKILL.md + references/ (architecture, spec, api-contract, checklist)
+  agentbase-build/           SKILL.md + references/ (architecture, requirements-to-spec, decision-guide, api-contract,
+                             checklist, security, platform-coverage, private-networking, iam-permissions)
   agentbase-build-<x>/       SKILL.md + references/ + assets/backend/... (verified sample code)
-                             + scripts/ (scaffold.sh, setup_frontend.sh)
+                             + scripts/ (scaffold.sh, setup_frontend.sh, lf_trace.py)
 ```
 
 Each skill **owns** its piece of code in `assets/backend/` (at the exact target path inside `src/backend/`). `agentbase-build-scaffold/scripts/scaffold.sh` assembles these pieces into a complete project.
@@ -41,12 +44,14 @@ Each skill **owns** its piece of code in `assets/backend/` (at the exact target 
 
 ```
 <project>/
-├── Makefile  README.md  .agentbase-state.json
-├── .github/workflows/ci.yml   # lint + test, eval gate, manual deploy (grn: deploy up first, runtime update after)
-├── deploy/agent.yaml.tpl      # AgentBase manifest, rendered in CI from secrets
-├── deploy/render_runtime_spec.py  # derives the `grn agentbase runtime update` spec from the rendered manifest
+├── Makefile  README.md  .agentbase-state.json   # state: standard/scaffold version + resource IDs per environment
+├── .github/workflows/ci.yml   # lint + test, eval gate, manual deploy/redeploy (grn: deploy up first, runtime update after)
+├── deploy/agent.yaml.tpl      # AgentBase manifest, rendered in CI
+├── deploy/render_runtime_spec.py  # merges .env.<env>.example + CI secrets, derives the `runtime update` spec
+├── deploy/env_file.py         # strict KEY=VALUE env-file lint (`make check-env`)
 └── src/
     ├── backend/   # uv · LangGraph · greennode-agentbase · Langfuse v4 · MCP · JWT · HITL · evals
+    │              # + .env.{dev,staging,prod}.example: committed non-secret config per environment
     └── frontend/  # (optional) Expo React Native
 ```
 
@@ -153,7 +158,13 @@ mkdir -p ~/.claude/skills && cp -R sample-greennode-agentbase-builder-skills/ski
 
 ### Using the skills
 
-Agents load a skill automatically when your request matches its description. You can also name the skill explicitly, for example `/agentbase-build` in Claude Code (plugin skills may appear namespaced, like `/agentbase-build:agentbase-build`). Example prompts:
+Agents load a skill automatically when your request matches its description. **Invoke `/agentbase-build` explicitly** when you want this standard: the platform's `/agentbase-wizard` describes itself as mandatory for *any* build request, so an unqualified "build me an agent" may land there. Teams can make it the default with one line in the project's `AGENTS.md` / `CLAUDE.md`:
+
+```markdown
+To build, change or review an AI agent on GreenNode AgentBase, use the agentbase-build skill (/agentbase-build), not /agentbase-wizard; use the platform agentbase-* skills only for resource operations.
+```
+
+Plugin skills may appear namespaced, like `/agentbase-build:agentbase-build` or `agentbase-build:agentbase-build-llm` in Claude Code. Example prompts:
 
 - *"Use agentbase-build to build an HR assistant agent that answers leave-policy questions and creates leave requests."* The orchestrator walks through all 9 steps and calls the other skills.
 - *"Use agentbase-build-mcp-server to write an MCP server exposing our orders API, with OAuth 3LO."*
@@ -161,7 +172,7 @@ Agents load a skill automatically when your request matches its description. You
 
 ## Verified
 
-- **Offline**: a freshly scaffolded project passes 300 tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets, outbound credentials via a fake Identity API incl. non-blocking 3LO and per-user isolation, eval gate, compression invariants, tracing masks); MCP server template passes 33 e2e tests (fail-closed auth incl. JWT audience and JWKS rotation, per-user isolation, atomic idempotency, tools, local quickstart); Python 3.13, ruff clean. Frontend: `tsc` + Android bundle (Expo SDK 57).
+- **Offline**: a freshly scaffolded project passes its full suite — 300+ tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets, outbound credentials via a fake Identity API incl. non-blocking 3LO and per-user isolation, eval gate, compression invariants, tracing masks); MCP server template passes its e2e suite (fail-closed auth incl. JWT audience and JWKS rotation, per-user isolation, atomic idempotency, tools, local quickstart); Python 3.13, ruff clean — re-checked on every push by `.github/workflows/skills-ci.yml`. Frontend: `tsc` + Android bundle (Expo SDK 57).
 - **Real GreenNode** (runtime `test-agent`, v1→v6): api_key auth (401), short/long-term memory on AgentBase Memory, per-user isolation (memory, HITL, feedback, A2A tasks), HITL on real memory, MCP Connector via Gateway + Policy (ALLOW/DENY), A2A Agent Card + task isolation, real model tiers + fallback on MaaS (10 models), prompt cache.
 - **Self-hosted [Langfuse](https://github.com/langfuse/langfuse) v4.49**: full trace tree, cost/cache/reasoning/TTFT, prompt versions, scores, dataset + experiment. Traces were used to find and fix a 55s → 11s slowdown (parallel MCP + negative cache, skipping reflection for simple questions, Memory timeouts).
 - **Self-hosted Langfuse v4.58 + real MaaS** (tracing standard aligned with the Langfuse best practices): chat, knowledge search, tool call, HITL interrupt/approve, same-session follow-up, streamed answer with reflection, 403 primary ⇒ fallback, feedback — one `agent` per trace, retriever/evaluator types, `llm.<task>.generate` names with the model as attribute, thinking text (`reasoning_content`) on every generation, masked feedback comment; `lf_trace.py --audit` clean on every trace.
@@ -171,5 +182,5 @@ Agents load a skill automatically when your request matches its description. You
 
 - Runtime Inbound Auth (IAM / JWT) and IP Access Control end-to-end with this template (documented, not yet exercised; affects Direct vs BFF, see `agentbase-build-auth`).
 - OAuth2 3LO consent round-trip and delegated keys through `app/identity.py` (tested against the SDK with a fake Identity API).
-- `grn agentbase deploy up` / `runtime update` and the CI workflow on GitHub (validated with actionlint and YAML rendering only).
+- `grn agentbase deploy up` / `runtime update` and the generated CI workflow on GitHub (deploy logic exercised against a mock `grn`; templates rendered and linted offline only).
 - Long-term memory auto-extraction from this template's events (see `agentbase-build-memory`).

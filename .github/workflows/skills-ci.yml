@@ -1,0 +1,94 @@
+# CI of THIS skill set (not of generated projects — those get skills/agentbase-build-scaffold/assets/root/ci.yml).
+# No secrets needed: everything runs offline against fake LLM / in-memory backends.
+name: skills-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skills-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SKILL.md frontmatter (name, description ≤ 1024 chars), internal links, version stamps
+        run: python3 .github/scripts/check_skills.py
+      - name: bash -n on every shell script
+        run: find skills -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: Python syntax of scripts and templates outside the generated backend
+        run: python3 -m py_compile skills/agentbase-build-scaffold/assets/root/*.py skills/agentbase-build-tracing/scripts/*.py .github/scripts/*.py
+
+  scaffold:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT: build/ci-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Scaffold a project from the skills
+        run: bash skills/agentbase-build-scaffold/scripts/scaffold.sh ci-agent "$PROJECT" --no-sync
+      - name: Install (creates uv.lock) and run the full backend suite + ruff
+        working-directory: build/ci-agent/src/backend
+        run: |
+          uv sync
+          uv run ruff check . && uv run ruff format --check .
+          uv run pytest -q
+      - name: Generated deploy files — workflow YAML, env templates, manifest render
+        working-directory: build/ci-agent
+        env:
+          AGENT_NAME: ci-agent
+          RUNTIME_NAME: ci-agent-dev
+          IMAGE: registry.example/repo/ci-agent:ci
+          RUNTIME_FLAVOR: test-flavor
+          APP_ENV: dev
+          AGENT_VERSION: ci
+          LLM_API_KEY: fake-llm-key
+          VCR_USERNAME: fake-user
+          VCR_PASSWORD: fake-password
+        run: |
+          uv run --project src/backend python -c "import sys, yaml; [yaml.safe_load(open(f)) for f in sys.argv[1:]]" \
+            .github/workflows/ci.yml .agentbase-state.json
+          uv run --project src/backend python deploy/env_file.py check src/backend/.env.*.example
+          tmp=$(mktemp -d)
+          envsubst '${AGENT_NAME} ${RUNTIME_NAME} ${IMAGE} ${RUNTIME_FLAVOR} ${APP_ENV} ${AGENT_VERSION}' < deploy/agent.yaml.tpl > "$tmp/agent.yaml"
+          uv run --no-project --with 'pyyaml==6.0.2' python deploy/render_runtime_spec.py \
+            "$tmp/agent.yaml" "$tmp/runtime.yaml" --env-file src/backend/.env.dev.example --secrets LLM_API_KEY
+          rm -rf "$tmp"
+      - name: Docker image builds and answers /health
+        working-directory: build/ci-agent
+        run: |
+          make docker-build IMAGE=ci-agent TAG=ci
+          docker run -d --name ci-agent -p 127.0.0.1:8080:8080 \
+            -e LLM_MODEL=fake-model -e LLM_API_KEY=fake-key -e MEMORY_BACKEND=inmemory -e AUTH_MODE=none ci-agent:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/health
+          docker exec ci-agent sh -c 'test "$AGENT_VERSION" = ci && ! command -v uv'
+          docker exec ci-agent python -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Ho_Chi_Minh')"
+          docker rm -f ci-agent
+
+  mcp-server-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Instantiate the MCP server template and run its e2e suite
+        run: |
+          cp -R skills/agentbase-build-mcp-server/assets/mcp_server build-mcp
+          cd build-mcp
+          sed -i 's/__SERVER_NAME__/ci-mcp/g' pyproject.toml settings.py .env.example Makefile
+          make setup
+          uv run ruff check . && uv run ruff format --check .
+          make test
