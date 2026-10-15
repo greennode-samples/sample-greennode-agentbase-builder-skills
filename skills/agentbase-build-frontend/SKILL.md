@@ -28,7 +28,7 @@ What it does: `CI=1 npx create-expo@5.0.1 <dir> --template blank-typescript@sdk-
 
 | Variable | Value |
 |---|---|
-| `EXPO_PUBLIC_AGENT_URL` | **Direct**: runtime endpoint (from `/agentbase-deploy`). **BFF**: the BFF base URL. Local backend: iOS simulator / web `http://127.0.0.1:8080`, Android emulator `http://10.0.2.2:8080` (or `adb reverse tcp:8080 tcp:8080` and keep 127.0.0.1), real device `http://<LAN-IP>:8080`. Release builds require `https://` |
+| `EXPO_PUBLIC_AGENT_URL` | **Direct**: runtime endpoint (from `/agentbase-deploy`). **BFF**: the BFF base URL. Local backend: iOS simulator / web `http://127.0.0.1:8080`, Android emulator `http://10.0.2.2:8080` (or `adb reverse tcp:8080 tcp:8080` and keep 127.0.0.1), real device `http://<LAN-IP>:8080` — but a local backend with `AUTH_MODE=none` listens on 127.0.0.1 only (anyone on the LAN could otherwise act as any user): use `AUTH_MODE=jwt` locally (then it binds 0.0.0.0) or a tunnel. Release builds require `https://` |
 | `EXPO_PUBLIC_AUTH_MODE` | `jwt` · `none` (only when the backend uses `AUTH_MODE=none` locally) |
 | `EXPO_PUBLIC_AUTH_TOKEN_HEADER` | Header the **app** sends `Bearer <user JWT>` in: `Authorization` in both modes. Direct: = backend `AUTH_TOKEN_HEADER`. BFF: stays `Authorization` even though the backend uses `AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token` — the BFF moves it there |
 | `EXPO_PUBLIC_OIDC_ISSUER` / `CLIENT_ID` / `SCOPES` / `AUDIENCE` | IdP **public** client + PKCE (table below); register the redirect URIs below |
