@@ -1,6 +1,6 @@
 // Conversation state as a PURE reducer (no React / React Native imports) — every rule about turns, interrupts and
 // errors lives here so it can be unit-tested in plain Node. ConversationProvider does the I/O and dispatches.
-import { type ChatResult, type Interrupt, interruptFrom, type StreamEvent } from '../api/contract';
+import { type ChatResult, type Interrupt, interruptFrom, type StatusEvent, type StreamEvent } from '../api/contract';
 
 export type UiMessage = {
   id: string;
@@ -12,6 +12,8 @@ export type UiMessage = {
   feedback?: -1 | 1;
   feedbackError?: string;
   pending?: boolean;
+  /** progress line under a pending reply ("Thinking…", "Searching the knowledge base…") — cleared by answer text */
+  status?: string;
 };
 
 export type TurnKind = 'chat' | 'resume';
@@ -60,7 +62,32 @@ export const TEXT = {
   closed: 'Connection closed before the answer completed.',
   stopped: '⏹ Stopped.',
   failedNotice: 'The message could not be completed.',
+  // SSE `status` phases (translate here); a phase missing from this table shows the backend's `label`
+  status: {
+    thinking: 'Thinking…',
+    tool: 'Using a tool…',
+    checking: 'Checking the answer…',
+  } as Record<string, string>,
 };
+
+/** Status text per tool name (translate / extend for your tools); other tools show the backend's `label`. */
+export const TOOL_STATUS: Record<string, string> = {
+  search_knowledge: 'Searching the knowledge base…',
+  remember: 'Saving to memory…',
+  recall_memory: 'Looking through your saved notes…',
+  get_current_time: 'Checking the time…',
+};
+
+/** The progress line for a `status` event — short, never tool arguments (the event carries none). */
+export function statusText(e: Pick<StatusEvent, 'phase' | 'label' | 'tools'>): string {
+  if (e.phase === 'tool') {
+    const tools = e.tools ?? [];
+    const known = tools.map((t) => TOOL_STATUS[t]).filter((t): t is string => !!t);
+    if (tools.length && known.length === tools.length) return [...new Set(known)].join(' · ');
+    return e.label || TEXT.status.tool;
+  }
+  return TEXT.status[e.phase] ?? e.label ?? '';
+}
 
 export const initialChatState = (sessionId: string, owner: string | null = null): ChatState => ({
   sessionId,
@@ -91,6 +118,7 @@ function applyResult(s: ChatState, replyId: string, r: ChatResult): ChatState {
       ...m,
       text: r.interrupt.message || m.text || TEXT.waiting,
       pending: false,
+      status: undefined,
     }));
   }
   return patch({ ...s, notice: null, retry: null }, replyId, (m) => ({
@@ -99,6 +127,7 @@ function applyResult(s: ChatState, replyId: string, r: ChatResult): ChatState {
     traceId: r.trace_id,
     feedbackToken: r.feedback_token,
     pending: false,
+    status: undefined,
   }));
 }
 
@@ -110,7 +139,12 @@ function applyFailure(
   const turn = s.turn!;
   s = end(s);
   const say = (text: string, keep = true) =>
-    patch(s, replyId, (m) => ({ ...m, text: keep && m.text ? `${m.text}\n${text}` : text, pending: false }));
+    patch(s, replyId, (m) => ({
+      ...m,
+      text: keep && m.text ? `${m.text}\n${text}` : text,
+      pending: false,
+      status: undefined,
+    }));
 
   if (f.status === 409 && f.interrupt) {
     // An approval IS pending (lost / superseded interrupt): show it again — a dead end otherwise (every chat ⇒ 409)
@@ -166,16 +200,22 @@ export function chatReducer(s: ChatState, a: ChatAction): ChatState {
           resumeOf: a.kind === 'resume' ? s.pending : null,
           ended: false,
         },
-        messages: [...s.messages, { id: a.replyId, role: 'assistant', text: '', pending: true, tools: [] }],
+        // "Thinking…" at once, streaming or not; a streaming backend refines it with `status` events
+        messages: [
+          ...s.messages,
+          { id: a.replyId, role: 'assistant', text: '', pending: true, tools: [], status: TEXT.status.thinking },
+        ],
       };
     case 'event': {
       if (!open(s, a.replyId)) return s;
       const e = a.event;
       switch (e.event) {
-        case 'token':
-          return patch(s, a.replyId, (m) => ({ ...m, text: m.text + e.data }));
+        case 'token': // answer text replaces the progress line
+          return patch(s, a.replyId, (m) => ({ ...m, text: m.text + e.data, status: undefined }));
         case 'reset': // self-eval retry / LLM fallback restarts the answer: drop what was shown, tools included
-          return patch(s, a.replyId, (m) => ({ ...m, text: '', tools: [] }));
+          return patch(s, a.replyId, (m) => ({ ...m, text: '', tools: [], status: undefined }));
+        case 'status':
+          return patch(s, a.replyId, (m) => ({ ...m, status: statusText(e) || m.status }));
         case 'tool_start':
           return patch(s, a.replyId, (m) => ({ ...m, tools: [...(m.tools ?? []), e.name] }));
         case 'interrupt':
@@ -200,7 +240,12 @@ export function chatReducer(s: ChatState, a: ChatAction): ChatState {
     case 'stopped': {
       if (!open(s, a.replyId)) return s;
       const turn = s.turn!;
-      s = patch(end(s), a.replyId, (m) => ({ ...m, text: m.text ? `${m.text}\n${TEXT.stopped}` : TEXT.stopped, pending: false }));
+      s = patch(end(s), a.replyId, (m) => ({
+        ...m,
+        text: m.text ? `${m.text}\n${TEXT.stopped}` : TEXT.stopped,
+        pending: false,
+        status: undefined,
+      }));
       // a stopped resume may still complete on the server ⇒ keep the card (resubmitting re-syncs via 409)
       return turn.kind === 'resume' && turn.resumeOf ? { ...s, pending: turn.resumeOf, pendingNote: TEXT.resumeRetryNote } : s;
     }

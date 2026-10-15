@@ -33,11 +33,18 @@ export type ChatResult =
       feedback_token: string | null;
     };
 
+/**
+ * Progress line while the agent works (until answer text arrives). `phase`: thinking | tool | checking — newer
+ * backends may add phases: show `label` (the backend's English default) for any phase you don't know.
+ */
+export type StatusEvent = { event: 'status'; phase: string; label?: string; tools?: string[] };
+
 export type StreamEvent =
   | { event: 'token'; data: string }
   | { event: 'tool_start'; name: string }
   | { event: 'tool_end'; name: string; status?: string }
   | { event: 'reset'; reason: string }
+  | StatusEvent
   | ({ event: 'interrupt' } & Extract<ChatResult, { status: 'interrupted' }>)
   | ({ event: 'done' } & Extract<ChatResult, { status: 'success' }>)
   // 409 while an approval is pending carries that approval (`interrupt`) so the client can show it again

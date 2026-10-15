@@ -34,14 +34,23 @@ export function MessageBubble({ message, onFeedback }: Props) {
   const mine = message.role === 'user';
   // feedback needs BOTH ids from the response — the backend answers 403 without the token
   const canRate = !mine && !message.pending && !!message.traceId && !!message.feedbackToken;
+  const showStatus = !mine && !!message.pending && !!message.status;
   return (
     <View style={[styles.row, mine ? styles.right : styles.left]}>
       <View style={[styles.bubble, mine ? styles.mine : styles.theirs]}>
         {!!message.tools?.length && <Text style={styles.tools}>🔧 {message.tools.join(', ')}</Text>}
-        <Linkified
-          style={mine ? styles.mineText : styles.text}
-          text={message.text || (message.pending ? '…' : '')}
-        />
+        {(!!message.text || !showStatus) && (
+          <Linkified
+            style={mine ? styles.mineText : styles.text}
+            text={message.text || (message.pending ? '…' : '')}
+          />
+        )}
+        {showStatus && (
+          // progress line ("Thinking…", "Searching the knowledge base…") until answer text arrives
+          <Text style={styles.status} accessibilityLiveRegion="polite" numberOfLines={2}>
+            {message.status}
+          </Text>
+        )}
         {canRate && (
           <View style={styles.actions}>
             {([1, -1] as const).map((s) => (
@@ -74,6 +83,7 @@ const styles = StyleSheet.create({
   mineText: { color: '#fff', fontSize: 15 },
   text: { color: '#111', fontSize: 15 },
   tools: { fontSize: 12, color: '#666', marginBottom: 4 },
+  status: { fontSize: 13, color: '#666', fontStyle: 'italic' },
   link: { color: '#0b5ed7', textDecorationLine: 'underline' },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   btn: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8, opacity: 0.6 },
