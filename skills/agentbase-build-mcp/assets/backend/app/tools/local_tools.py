@@ -5,7 +5,8 @@ Rules:
   or tools calling internal systems => write an MCP server (/agentbase-build-mcp-server) and connect via
   AgentBase MCP Gateway (Connector + Policy Group).
 - POC when the internal system has no API yet: mock adapter in-process here, behind a setting BLOCKED in prod;
-  keep the tool name so moving to MCP later needs no change to HITL_TOOLS / eval expected_tools.
+  keep the tool name so moving to MCP later needs no change to HITL_TOOLS / eval expected_tools (the MCP
+  server exposes the same name; set "prefix": false on it in mcp_servers.json).
 - The docstring is the "prompt" for the LLM: describe when to use it and what the parameters mean.
 - User identity: NEVER take it from tool parameters. Declare a `config: RunnableConfig` parameter (LangChain
   injects it, the LLM doesn't see it) then read:
