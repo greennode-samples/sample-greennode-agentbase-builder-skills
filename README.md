@@ -29,7 +29,9 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 .claude-plugin/              plugin.json, marketplace.json      (Claude Code plugin)
 .codex-plugin/               plugin.json                        (Codex plugin)
 .agents/plugins/             marketplace.json                   (Codex marketplace)
-.github/workflows/           skills-ci.yml — checks THIS repo (scaffold + tests + ruff, SKILL.md frontmatter, links, bash -n)
+.github/workflows/           skills-ci.yml — checks THIS repo (scaffold + tests + ruff, SKILL.md frontmatter, links, bash -n,
+                             docs ↔ code drift — see Repo checks)
+.github/scripts/             check_skills.py, check_drift.py, drift_allowlist.py
 CHANGELOG.md                 versions of the standard (also recorded in each generated project's .agentbase-state.json)
 skills/
   agentbase-build/           SKILL.md + references/ (architecture, requirements-to-spec, decision-guide, api-contract,
@@ -39,6 +41,21 @@ skills/
 ```
 
 Each skill **owns** its piece of code in `assets/backend/` (at the exact target path inside `src/backend/`). `agentbase-build-scaffold/scripts/scaffold.sh` assembles these pieces into a complete project.
+
+## Repo checks
+
+`python3 .github/scripts/check_skills.py` (from the repo root; Python ≥ 3.12, standard library only, < 1 s) is what the `static` job of `skills-ci.yml` runs on every push and PR — run it before committing (older system Python: `uv run --python 3.12 --no-project python3 .github/scripts/check_skills.py`). It checks SKILL.md frontmatter, internal links and version stamps, then compares the docs with the code (`check_drift.py`):
+
+| Check | Fails when |
+|---|---|
+| `settings-env` | a `Settings` field of `app/config.py` has no active line in `.env.example` (an empty value means the default); a key of `.env.example` / `env.deploy.example` is read by nothing; a deploy file sets `GREENNODE_*` / `AGENT_VERSION`, or a `<set-in-deploy>` secret that `ci.yml` does not fill; `ci.yml` uses a secret / variable its header does not list, or exports config the eval SKILL does not name; the same pairs for the MCP server and frontend templates |
+| `trace-names` | a name the backend emits (`tracing.step` / `event` / `score_trace`, `run_name`, graph node, `get_llm` task) is missing from the tracing SKILL.md tree; that tree, tracing.py's docstring tree or `references/trace-schema.md` names something no code emits; observation types or trace metadata keys disagree |
+| `make-targets` | a doc runs `make <target>` that the Makefile of its context (project root, or the MCP server for its skill) does not define |
+| `paths` | a cited template path (`app/…`, `tests/…`, `deploy/…`, `src/backend/…`) exists in no skill |
+| `env-names` | an UPPER_SNAKE config name in a doc or template is not a setting, env-file key, variable read by code, or CI / Makefile name |
+| `build-sync` | the two Dockerfiles diverge (python and uv images, stages, `uv sync` flags, `chown -R`), `uv … --frozen` appears anywhere, a doc cites another python image, or a doc copies CI workflow steps (describe them and point to `ci.yml` instead) |
+
+Every failure names the file, the line and the fix. Fix the doc or the template; when a difference is intended, add it to `.github/scripts/drift_allowlist.py` with its reason (an entry nothing needs any more fails too, so the list stays short).
 
 ## Generated project
 
