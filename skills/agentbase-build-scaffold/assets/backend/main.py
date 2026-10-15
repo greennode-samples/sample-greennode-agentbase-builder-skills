@@ -22,6 +22,7 @@ from app import service  # noqa: E402
 from app.auth.inbound import prefetch_jwks  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.observability import tracing  # noqa: E402
+from app.tools.mcp import log_iam_principal  # noqa: E402
 
 settings = get_settings()
 logging.basicConfig(level=settings.log_level)
@@ -31,6 +32,7 @@ logging.basicConfig(level=settings.log_level)
 async def lifespan(_app):
     tracing.init_tracing(settings)
     await prefetch_jwks(settings)  # the first request doesn't wait for the JWKS download
+    await log_iam_principal(settings)  # Policy Group principal iam:<sub> in the startup log (never fails)
     try:
         yield
     finally:
