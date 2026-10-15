@@ -95,3 +95,16 @@ jobs:
           make setup
           uv run ruff check . && uv run ruff format --check .
           make test
+
+  upgrade:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # upgrade.py rebuilds the template of older versions from the skills' git history
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Upgrade projects scaffolded at 3528ac6 (pre-0.3.0) and ae3e701 (0.3.0) to this commit, then pytest + ruff
+        # Python 3.9 = the macOS system python3, the oldest interpreter upgrade.py / template_files.py must run on
+        run: |
+          uv python install 3.9
+          "$(uv python find 3.9)" .github/scripts/test_upgrade.py --pytest
