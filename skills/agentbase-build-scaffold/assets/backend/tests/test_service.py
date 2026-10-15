@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+import openai
 import pytest
 from greennode_agentbase import RequestContext
 from greennode_agentbase.exceptions import GreenNodeRequestError
@@ -91,3 +92,52 @@ def test_bind_host(tmp_path, app_env, auth_mode, in_docker, host):
         dockerenv.touch()
     s = SimpleNamespace(is_local=app_env == "local", auth_mode=auth_mode)
     assert main.bind_host(s, dockerenv) == host
+
+
+def _llm_fails(monkeypatch, fake_llm, exc: Exception) -> None:
+    model = fake_llm()
+
+    def raising(self, messages, stop=None, run_manager=None, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(type(model), "_generate", raising)
+
+
+def _provider_error(cls, status: int, body: str):
+    import httpx
+
+    request = httpx.Request("POST", "https://maas.test/v1/chat/completions")
+    return cls(body, response=httpx.Response(status, request=request), body={"error": body})
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            _provider_error(openai.PermissionDeniedError, 403, "model not allowed for key sk-x1"),
+            "LLM configuration error (HTTP 403)",
+        ),
+        (
+            _provider_error(openai.NotFoundError, 404, "model big-model does not exist"),
+            "LLM configuration error (HTTP 404)",
+        ),
+        (
+            _provider_error(openai.InternalServerError, 500, "upstream exploded"),
+            "LLM provider error or overloaded",
+        ),
+    ],
+)
+async def test_llm_errors_map_to_502_without_the_provider_body(
+    monkeypatch, fake_llm, caplog, error, expected
+):
+    """A rejected key / model not enabled is a deployment config error, not an outage — and the provider's body
+    (model ids, key fragments) stays in the server log."""
+    _llm_fails(monkeypatch, fake_llm, error)
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.handle({"message": "hi"}, ctx("svc-llm"))
+    assert e.value.status_code == 502 and expected in e.value.message
+    assert error.message not in e.value.message and error.message in caplog.text
+
+    events = [ev async for ev in await service.handle({"message": "hi", "stream": True}, ctx())]
+    assert events[-1]["event"] == "error" and events[-1]["status"] == 502
+    assert expected in events[-1]["message"]

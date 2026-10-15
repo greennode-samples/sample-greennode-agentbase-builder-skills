@@ -310,10 +310,12 @@ _MAPPED_ERRORS = (GreenNodeRequestError, GraphRecursionError, openai.APIError, T
 
 
 def _mapped(e: BaseException) -> GreenNodeRequestError:
-    """_map_error + log what the caller won't see (the SDK error's own message)."""
+    """_map_error + log what the caller won't see (the SDK's / LLM provider's own message)."""
     mapped = _map_error(e)
     if isinstance(e, GreenNodeRequestError) and mapped is not e:
         log.warning("backing service error (HTTP %s): %s", e.status_code, e.message)
+    elif isinstance(e, openai.APIError):
+        log.warning("LLM error %s: %s", getattr(e, "status_code", type(e).__name__), e.message)
     return mapped
 
 
@@ -331,6 +333,14 @@ def _map_error(e: BaseException) -> GreenNodeRequestError:
     if isinstance(e, GraphRecursionError):
         return _error(
             "The request needs too many steps — please split up the question (MAX_TOOL_ROUNDS)", 422
+        )
+    if isinstance(e, openai.APIStatusError) and e.status_code in (401, 402, 403, 404):
+        # Not an outage: key rejected / plan expired / model not enabled for the key / model id wrong. Generic text
+        # (the provider body stays in the log) — retrying won't help, the deployment config must be fixed.
+        return _error(
+            f"LLM configuration error (HTTP {e.status_code}) — check the model ids and LLM_API_KEY "
+            "(see make check-creds)",
+            502,
         )
     if isinstance(e, openai.APIError):  # after all fallbacks have been tried
         return _error("LLM provider error or overloaded (fallbacks tried)", 502)
