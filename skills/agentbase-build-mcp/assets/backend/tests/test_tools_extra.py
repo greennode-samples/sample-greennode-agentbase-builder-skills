@@ -183,3 +183,16 @@ def test_forbidden_tools_evaluator():
         "interrupt": {"tool_calls": [{"name": "create_leave_request"}]},
     }
     assert forbidden_tools(output=interrupted, metadata=meta).value == 0.0
+
+
+def test_get_current_time_defaults_to_app_timezone_and_rejects_unknown_zones(monkeypatch):
+    """Empty timezone ⇒ APP_TIMEZONE; a non-IANA name (the model asked for "Asia/Hanoi" on a real run) ⇒ a
+    readable answer instead of a tool exception."""
+    from app.config import get_settings
+    from app.tools.local_tools import get_current_time
+
+    monkeypatch.setenv("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
+    get_settings.cache_clear()
+    assert get_current_time.invoke({}).endswith("+07:00")
+    assert get_current_time.invoke({"timezone": "Europe/Paris"})[-6:] in ("+01:00", "+02:00")
+    assert "Unknown time zone 'Asia/Hanoi'" in get_current_time.invoke({"timezone": "Asia/Hanoi"})

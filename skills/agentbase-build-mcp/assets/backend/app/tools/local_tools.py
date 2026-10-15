@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
@@ -40,9 +40,25 @@ log = logging.getLogger(__name__)
 
 
 @tool
-def get_current_time(timezone: str = "Asia/Ho_Chi_Minh") -> str:
-    """Get the current date and time in an IANA timezone (default Asia/Ho_Chi_Minh)."""
-    return datetime.now(ZoneInfo(timezone)).isoformat(timespec="seconds")
+def get_current_time(timezone: str = "") -> str:
+    """Get the current date and time.
+
+    Args:
+        timezone: IANA time zone name, e.g. "Asia/Ho_Chi_Minh" or "Europe/Paris". Leave empty for the agent's
+            own time zone (APP_TIMEZONE).
+    """
+    if not timezone:
+        from app.graph.builder import (
+            zone,  # same fallback as the per-turn context (no tz database ⇒ fixed offset)
+        )
+
+        return datetime.now(zone(get_settings().app_timezone)).isoformat(timespec="seconds")
+    try:
+        tz = ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        # seen on a real run: the model asked for "Asia/Hanoi" (not an IANA name) — say so instead of raising
+        return f"Unknown time zone {timezone!r}: use an IANA name such as Asia/Ho_Chi_Minh, or leave it empty."
+    return datetime.now(tz).isoformat(timespec="seconds")
 
 
 # --------------------------------------------------------------------------- knowledge (RAG POC)

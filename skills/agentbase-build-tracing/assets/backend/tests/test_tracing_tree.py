@@ -128,7 +128,8 @@ async def test_chat_turn_trace_follows_best_practices(spans, monkeypatch):
     assert output["thinking"][0]["content"].startswith("The user asks for a capital")
     assert "hunter2" not in gen["langfuse.observation.output"]  # thinking goes through `mask` too
     chat = json.loads(gen["langfuse.observation.input"])
-    assert [m["role"] for m in chat["messages"]] == ["system", "user"]
+    # static system prompt, the user's message, then the per-turn context (date/time, notes…) as a system message
+    assert [m["role"] for m in chat["messages"]] == ["system", "user", "system"]
 
     # long-term recall is a lookup ⇒ retriever (filterable as such, drives the Agent Graph)
     assert {_type(a) for a in got["memory.recall"]} == {"retriever"}
@@ -308,8 +309,8 @@ async def test_generation_io_is_openai_chat_format(spans, monkeypatch):
         "timezone": "Asia/Ho_Chi_Minh"
     }  # JSON string
     replay = json.loads(second["langfuse.observation.input"])["messages"]
-    assert [m["role"] for m in replay] == ["system", "user", "assistant", "tool"]
-    assert replay[2]["tool_calls"][0]["id"] == replay[3]["tool_call_id"] == "call_1"
+    assert [m["role"] for m in replay] == ["system", "user", "system", "assistant", "tool"]
+    assert replay[3]["tool_calls"][0]["id"] == replay[4]["tool_call_id"] == "call_1"
 
 
 @pytest.mark.parametrize("action", ["approve", "reject"])
