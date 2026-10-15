@@ -751,7 +751,10 @@ async def test_log_iam_principal_never_fails_startup(monkeypatch, tmp_path, capl
     assert "IAM principal not logged at startup" in caplog.text and "check-creds" in caplog.text
 
     monkeypatch.delenv("GREENNODE_CLIENT_ID")
-    monkeypatch.chdir(tmp_path)  # no .greennode.json either
+    monkeypatch.chdir(tmp_path)  # no .greennode.json either (nor the developer's one…
+    import greennode_agentbase.core.config as sdk_config
+
+    monkeypatch.setattr(sdk_config, "_config_cache", None)  # …that the SDK has cached)
     monkeypatch.setattr(mcp_mod, "_iam_auth", mcp_mod.IAMBearerAuth())
     await mcp_mod.log_iam_principal(settings)
     assert "no IAM credentials are configured" in caplog.text
