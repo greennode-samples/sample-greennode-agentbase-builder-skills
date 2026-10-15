@@ -17,11 +17,15 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 GREENNODE_LLM_BASE_URL = "https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1"
+# LLM capability tiers (app/llm builds on them). Defined here so Settings can reject typos at startup without
+# importing app.llm (which imports this module).
+LLM_TIERS: tuple[str, ...] = ("reasoning", "large", "small")
 
 
 class Settings(BaseSettings):
@@ -35,6 +39,8 @@ class Settings(BaseSettings):
     agent_name: str = "__PROJECT_NAME__"
     agent_version: str = "0.1.0"
     log_level: str = "INFO"
+    # IANA time zone of the current date/time given to the model every turn (app/graph/builder.py)
+    app_timezone: str = "Asia/Ho_Chi_Minh"
 
     # --- LLM (OpenAI-compatible; defaults to GreenNode AI Platform MaaS) ---
     llm_base_url: str = GREENNODE_LLM_BASE_URL
@@ -42,7 +48,10 @@ class Settings(BaseSettings):
     llm_model: str = ""  # use the model's `path` field on AIP (not `code`)
     llm_temperature: float = 0.2
     llm_max_tokens: int | None = None
-    # per attempt (streaming ⇒ inactivity timeout); sized so a fallback chain fits REQUEST_TIMEOUT_S (llm skill §4)
+    # Output cap per task, overrides DEFAULT_TASK_MAX_TOKENS (internal flows are bounded by default; reasoning tokens
+    # count too), e.g. {"router": 512, "judge": 0} — 0 ⇒ no per-task cap (LLM_MAX_TOKENS applies)
+    llm_task_max_tokens: dict[str, int] = Field(default_factory=dict)
+    # per attempt; streaming ⇒ INACTIVITY timeout (a model streaming its thinking is never cut) — llm skill §4
     llm_timeout_s: float = 25.0
     llm_max_retries: int = 1
     # streaming=True so Langfuse records TTFT (completion_start_time); stream_usage for usage/cost
@@ -62,7 +71,8 @@ class Settings(BaseSettings):
     llm_tier_fallbacks: dict[str, list[str]] = Field(default_factory=dict)
 
     # --- Memory ---
-    # agentbase: AgentBase Memory (prod); inmemory: local/test runs without the platform
+    # agentbase: AgentBase Memory (staging/prod). inmemory: local/test, or dev with 1 replica — per process, lost on
+    # restart, long-term recall is keyword matching (no recall-quality testing on it)
     memory_backend: Literal["agentbase", "inmemory"] = "agentbase"
     memory_id: str = ""
     memory_strategy_id: str = "default"
@@ -79,7 +89,11 @@ class Settings(BaseSettings):
     # The platform limits concurrent Memory requests to 10 per IAM account (429 "Too many concurrent ...
     # Limit: 10") — SHARED across all runtime replicas ⇒ set ≈ 10 / number of replicas.
     memory_max_concurrency: int = 6
-    ltm_min_score: float | None = None
+    # Minimum similarity score of a recalled record (sent as the search's scoreThreshold, also checked here);
+    # 0 ⇒ no threshold (top-k injected whatever its relevance). Tune it on dev with real records.
+    ltm_min_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    # A fact saved by `remember` / injected by recall is capped at this many characters (long ones are refused / cut)
+    ltm_fact_max_chars: int = Field(default=300, ge=50)
 
     # --- Graph: max agent ⇄ tools rounds per turn (exceeded ⇒ "too many steps" error, no infinite loop)
     max_tool_rounds: int = 8
@@ -142,9 +156,12 @@ class Settings(BaseSettings):
 
     # --- Self-evaluation loop (optional) ---
     reflection_enabled: bool = False
-    reflection_max_retries: int = 1
-    # Skip reflection when adaptive routing rates the message "simple" (greeting, 1 step) — saves 1–2 LLM calls
+    reflection_max_retries: int = Field(default=1, ge=0)
+    # Skip reflection when adaptive routing rates the message "simple" (greeting, 1 step) — saves 1–2 LLM calls.
+    # Only effective with LLM_ADAPTIVE_ROUTING (without the router no turn is rated "simple").
     reflection_skip_simple: bool = True
+    # Time limit of one judge call (the user is waiting); exceeded ⇒ the answer is kept (treated as a pass)
+    reflection_timeout_s: float = Field(default=20.0, gt=0)
     reflection_criteria: str = (
         "On point, accurate to the tool data, nothing made up, complete, in the user's language."
     )
@@ -193,6 +210,21 @@ class Settings(BaseSettings):
             return False
         return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
 
+    @field_validator("app_timezone")
+    @classmethod
+    def _known_timezone(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            try:
+                ZoneInfo("UTC")
+            except ZoneInfoNotFoundError:
+                return v  # no time zone database in the image ⇒ app/graph/builder.py falls back (WARNING)
+            raise ValueError(
+                f"APP_TIMEZONE={v!r} is not an IANA time zone (e.g. Asia/Ho_Chi_Minh)"
+            ) from e
+        return v
+
     @model_validator(mode="after")
     def _validate(self) -> Settings:
         # APP_ENV defaults to "local" (dev convenience). A deploy env file that forgets APP_ENV must NOT
@@ -206,6 +238,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LLM_MODEL and LLM_API_KEY are required (use /agentbase-llm to get a key)."
             )
+        # Typos in the LLM routing tables must fail at startup, not on the first call of a rarely used flow
+        if bad := {t: v for t, v in self.llm_task_tiers.items() if v not in LLM_TIERS}:
+            raise ValueError(f"LLM_TASK_TIERS: invalid tier in {bad} (allowed: {list(LLM_TIERS)}).")
+        if bad_keys := sorted(set(self.llm_tier_fallbacks) - set(LLM_TIERS)):
+            raise ValueError(
+                f"LLM_TIER_FALLBACKS: unknown tier key(s) {bad_keys} (allowed: {list(LLM_TIERS)}); "
+                "a shared list goes in LLM_FALLBACK_MODELS."
+            )
+        if bad := {t: v for t, v in self.llm_task_max_tokens.items() if v < 0}:
+            raise ValueError(f"LLM_TASK_MAX_TOKENS: negative value in {bad} (0 = no per-task cap).")
         if self.memory_backend == "agentbase" and not self.memory_id:
             raise ValueError(
                 "MEMORY_BACKEND=agentbase requires MEMORY_ID (create it with /agentbase-memory)."
@@ -221,7 +263,10 @@ class Settings(BaseSettings):
                 "id makes long-term recall silently return nothing."
             )
         if self.memory_backend == "inmemory" and not self.is_local and self.app_env != "dev":
-            raise ValueError("MEMORY_BACKEND=inmemory is only allowed with APP_ENV=local|dev.")
+            raise ValueError(
+                "MEMORY_BACKEND=inmemory is only allowed with APP_ENV=local|dev (dev: 1 replica, history and "
+                "long-term memory are lost on restart)."
+            )
         if self.auth_mode == "none" and not self.is_local:
             raise ValueError("AUTH_MODE=none is only allowed when APP_ENV=local.")
         if self.auth_mode == "jwt" and not self.auth_jwks_url:

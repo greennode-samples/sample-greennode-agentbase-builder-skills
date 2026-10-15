@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
 from greennode_agentbase import RequestContext
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app import service
 from app.config import get_settings
@@ -29,6 +31,103 @@ async def test_reflection_retries_and_removes_bad_answer(fake_llm, monkeypatch):
     )
     # The bad answer has been removed from history
     assert not any(getattr(m, "content", "") == "bad answer" for m in model.calls[-1])
+    # retries used up (REFLECTION_MAX_RETRIES=1): the retry answer is final whatever the verdict ⇒ no 2nd judge call
+    assert len(model.calls) == 3
+
+
+async def test_judge_sees_this_turns_tool_results(fake_llm, monkeypatch):
+    """Criteria say "accurate to the tool data" — the judge used to get only question + answer ⇒ spurious fails."""
+    monkeypatch.setenv("REFLECTION_ENABLED", "true")
+    get_settings.cache_clear()
+    call = {"name": "get_current_time", "args": {"timezone": "Asia/Ho_Chi_Minh"}, "id": "t1"}
+    model = fake_llm(
+        AIMessage("", tool_calls=[call]),
+        AIMessage("It is 10:00."),
+        AIMessage('{"pass": true, "score": 0.9, "critique": ""}'),
+    )
+    out = await service.handle(
+        {"message": "time?"}, RequestContext(session_id="r-tools", user_id="u1")
+    )
+    assert out["response"] == "It is 10:00."
+    judge_input = model.calls[2][1].content
+    assert "Tool results this turn:" in judge_input and "get_current_time (success):" in judge_input
+    assert "Answer:\nIt is 10:00." in judge_input
+
+
+def test_tool_results_for_the_judge_are_current_turn_and_truncated():
+    from app import reflection
+
+    msgs = [
+        HumanMessage("old question"),
+        ToolMessage("OLD-RESULT", tool_call_id="o1", name="search"),
+        HumanMessage("new question"),
+        ToolMessage("r" * 10_000, tool_call_id="n1", name="search"),
+        ToolMessage("NEXT", tool_call_id="n2", name="other"),
+    ]
+    text = reflection.tool_results_text(msgs)
+    assert "OLD-RESULT" not in text and "NEXT" in text
+    assert len(text) < reflection.TOOL_RESULT_MAX_CHARS + 200
+
+
+async def test_reflection_skipped_when_user_rejected_a_tool(fake_llm, monkeypatch):
+    """The answer explains what was NOT done — judging it "against the tool data" fails it spuriously."""
+    monkeypatch.setenv("REFLECTION_ENABLED", "true")
+    monkeypatch.setenv("HITL_TOOLS", '["remember"]')
+    get_settings.cache_clear()
+    model = fake_llm(
+        AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}]),
+        AIMessage("OK, I did not save it."),
+        AIMessage('{"pass": false, "score": 0.1, "critique": "no data"}'),
+    )
+    ctx = RequestContext(session_id="r-hitl", user_id="u1")
+    out = await service.handle({"message": "remember x"}, ctx)
+    assert out["status"] == "interrupted"
+    tc_id = out["interrupt"]["tool_calls"][0]["id"]
+    done = await service.handle(
+        {"type": "resume", "decisions": [{"tool_call_id": tc_id, "action": "reject"}]}, ctx
+    )
+    assert done["response"] == "OK, I did not save it."
+    assert len(model.calls) == 2  # agent + agent — no judge
+
+
+async def test_judge_timeout_keeps_the_answer(fake_llm, monkeypatch):
+    from app import reflection
+
+    monkeypatch.setenv("REFLECTION_ENABLED", "true")
+    monkeypatch.setenv("REFLECTION_TIMEOUT_S", "0.05")
+    get_settings.cache_clear()
+    fake_llm(AIMessage("the answer"))
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        reflection.tracing,
+        "event",
+        lambda name, level="DEFAULT", **kw: events.append((name, level)),
+    )
+
+    class _SlowJudge:
+        async def ainvoke(self, *a, **k):
+            await asyncio.sleep(5)
+
+    monkeypatch.setattr(reflection, "get_llm", lambda task="judge", tools=None: _SlowJudge())
+    out = await service.handle({"message": "q"}, RequestContext(session_id="r-slow", user_id="u1"))
+    assert out["response"] == "the answer"
+    assert ("reflection.judge_timeout", "WARNING") in events
+
+
+async def test_judge_setup_error_keeps_the_answer(fake_llm, monkeypatch):
+    """get_llm("judge") used to run OUTSIDE the try: an invalid judge config ⇒ 500 after the answer was ready."""
+    from app import reflection
+
+    monkeypatch.setenv("REFLECTION_ENABLED", "true")
+    get_settings.cache_clear()
+    fake_llm(AIMessage("the answer"))
+
+    def broken(task="judge", tools=None):
+        raise ValueError("LLM_TASK_TIERS[judge]=huge is invalid")
+
+    monkeypatch.setattr(reflection, "get_llm", broken)
+    out = await service.handle({"message": "q"}, RequestContext(session_id="r-cfg", user_id="u1"))
+    assert out["status"] == "success" and out["response"] == "the answer"
 
 
 def test_evaluators():
@@ -50,6 +149,9 @@ def test_judge_output_parsed_defensively():
     assert _parse("not json")["pass"] is True
     assert _parse('{"score": "abc"}')["score"] == 1.0
     assert _parse('{"score": 7}')["score"] == 1.0  # clamped to [0, 1]
+    for raw in ('{"score": NaN}', '{"score": Infinity}', '{"score": -Infinity}'):
+        # non-finite ⇒ missing (NaN used to reach the self_eval score)
+        assert _parse(raw)["score"] == 1.0
 
 
 async def test_fail_verdict_without_critique_still_retries(fake_llm, monkeypatch):
@@ -105,6 +207,7 @@ def test_eval_config_error_exit_code(monkeypatch):
         raise ValueError("LLM_MODEL and LLM_API_KEY are required")
 
     monkeypatch.setattr(run_eval, "get_settings", bad_settings)
+    monkeypatch.setattr(run_eval, "load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr(sys, "argv", ["run_eval", "--data", "x.jsonl"])
     assert run_eval.main() == run_eval.EXIT_CONFIG_ERROR
 
@@ -130,5 +233,6 @@ def test_gate_fails_when_langfuse_drops_crashed_items(monkeypatch):
     monkeypatch.setattr(run_eval.tracing, "init_tracing", lambda s: None)
     monkeypatch.setattr(run_eval.tracing, "get_client", lambda: client)
     monkeypatch.setattr(run_eval.tracing, "shutdown_tracing", lambda: None)
+    monkeypatch.setattr(run_eval, "load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr(sys, "argv", ["run_eval", "--dataset", "d", "--min-pass-rate", "0.5"])
     assert run_eval.main() == run_eval.EXIT_GATE_FAILED

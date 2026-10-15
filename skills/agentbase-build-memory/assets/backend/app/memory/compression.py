@@ -143,9 +143,14 @@ async def summarize_if_needed(
                 status_message=f"{type(e).__name__}: {str(e)[:200]}",
             )
             return None
-        new_summary = str(result.content).strip()
+        new_summary = result.text.strip()
         if not new_summary:
             st.set(output={"decision": "skipped_empty_summary"}, level="WARNING")
+            return None
+        if (getattr(result, "response_metadata", None) or {}).get("finish_reason") == "length":
+            # cut by the summarize task's output cap (LLM_TASK_MAX_TOKENS): removing the old messages would lose
+            # what the summary no longer covers
+            st.set(output={"decision": "skipped_truncated_summary"}, level="WARNING")
             return None
         tokens_after = count_tokens_approximately(messages[cut:]) + count_tokens_approximately(
             [SystemMessage(new_summary)]

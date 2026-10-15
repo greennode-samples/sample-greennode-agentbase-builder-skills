@@ -17,11 +17,17 @@ agentbase-build-llm.
    streamed response); NOT on request errors (400, 401, 422...).
    Langfuse: failed (ERROR) generation of the primary model → generation of the fallback model (same name
    `llm.<task>.generate`, metadata llm_role=fallback, `model` attribute = the backup model).
+   401/402/403/404 are CONFIGURATION errors (key, plan, model not enabled/wrong path): logged once per (model,
+   status) at ERROR naming the env var to fix — a 403/404 primary would otherwise fall back silently on every call.
 
 4) Thinking: MaaS reasoning models return their thinking in the non-standard `reasoning_content` (or
    `reasoning`) field, which ChatOpenAI drops ⇒ `_ChatMaaS` keeps it in generation_info[REASONING_KEY]; the
-   tracing CallbackHandler shows it in the generation output. It never enters the message, the checkpoint or the
-   next request.
+   tracing CallbackHandler shows it in the generation output. LangChain also copies generation_info into the
+   message's response_metadata ⇒ `_FallbackEligible` removes it from every returned message/chunk: the thinking
+   never enters the checkpoint or the next request.
+
+5) Output caps: LLM_TASK_MAX_TOKENS overrides DEFAULT_TASK_MAX_TOKENS (internal flows bounded — reasoning tokens
+   count too); other tasks use LLM_MAX_TOKENS. Structured output: get_llm(task, schema=Model).
 """
 
 from __future__ import annotations
@@ -34,18 +40,19 @@ from typing import Any, Literal
 
 import openai
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable, RunnableBinding, RunnableLambda
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
-from app.config import get_settings
+from app.config import LLM_TIERS, get_settings
 from app.observability.tracing import REASONING_KEY
 
 log = logging.getLogger(__name__)
 
 Tier = Literal["reasoning", "large", "small"]
-TIERS: tuple[Tier, ...] = ("reasoning", "large", "small")
+TIERS: tuple[Tier, ...] = LLM_TIERS  # type: ignore[assignment]  # Settings validates LLM_* tables against it
 
 # Template's standard tasks → tier. Add new tasks (e.g. "planner", "sql") here + LLM_TASK_TIERS.
 DEFAULT_TASK_TIERS: dict[str, Tier] = {
@@ -54,9 +61,14 @@ DEFAULT_TASK_TIERS: dict[str, Tier] = {
     "agent_complex": "reasoning",  # adaptive: multi-step, analysis, comparison, calculation
     "router": "small",  # scores question complexity (adaptive routing)
     "summarize": "small",  # context compression
-    "judge": "large",  # in-turn self-eval (reflection) — must be fast
+    "judge": "small",  # in-turn self-eval (reflection) — the user is waiting: fast, low-reasoning model
     "eval_judge": "reasoning",  # offline grading — accuracy first
 }
+
+# Output cap (max_tokens, reasoning tokens included) of the internal flows: bounds their latency and cost when a
+# thinking model is used. LLM_TASK_MAX_TOKENS overrides (0 ⇒ no per-task cap); tasks not listed use LLM_MAX_TOKENS.
+# A capped answer ends with finish_reason=length ⇒ WARNING (router ⇒ "standard", judge ⇒ pass, summary ⇒ skipped).
+DEFAULT_TASK_MAX_TOKENS: dict[str, int] = {"router": 1024, "judge": 2048, "summarize": 4096}
 
 # Tasks whose generations ARE the conversation the user sees (node `agent`). Langfuse's session view shows, per
 # trace, only the generations at the SHALLOWEST tree depth as the conversation; every other task (router, summarize,
@@ -102,35 +114,139 @@ FALLBACK_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+# 401/402/403/404: the key, the plan or the model `path` is wrong — not a transient failure. Logged ONCE per
+# (model, status) per process; 403/404 still fall back (the backup may be enabled) but must be fixed.
+CONFIG_ERRORS: dict[int, str] = {
+    401: "API key rejected — wrong or deleted LLM_API_KEY, or a Token Plan key on the pay-as-you-go host",
+    402: "payment required — Token Plan expired or out of balance",
+    403: "model not allowed for this API key — not enabled, or not in the key's plan",
+    404: "model not found — wrong model `path`, or not enabled for this key",
+}
+_config_errors_logged: set[tuple[str, int]] = set()
+
+
+def config_error_hint(exc: BaseException) -> str | None:
+    """Caller-facing message when an LLM call failed on a CONFIGURATION error (401/402/403/404 — after every
+    fallback, the chain raises the primary's error); None for any other error. The details (model, env var) are in
+    the ERROR log, not in this message."""
+    status = getattr(exc, "status_code", None) if isinstance(exc, openai.APIStatusError) else None
+    if status not in CONFIG_ERRORS:
+        return None
+    return (
+        f"LLM configuration error (HTTP {status}: {CONFIG_ERRORS[status].split(' — ')[0]}) — the operator must "
+        "fix the LLM settings (see the server log)"
+    )
+
+
+def _model_env(tier: str, role: str) -> str:
+    """The env var that put this model in the chain."""
+    s = get_settings()
+    if role != "primary":
+        return "LLM_TIER_FALLBACKS" if tier in s.llm_tier_fallbacks else "LLM_FALLBACK_MODELS"
+    own = {"reasoning": s.llm_model_reasoning, "small": s.llm_model_small}.get(tier)
+    if own:
+        return f"LLM_MODEL_{tier.upper()}"
+    return "LLM_MODEL_LARGE" if s.llm_model_large else "LLM_MODEL"
+
+
+def _log_config_error(e: BaseException, model: str, tier: str, role: str) -> None:
+    status = getattr(e, "status_code", None) if isinstance(e, openai.APIStatusError) else None
+    if status not in CONFIG_ERRORS or (model, status) in _config_errors_logged:
+        return
+    _config_errors_logged.add((model, status))
+    env = "LLM_API_KEY" if status in (401, 402) else _model_env(tier, role)
+    log.error(
+        "LLM model %r (tier %s, %s) → HTTP %d: %s. Fix %s (keys and ENABLED models: /agentbase-llm)%s. "
+        "Logged once per model and status.",
+        model,
+        tier,
+        role,
+        status,
+        CONFIG_ERRORS[status],
+        env,
+        " — until then EVERY call fails over to the fallback" if status in (403, 404) else "",
+    )
+
+
+def _without_reasoning(out: Any) -> Any:
+    """LangChain copies generation_info into the message's response_metadata ⇒ the thinking text would be stored
+    in the checkpoint (growing it every turn) and returned to callers. Tracing has already read it from
+    generation_info (on_llm_end fires before the output is returned) ⇒ drop it from a COPY of the message."""
+    meta = getattr(out, "response_metadata", None)
+    if isinstance(out, BaseMessage) and isinstance(meta, dict) and REASONING_KEY in meta:
+        kept = {k: v for k, v in meta.items() if k != REASONING_KEY}
+        return out.model_copy(update={"response_metadata": kept})
+    return out
+
+
+_truncation_logged: set[tuple[str, str]] = set()
+
+
 class _FallbackEligible(RunnableBinding):
-    """Binding around each model in the chain: a bare `openai.APIError` → `ProviderStreamError` (fallback-eligible).
-    Every other exception passes through unchanged."""
+    """Binding around each model in the chain:
+    - a bare `openai.APIError` → `ProviderStreamError` (fallback-eligible); every other exception passes unchanged;
+    - 401/402/403/404 ⇒ one ERROR log naming the env var to fix (see CONFIG_ERRORS);
+    - the thinking text is removed from the returned message / chunks (see _without_reasoning);
+    - an answer cut by max_tokens (finish_reason=length) ⇒ one WARNING per (task, model)."""
+
+    llm_model: str = ""
+    llm_tier: str = ""
+    llm_role: str = ""
+    llm_task: str = ""
+
+    @contextmanager
+    def _errors(self) -> Iterator[None]:
+        try:
+            with _stream_errors_fall_back():
+                yield
+        except openai.APIStatusError as e:
+            _log_config_error(e, self.llm_model, self.llm_tier, self.llm_role)
+            raise
+
+    def _out(self, out: Any) -> Any:
+        # batch(return_exceptions=True) returns errors in place of outputs
+        if isinstance(out, BaseException):
+            _log_config_error(out, self.llm_model, self.llm_tier, self.llm_role)
+            return _bare_to_provider(out)
+        out = _without_reasoning(out)
+        meta = getattr(out, "response_metadata", None)
+        if isinstance(meta, dict) and meta.get("finish_reason") == "length":
+            if (self.llm_task, self.llm_model) not in _truncation_logged:
+                _truncation_logged.add((self.llm_task, self.llm_model))
+                log.warning(
+                    "LLM task %s (model %r) hit its output cap (finish_reason=length) — the answer is cut. Use a "
+                    "non-thinking model for this flow or raise LLM_TASK_MAX_TOKENS / LLM_MAX_TOKENS (llm skill §4)",
+                    self.llm_task,
+                    self.llm_model,
+                )
+        return out
 
     def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        with _stream_errors_fall_back():
-            return super().invoke(input, config, **kwargs)
+        with self._errors():
+            return self._out(super().invoke(input, config, **kwargs))
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        with _stream_errors_fall_back():
-            return await super().ainvoke(input, config, **kwargs)
+        with self._errors():
+            return self._out(await super().ainvoke(input, config, **kwargs))
 
     def stream(self, input: Any, config: Any = None, **kwargs: Any) -> Iterator[Any]:
-        with _stream_errors_fall_back():
-            yield from super().stream(input, config, **kwargs)
+        with self._errors():
+            for chunk in super().stream(input, config, **kwargs):
+                yield _without_reasoning(chunk)
 
     async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> AsyncIterator[Any]:
-        with _stream_errors_fall_back():
+        with self._errors():
             async for chunk in super().astream(input, config, **kwargs):
-                yield chunk
+                yield _without_reasoning(chunk)
 
     # batch(return_exceptions=True) — used by RunnableWithFallbacks.batch — returns errors in place of outputs
     def batch(self, inputs: list, config: Any = None, **kwargs: Any) -> list:
-        with _stream_errors_fall_back():
-            return [_bare_to_provider(o) for o in super().batch(inputs, config, **kwargs)]
+        with self._errors():
+            return [self._out(o) for o in super().batch(inputs, config, **kwargs)]
 
     async def abatch(self, inputs: list, config: Any = None, **kwargs: Any) -> list:
-        with _stream_errors_fall_back():
-            return [_bare_to_provider(o) for o in await super().abatch(inputs, config, **kwargs)]
+        with self._errors():
+            return [self._out(o) for o in await super().abatch(inputs, config, **kwargs)]
 
 
 def _bare_to_provider(o: Any) -> Any:
@@ -143,6 +259,12 @@ def tier_for(task: str) -> Tier:
     if tier not in TIERS:
         raise ValueError(f"LLM_TASK_TIERS[{task}]={tier} is invalid (only {TIERS})")
     return tier  # type: ignore[return-value]
+
+
+def max_tokens_for(task: str) -> int | None:
+    """Per-task output cap (None ⇒ LLM_MAX_TOKENS, set on the model)."""
+    cap = get_settings().llm_task_max_tokens.get(task, DEFAULT_TASK_MAX_TOKENS.get(task))
+    return cap or None
 
 
 def model_for(tier: Tier) -> str:
@@ -254,7 +376,7 @@ def worst_case_s(tier: Tier) -> float:
 @lru_cache(maxsize=8)
 def _warn_if_over_budget(tier: Tier) -> None:
     """If the worst case exceeds REQUEST_TIMEOUT_S the request is cancelled before the last model in the chain can
-    answer — the end of the fallback chain is then useless. Logged once per tier (first get_llm of that tier)."""
+    answer — the end of the fallback chain is then useless. Logged once per tier (first get_llm, every tier)."""
     s = get_settings()
     attempts, per_attempt, sleep = _budget(tier)
     worst = attempts * per_attempt + sleep
@@ -274,14 +396,33 @@ def _warn_if_over_budget(tier: Tier) -> None:
         )
 
 
+@lru_cache(maxsize=1)
+def _warn_budgets() -> None:
+    """Every tier on the FIRST get_llm call (startup), not only when a rarely used tier is first called."""
+    for tier in TIERS:
+        _warn_if_over_budget(tier)
+
+
 def get_chat_model(task: str = "agent") -> BaseChatModel:
-    """PRIMARY model for the task (no fallback)."""
+    """PRIMARY model for the task — no fallback, no per-task cap, and its messages keep the thinking text in
+    response_metadata. Graph code uses get_llm."""
     tier = tier_for(task)
     return _chat(model_for(tier), tier, "primary")
 
 
-def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnable:
+def get_llm(
+    task: str = "agent",
+    tools: list[BaseTool] | None = None,
+    *,
+    schema: Any = None,
+    method: Literal["function_calling", "json_mode", "json_schema"] = "function_calling",
+) -> Runnable:
     """Runnable for the task: the tier's primary model (+tools) with that tier's fallback chain.
+
+    `schema` (Pydantic model / TypedDict / JSON schema) ⇒ structured output, applied to EVERY model of the chain
+    (each parses its own answer), for internal and conversation tasks alike — instead of
+    `get_llm(...).with_structured_output(...)`, which internal tasks (a RunnableLambda) don't have. Default method
+    `function_calling` (tool calling is verified on MaaS; json_schema/json_mode are not). Exclusive with `tools`.
 
     Names on Langfuse — stable like an API (evaluators, dashboards and saved views target them), never the model:
       llm.<task> | <caller run_name>    task chain (metadata llm_task, llm_tier, prompt link)
@@ -289,20 +430,36 @@ def get_llm(task: str = "agent", tools: list[BaseTool] | None = None) -> Runnabl
         llm.<task>.generate             backup GENERATION — only when the primary fails (metadata llm_role=fallback)
     Internal tasks (not in CONVERSATION_TASKS) get one more level: <caller run_name> | <task>.call → llm.<task> → …
     """
+    if schema is not None and tools:
+        raise ValueError("get_llm: pass either tools or schema, not both")
     tier = tier_for(task)
     primary_model = model_for(tier)
-    _warn_if_over_budget(tier)
+    _warn_budgets()
     gen_name = f"llm.{task}.generate"
+    cap = max_tokens_for(task)
 
     def _gen(model: str, role: str) -> Runnable:
-        r: Runnable = _chat(model, tier, role)
-        if tools:
-            r = r.bind_tools(tools)
+        chat = _chat(model, tier, role)
+        r: Runnable = chat
+        if schema is not None:
+            r = chat.with_structured_output(schema, method=method)  # type: ignore[call-arg]
+        elif tools:
+            r = chat.bind_tools(tools)
+        if cap:
+            r = r.bind(max_tokens=cap)
         # RunnableWithFallbacks passes the chain's run_name down to child models (overriding with_config) ⇒ use
         # config_factories (applied LAST) so the generation keeps its own stable name whatever the caller sets.
         # The model is NOT part of the name (Langfuse best practice): it is the generation's `model` attribute.
-        # _FallbackEligible: provider errors inside a streamed response fall back too (see ProviderStreamError).
-        return _FallbackEligible(bound=r, config_factories=[lambda _cfg: {"run_name": gen_name}])
+        # _FallbackEligible: provider errors inside a streamed response fall back too (see ProviderStreamError),
+        # config errors are logged, the thinking text is removed from the returned message.
+        return _FallbackEligible(
+            bound=r,
+            config_factories=[lambda _cfg: {"run_name": gen_name}],
+            llm_model=model,
+            llm_tier=tier,
+            llm_role=role,
+            llm_task=task,
+        )
 
     primary = _gen(primary_model, "primary")
     backups = [_gen(m, "fallback") for m in fallbacks_for(tier)]

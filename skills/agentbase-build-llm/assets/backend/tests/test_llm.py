@@ -20,6 +20,8 @@ from app.observability.tracing import REASONING_KEY
 class _Model(BaseChatModel):
     name_: str
     error: str | None = None
+    finish_reason: str | None = None
+    seen_kwargs: list[dict] = []
 
     @property
     def _llm_type(self) -> str:
@@ -35,7 +37,11 @@ class _Model(BaseChatModel):
             raise openai.BadRequestError(
                 "400", response=httpx.Response(400, request=req), body=None
             )
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(self.name_))])
+        self.seen_kwargs.append(kw)
+        meta = {"finish_reason": self.finish_reason} if self.finish_reason else {}
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(self.name_, response_metadata=meta))]
+        )
 
     def bind_tools(self, tools, **kw):  # type: ignore[override]
         return self
@@ -67,12 +73,31 @@ def test_task_to_tier_mapping_and_override(monkeypatch):
     _env(monkeypatch, LLM_TASK_TIERS='{"agent": "reasoning", "planner": "reasoning"}')
     assert llm.tier_for("agent") == "reasoning"  # override
     assert llm.tier_for("summarize") == "small"  # default
+    assert llm.tier_for("judge") == "small"  # in-turn judge: the user is waiting
     assert llm.tier_for("eval_judge") == "reasoning"
     assert llm.tier_for("planner") == "reasoning"  # new task added by the project
     assert llm.tier_for("unknown") == "large"
     _env(monkeypatch, LLM_TASK_TIERS='{"agent": "huge"}')
     with pytest.raises(ValueError):
         llm.tier_for("agent")
+
+
+@pytest.mark.parametrize(
+    ("env", "match"),
+    [
+        ({"LLM_TASK_TIERS": '{"agent": "huge"}'}, "LLM_TASK_TIERS"),
+        ({"LLM_TIER_FALLBACKS": '{"larg": ["b1"]}'}, "LLM_TIER_FALLBACKS"),  # key typo was ignored
+        ({"LLM_TASK_MAX_TOKENS": '{"router": -1}'}, "LLM_TASK_MAX_TOKENS"),
+    ],
+)
+def test_llm_table_typos_fail_at_startup(monkeypatch, env, match):
+    """Used to fail only on the first call of that task (or never, for a fallback key typo)."""
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match=match):
+        get_settings()
+    assert set(llm.TIERS) == {"reasoning", "large", "small"}
 
 
 def test_fallback_chain_per_tier(monkeypatch):
@@ -136,7 +161,8 @@ async def test_generation_names_are_stable_never_the_model(monkeypatch, models):
             "chain",
         ),  # internal task: caller's run_name names the extra outer level…
         ("llm.judge", "chain"),  # …the task chain keeps its name
-        ("llm.judge.generate", "generation"),  # judge = large tier too ⇒ same failing primary…
+        # judge = small tier, empty ⇒ large ⇒ the same failing primary…
+        ("llm.judge.generate", "generation"),
         ("llm.judge.generate", "generation"),  # …then its fallback
     ]
     # internal generations sit exactly one level deeper than the conversation's (same caller depth)
@@ -172,6 +198,55 @@ def test_thinking_kept_in_generation_info_not_in_message():
         (gen,) = result.generations
         assert gen.generation_info[REASONING_KEY] == "6 × 7"
         assert gen.message.content == "42" and REASONING_KEY not in gen.message.additional_kwargs
+
+
+@pytest.mark.parametrize(
+    ("env", "task", "expected"),
+    [
+        ({}, "router", 1024),  # internal flows are bounded by default (reasoning tokens count too)
+        ({}, "judge", 2048),
+        ({}, "summarize", 4096),
+        ({}, "agent", None),  # conversation: LLM_MAX_TOKENS (set on the model) only
+        ({"LLM_TASK_MAX_TOKENS": '{"router": 256, "judge": 0}'}, "router", 256),
+        ({"LLM_TASK_MAX_TOKENS": '{"router": 256, "judge": 0}'}, "judge", None),  # 0 ⇒ no cap
+    ],
+)
+async def test_per_task_output_cap(monkeypatch, models, env, task, expected):
+    _env(monkeypatch, LLM_MODEL="L", LLM_FALLBACK_MODELS='["b1"]', **env)
+    models["L"] = _Model(name_="L", error="connection")  # the cap applies to the fallback too
+    await llm.get_llm(task).ainvoke("x")
+    (kw,) = models["b1"].seen_kwargs
+    assert kw.get("max_tokens") == expected
+
+
+async def test_answer_cut_by_output_cap_warns_once(monkeypatch, models, caplog):
+    _env(monkeypatch, LLM_MODEL="L", LLM_FALLBACK_MODELS="[]")
+    models["L"] = _Model(name_="{", finish_reason="length")
+    llm._truncation_logged.clear()
+    for _ in range(2):
+        await llm.get_llm("router").ainvoke("x")
+    assert caplog.text.count("hit its output cap") == 1
+    assert "LLM task router" in caplog.text
+    llm._truncation_logged.clear()
+
+
+def test_budget_warning_covers_every_tier_on_first_get_llm(monkeypatch, models, caplog):
+    """The reasoning tier is over budget (60 s × 2 ⇒ 2 attempts × 120 s) — warned at the first get_llm (startup),
+    not when a rare complex question first reaches it."""
+    llm._warn_if_over_budget.cache_clear()
+    llm._warn_budgets.cache_clear()
+    _env(
+        monkeypatch,
+        LLM_MODEL="L",
+        LLM_TIMEOUT_S="60",
+        LLM_MAX_RETRIES="1",
+        REQUEST_TIMEOUT_S="180",
+        LLM_FALLBACK_MODELS="[]",
+    )
+    llm.get_llm("summarize")  # small tier
+    assert "tier reasoning" in caplog.text and "tier small" not in caplog.text
+    llm._warn_if_over_budget.cache_clear()
+    llm._warn_budgets.cache_clear()
 
 
 async def test_no_fallback_on_bad_request(monkeypatch, models):
@@ -260,6 +335,73 @@ async def test_reflection_skipped_for_simple_questions(monkeypatch):
     assert used == ["router", "agent_simple"]  # no judge
 
 
+async def test_router_sees_recent_exchanges_truncated_and_reads_text_blocks(monkeypatch):
+    """The router used to get only the request (a follow-up like "and the second one?" can't be graded alone), the
+    full untruncated text, and str(content) — a list of content blocks is not JSON."""
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from app.llm import routing
+
+    seen: list = []
+
+    class _Router:
+        async def ainvoke(self, messages, config=None):
+            seen.append(messages)
+            return AIMessage(content=[{"type": "text", "text": '{"complexity": "complex"}'}])
+
+    monkeypatch.setattr(routing, "get_llm", lambda task="router", tools=None: _Router())
+    history = [
+        HumanMessage("Compare the 3 pricing plans for 50 users"),
+        AIMessage("", tool_calls=[{"name": "get_plans", "args": {}, "id": "t1"}]),
+        ToolMessage("TOOL-OUTPUT " * 100, tool_call_id="t1", name="get_plans"),
+        AIMessage("Plan B is cheapest. " + "x" * 2000),
+        HumanMessage("and for 500 users?"),
+    ]
+    recent = routing.recent_exchanges(history)
+    assert recent.startswith("User: Compare the 3 pricing plans") and "Assistant: Plan B" in recent
+    assert (
+        "TOOL-OUTPUT" not in recent and "500 users" not in recent
+    )  # tools skipped, request excluded
+    assert len(recent) <= routing.CONTEXT_MAX_CHARS
+    assert await routing.classify("and for 500 users? " + "y" * 10_000, "", recent) == "complex"
+    prompt = seen[0][1].content
+    assert "Recent messages:" in prompt and "pricing plans" in prompt
+    assert len(prompt) < routing.REQUEST_MAX_CHARS + routing.CONTEXT_MAX_CHARS + 200
+
+
+async def test_route_node_passes_previous_turn_to_router(monkeypatch):
+    _env(monkeypatch, LLM_ADAPTIVE_ROUTING="true")
+    prompts: list[str] = []
+
+    class _Fake(BaseChatModel):
+        task: str
+
+        @property
+        def _llm_type(self):
+            return "fake"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kw):
+            if self.task == "router":
+                prompts.append(messages[-1].content)
+                text = '{"complexity": "standard"}'
+            else:
+                text = "Here are the opening hours."
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(text))])
+
+        def bind_tools(self, tools, **kw):  # type: ignore[override]
+            return self
+
+    fake = lambda task="agent", tools=None: _Fake(task=task)  # noqa: E731
+    monkeypatch.setattr("app.graph.builder.get_llm", fake)
+    monkeypatch.setattr("app.llm.routing.get_llm", fake)
+    ctx = RequestContext(session_id="route-ctx", user_id="u")
+    await service.handle({"message": "Opening hours of the Hanoi branch?"}, ctx)
+    await service.handle({"message": "and on Sunday?"}, ctx)
+    assert "Recent messages" not in prompts[0]
+    assert "User: Opening hours of the Hanoi branch?" in prompts[1]
+    assert "Assistant: Here are the opening hours." in prompts[1]
+
+
 def test_primary_switches_fast_fallbacks_keep_backoff(monkeypatch):
     llm._chat.cache_clear()
     _env(monkeypatch, LLM_MODEL="L", LLM_MAX_RETRIES="2", LLM_FALLBACK_MODELS='["b1"]')
@@ -306,6 +448,21 @@ def test_retry_backoff_matches_openai_sdk():
 def test_worst_case_includes_retry_backoff(monkeypatch, env, tier, expected):
     _env(monkeypatch, **{"LLM_MODEL": "L", "LLM_TIMEOUT_S": "60", "LLM_MAX_RETRIES": "2", **env})
     assert llm.worst_case_s(tier) == pytest.approx(expected)
+
+
+def test_recommended_settings_have_no_warning_and_over_budget_warns(monkeypatch, caplog):
+    _env(
+        monkeypatch,
+        LLM_MODEL="L",
+        LLM_TIMEOUT_S="25",
+        LLM_MAX_RETRIES="1",
+        LLM_FALLBACK_MODELS="[]",
+    )
+    llm._warn_if_over_budget.cache_clear()
+    for tier in llm.TIERS:
+        llm._warn_if_over_budget(tier)
+    assert "worst case" not in caplog.text  # template defaults (no fallbacks): 50.5 s / 100.5 s
+    llm._warn_if_over_budget.cache_clear()
 
 
 def test_warns_when_fallback_chain_exceeds_request_timeout(monkeypatch, caplog):
@@ -380,13 +537,18 @@ _SSE_ERROR = {"error": {"message": "engine overloaded", "type": "InternalServerE
 @pytest.fixture
 def mock_llm_server(monkeypatch):
     """OpenAI-compatible /v1/chat/completions over real HTTP. `scripts[model]` = list of SSE payloads (dicts,
-    `_DONE`) or an int HTTP status (error JSON body). `calls` records the model of each request."""
+    `_DONE`), a dict (a whole non-streamed chat.completion) or an int HTTP status (error JSON body). `calls` records
+    the model of each request, `calls.bodies` the request bodies."""
     import json
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    scripts: dict[str, list | int] = {}
-    calls: list[str] = []
+    class _Calls(list):
+        bodies: list[dict]
+
+    scripts: dict[str, list | dict | int] = {}
+    calls = _Calls()
+    calls.bodies = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep pytest output clean
@@ -395,12 +557,16 @@ def mock_llm_server(monkeypatch):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append(body["model"])
+            calls.bodies.append(body)
             script = scripts[body["model"]]
-            if isinstance(script, int):
+            if isinstance(script, int | dict):
+                status = script if isinstance(script, int) else 200
                 payload = json.dumps(
-                    {"error": {"message": f"mock {script}", "type": "invalid_request_error"}}
+                    script
+                    if isinstance(script, dict)
+                    else {"error": {"message": f"mock {script}", "type": "invalid_request_error"}}
                 ).encode()
-                self.send_response(script)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -419,6 +585,7 @@ def mock_llm_server(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     llm._chat.cache_clear()
     llm._warn_if_over_budget.cache_clear()
+    llm._config_errors_logged.clear()
     _env(
         monkeypatch,
         LLM_BASE_URL=f"http://127.0.0.1:{server.server_port}/v1",
@@ -430,6 +597,7 @@ def mock_llm_server(monkeypatch):
     server.shutdown()
     llm._chat.cache_clear()
     llm._warn_if_over_budget.cache_clear()
+    llm._config_errors_logged.clear()
 
 
 async def test_sse_error_chunk_mid_stream_falls_back(mock_llm_server):
@@ -508,4 +676,120 @@ async def test_streamed_thinking_reaches_callbacks_only(mock_llm_server):
 
     out = await llm.get_llm("agent").ainvoke("hi", config={"callbacks": [_End()]})
     assert out.content == "Hello there" and REASONING_KEY not in out.additional_kwargs
+    # LangChain copies generation_info into response_metadata — it used to reach the checkpoint that way
+    assert REASONING_KEY not in out.response_metadata
+    assert out.response_metadata.get("finish_reason") == "stop"  # the rest of the metadata is kept
     assert [g.get(REASONING_KEY) for g in seen] == ["Greeting, answer briefly."]
+
+    chunks = [c async for c in llm.get_llm("agent").astream("hi")]
+    assert "".join(c.text for c in chunks) == "Hello there"
+    assert not any(REASONING_KEY in c.response_metadata for c in chunks)
+
+
+async def test_non_streamed_thinking_stays_out_of_the_message(mock_llm_server, monkeypatch):
+    scripts, _ = mock_llm_server
+    _env(monkeypatch, LLM_STREAMING="false")
+    llm._chat.cache_clear()
+    scripts["primary"] = {
+        "id": "x",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "primary",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "42", "reasoning_content": "6 × 7"},
+            }
+        ],
+    }
+    seen: list[dict] = []
+
+    class _End(BaseCallbackHandler):
+        def on_llm_end(self, response, **kw):
+            seen.append(response.generations[0][0].generation_info or {})
+
+    for chain in (llm.get_llm("agent"), llm.get_llm("summarize")):  # conversation + internal task
+        out = await chain.ainvoke("hi", config={"callbacks": [_End()]})
+        assert out.content == "42" and REASONING_KEY not in out.response_metadata
+        (batched,) = await chain.abatch(["hi"])
+        assert REASONING_KEY not in batched.response_metadata
+    assert seen and all(g.get(REASONING_KEY) == "6 × 7" for g in seen)  # tracing still gets it
+
+
+@pytest.mark.parametrize(("status", "env_var"), [(404, "LLM_MODEL"), (403, "LLM_MODEL")])
+async def test_model_not_found_or_not_allowed_logs_one_error(
+    mock_llm_server, caplog, status, env_var
+):
+    """403/404 fall back (the backup may be enabled) — but used to do it SILENTLY on every call."""
+    scripts, calls = mock_llm_server
+    scripts["primary"] = status
+    scripts["backup"] = _answer("ok")
+    for _ in range(3):
+        assert (await llm.get_llm("agent").ainvoke("hi")).content == "ok"
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    errors = [m for m in errors if "'primary'" in m]
+    assert len(errors) == 1, caplog.text  # once per (model, status) per process
+    assert f"HTTP {status}" in errors[0] and env_var in errors[0] and "/agentbase-llm" in errors[0]
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 404])
+async def test_config_errors_read_as_configuration_problems(mock_llm_server, caplog, status):
+    scripts, _ = mock_llm_server
+    scripts["primary"] = status
+    scripts["backup"] = status  # the whole chain fails
+    with pytest.raises(openai.APIStatusError) as exc:
+        await llm.get_llm("agent").ainvoke("hi")
+    hint = llm.config_error_hint(exc.value)
+    assert hint and "configuration" in hint and str(status) in hint
+    expected_var = "LLM_API_KEY" if status in (401, 402) else "LLM_FALLBACK_MODELS"
+    assert expected_var in caplog.text  # the backup's error names where the backup came from
+
+
+def test_config_error_hint_is_none_for_other_errors():
+    req = httpx.Request("POST", "http://x")
+    assert llm.config_error_hint(openai.APIConnectionError(request=req)) is None
+    assert (
+        llm.config_error_hint(
+            openai.RateLimitError("429", response=httpx.Response(429, request=req), body=None)
+        )
+        is None
+    )
+    assert llm.config_error_hint(ValueError("x")) is None
+
+
+def _tool_call_answer(name: str, arguments: str) -> list:
+    call = {
+        "index": 0,
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+    first = _chunk()
+    first["choices"][0]["delta"] = {"role": "assistant", "content": None, "tool_calls": [call]}
+    return [first, _chunk(finish="tool_calls"), _DONE]
+
+
+# internal (RunnableLambda) + conversation task
+@pytest.mark.parametrize("task", ["judge", "agent"])
+async def test_structured_output_through_the_fallback_chain(mock_llm_server, task):
+    """architecture.md suggested get_llm("router").with_structured_output(...) — AttributeError on the
+    RunnableLambda returned for internal tasks. `schema=` applies it to every model of the chain."""
+    from pydantic import BaseModel
+
+    class Verdict(BaseModel):
+        ok: bool
+        score: float
+
+    scripts, calls = mock_llm_server
+    scripts["primary"] = 503
+    scripts["backup"] = _tool_call_answer("Verdict", '{"ok": true, "score": 0.9}')
+    out = await llm.get_llm(task, schema=Verdict).ainvoke("grade this")
+    assert out == Verdict(ok=True, score=0.9)
+    assert calls == ["primary", "backup"]
+    body = calls.bodies[-1]
+    assert body["tool_choice"]["function"]["name"] == "Verdict"
+    cap = llm.DEFAULT_TASK_MAX_TOKENS.get(task)
+    assert body.get("max_completion_tokens", body.get("max_tokens")) == cap
+    with pytest.raises(ValueError, match="tools or schema"):
+        llm.get_llm(task, tools=[object()], schema=Verdict)  # type: ignore[list-item]

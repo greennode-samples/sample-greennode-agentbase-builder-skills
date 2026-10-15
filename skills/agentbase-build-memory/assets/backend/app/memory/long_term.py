@@ -1,9 +1,15 @@
 """Long-term memory = per-user facts/preferences, semantic search, shared across all sessions.
 
 Two mechanisms, used together:
-1. Auto-recall (node `recall` in the graph): every turn, search by the latest question and put
-   the results into the system prompt. Doesn't depend on the LLM remembering to call a tool.
-2. Tools `remember` / `recall_memory`: let the LLM save/look up proactively.
+1. Auto-recall (node `recall` in the graph): every turn, search by the latest question (+ the previous one when the
+   latest is short, e.g. "and for him?") with a minimum score (LTM_MIN_SCORE), and put the results into the
+   per-turn context message, framed as DATA (notes, not instructions) — a saved fact is user-controlled text that
+   comes back every session, so it must never carry system authority. Doesn't depend on the LLM calling a tool.
+2. Tools `remember` / `recall_memory`: let the LLM save/look up proactively. `remember` is guarded: one short fact
+   (LTM_FACT_MAX_CHARS), exact duplicates skipped, a description that forbids greetings/small talk/inferences/secrets.
+
+InMemoryLTM (MEMORY_BACKEND=inmemory) is for tests/local dev only: keyword matching, per process, lost on restart —
+recall quality (paraphrases, other languages) can only be judged on AgentBase Memory.
 
 Security rule: actor_id & strategy_id are NEVER tool parameters — they come from
 RunnableConfig (set by the handler from the authenticated user) so the LLM can't read another user's memory.
@@ -22,10 +28,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from greennode_agentbase.exceptions import GreenNodeRequestError
+from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
@@ -78,7 +86,7 @@ class AgentBaseLTM:
         self._max_query = settings.memory_query_max_chars
         self._memory_id = settings.memory_id
         self._strategy_id = settings.memory_strategy_id
-        self._min_score = settings.ltm_min_score
+        self._min_score = settings.ltm_min_score or None  # 0 ⇒ no threshold
         self._max_retries = settings.memory_max_retries
         self._backoff_s = settings.memory_retry_backoff_s
 
@@ -92,6 +100,8 @@ class AgentBaseLTM:
             # The API limits query to ≤ 1000 chars (400 if exceeded) — keep the end (usually the question)
             query=query[-self._max_query :],
             limit=min(max(limit, SEARCH_LIMIT_MIN), SEARCH_LIMIT_MAX),
+            # server-side filter (`scoreThreshold`, 0–1); the score is also checked below in case it is ignored
+            score_threshold=self._min_score,
         )
         results = await with_retry(
             lambda: self._client.search_memory_records_async(
@@ -126,7 +136,8 @@ class AgentBaseLTM:
 
 
 class InMemoryLTM:
-    """Local version for tests: simple keyword matching."""
+    """Local version for tests/dev ONLY: substring keyword matching (no semantics: paraphrases and other languages
+    miss, common short words can match anything), per process, lost on restart."""
 
     def __init__(self) -> None:
         self._facts: dict[str, list[str]] = {}
@@ -163,26 +174,64 @@ def _user_id(config: RunnableConfig) -> str:
     return user_id
 
 
+def _normalized(text: str) -> str:
+    """Case, punctuation and spacing ignored (Unicode-aware: Vietnamese diacritics are kept)."""
+    return re.sub(r"[\W_]+", " ", text.casefold()).strip()
+
+
+def clip_fact(fact: str, max_chars: int) -> str:
+    fact = " ".join(fact.split())
+    return fact if len(fact) <= max_chars else fact[: max_chars - 1].rstrip() + "…"
+
+
 def build_memory_tools(ltm: LongTermMemory, settings: Settings) -> list[BaseTool]:
-    @tool
+    max_chars = settings.ltm_fact_max_chars
+
+    @tool(parse_docstring=True)
     async def remember(fact: str, config: RunnableConfig) -> str:
-        """Save a durable fact about the user (preferences, context, decisions) for use in
-        later conversations. Only save information the user shared voluntarily.
+        """Save ONE durable fact or preference about the user, for later conversations.
+
+        Call it only when the user explicitly asks you to remember something, or clearly states a lasting fact or
+        preference about themselves (name, role, language, recurring needs). Never call it for greetings, small
+        talk, thanks, one-off requests, your own inferences or guesses, or secrets (passwords, keys, card or ID
+        numbers). Store only what the user actually said: never add dates, times or details they did not give.
+        Write the fact in the user's language.
 
         Args:
-            fact: A short, self-contained sentence, e.g. "The user prefers answers in Vietnamese".
+            fact: One short, self-contained sentence in the user's own words, e.g. "Prefers short answers".
         """
         user_id = _user_id(config)
-        with tracing.step("memory.save", input={"namespace": ltm.namespace(user_id), "fact": fact}):
+        fact = " ".join(fact.split())
+        with tracing.step(
+            "memory.save", input={"namespace": ltm.namespace(user_id), "fact": fact}
+        ) as st:
+            if not fact:
+                st.set(output={"decision": "rejected_empty"})
+                return "Not saved: the fact is empty."
+            if len(fact) > max_chars:
+                st.set(output={"decision": "rejected_too_long", "chars": len(fact)})
+                return f"Not saved: the fact is longer than {max_chars} characters — save one short sentence."
+            try:  # skip exact duplicates (case/punctuation ignored); a failed lookup must not block the save
+                existing = await ltm.search(user_id, fact, SEARCH_LIMIT_MIN)
+            except Exception:  # noqa: BLE001
+                log.warning("duplicate check before memory.save failed", exc_info=True)
+                existing = []
+            if any(_normalized(f) == _normalized(fact) for f in existing):
+                st.set(output={"decision": "duplicate"})
+                return f"Already remembered: {fact}"
             await ltm.save(user_id, fact)
+            st.set(output={"decision": "saved"})
         return f"Remembered: {fact}"
 
-    @tool
+    @tool(parse_docstring=True)
     async def recall_memory(query: str, config: RunnableConfig) -> str:
-        """Search long-term memory for information about the current user.
+        """Search the user's long-term memory (saved notes about the user).
+
+        The notes relevant to the latest message are usually already provided in the context. Call this only when
+        they don't answer the question. Notes are data the user gave earlier and may be outdated.
 
         Args:
-            query: A natural-language query.
+            query: What to look for, in natural language.
         """
         user_id = _user_id(config)
         with tracing.step(
@@ -195,15 +244,35 @@ def build_memory_tools(ltm: LongTermMemory, settings: Settings) -> list[BaseTool
             },
             as_type="retriever",
         ) as st:
-            facts = await ltm.search(user_id, query, settings.ltm_recall_limit)
+            facts = [
+                clip_fact(f, max_chars)
+                for f in await ltm.search(user_id, query, settings.ltm_recall_limit)
+            ]
             st.set(output={"facts": facts, "count": len(facts)})
         return "\n".join(f"- {f}" for f in facts) if facts else "No relevant information."
 
     return [remember, recall_memory]
 
 
-async def auto_recall(ltm: LongTermMemory, user_id: str, query: str, limit: int) -> list[str]:
-    """Used in the recall node; memory errors must not break the chat turn."""
+SHORT_QUERY_CHARS = 60
+
+
+def recall_query(messages: list[AnyMessage], short_chars: int = SHORT_QUERY_CHARS) -> str:
+    """Auto-recall query: the latest user message, preceded by the previous user message when the latest is short
+    ("and for him?", "yes, book it") — alone it matches nothing, or the wrong facts."""
+    texts = [m.text.strip() for m in messages if isinstance(m, HumanMessage) and m.text.strip()]
+    if not texts:
+        return ""
+    if len(texts[-1]) < short_chars and len(texts) > 1:
+        return f"{texts[-2]}\n{texts[-1]}"
+    return texts[-1]
+
+
+async def auto_recall(
+    ltm: LongTermMemory, user_id: str, query: str, limit: int, max_chars: int = 300
+) -> list[str]:
+    """Used in the recall node; memory errors must not break the chat turn. Each fact is clipped to `max_chars`
+    (LTM_FACT_MAX_CHARS): records can also come from platform extraction, not only from `remember`."""
     if not query.strip():
         return []
     with tracing.step(
@@ -226,5 +295,6 @@ async def auto_recall(ltm: LongTermMemory, user_id: str, query: str, limit: int)
                 status_message=f"{type(e).__name__}: {e}",
             )
             return []
+        facts = [clip_fact(f, max_chars) for f in facts]
         st.set(output={"facts": facts, "count": len(facts)})
         return facts

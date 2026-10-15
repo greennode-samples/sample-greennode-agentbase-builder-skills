@@ -11,9 +11,11 @@ compare across runs, block regressions in CI.
   uv run python -m evals.run_eval --dataset __PROJECT_NAME__-regressions
 
 HITL in eval: --hitl approve (default) | reject — answers interrupts automatically to run the full flow.
+The eval RUNS the agent's tools for real: every tool outside HITL_TOOLS, and the approved ones (--hitl approve) —
+point it at dev/test backends. A tool in the item's `forbidden_tools` is always rejected (and still fails the item).
 
 Exit codes: 0 gate passed · 1 pass_rate < --min-pass-rate (the ONLY quality verdict) ·
-            2 the eval could not run (bad args/settings, missing or invalid JSONL, unknown dataset,
+            2 the eval could not run (bad args/settings, missing, invalid or EMPTY dataset, unknown dataset,
               Langfuse unreachable / wrong keys, unexpected crash) — fix the setup, not the agent.
 """
 
@@ -26,18 +28,17 @@ import os
 import sys
 import traceback
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from langfuse.api import NotFoundError
 
-load_dotenv()
-
-from app.config import get_settings  # noqa: E402
-from app.observability import tracing  # noqa: E402
-from app.service import run_chat, run_resume  # noqa: E402
-from evals.evaluators import (  # noqa: E402
+from app.config import get_settings
+from app.observability import tracing
+from app.service import run_chat, run_resume
+from evals.evaluators import (
     ITEM_EVALUATORS,
     RUN_EVALUATORS,
     count_passed,
@@ -45,6 +46,8 @@ from evals.evaluators import (  # noqa: E402
 )
 
 EXIT_GATE_FAILED, EXIT_CONFIG_ERROR = 1, 2
+# Same defaults as `make eval` and the CI job: MaaS allows 10 requests/min per account
+DEFAULT_CONCURRENCY, DEFAULT_MIN_PASS_RATE = 1, 0.8
 
 
 class ConfigError(Exception):
@@ -89,27 +92,46 @@ def _field(item: Any, name: str) -> Any:
 
 
 def make_task(hitl_action: str):
+    """Runs one item. Every tool call that reached an approval interrupt is recorded in `tools_requested` (the
+    `forbidden_tools` evaluator checks it: a forbidden call the eval rejected was still ATTEMPTED). Tools in the
+    item's `forbidden_tools` are always rejected, so `--hitl approve` never executes a forbidden side effect."""
+
     async def task(*, item: Any, **_: Any) -> dict:
         inp = _field(item, "input")
         message = inp.get("message") if isinstance(inp, dict) else str(inp)
         meta = _field(item, "metadata") or {}
+        forbidden = set(meta.get("forbidden_tools") or [])
         # metadata.user_id: run the item under a fixed identity (per-user seeded data); random by default
         user_id = meta.get("user_id") or f"eval-{uuid.uuid4().hex[:8]}"
         session_id = str(uuid.uuid4())
+        requested: list[str] = []
         try:
             result = await run_chat(message, user_id=user_id, session_id=session_id)
             for _round in range(5):
                 if result.get("status") != "interrupted":
                     break
+                calls = result["interrupt"]["tool_calls"]
+                requested.extend(tc["name"] for tc in calls)
                 decisions = [
-                    {"tool_call_id": tc["id"], "action": hitl_action, "reason": "eval"}
-                    for tc in result["interrupt"]["tool_calls"]
+                    {
+                        "tool_call_id": tc["id"],
+                        "action": "reject" if tc["name"] in forbidden else hitl_action,
+                        "reason": "eval",
+                    }
+                    for tc in calls
                 ]
                 result = await run_resume(decisions, user_id=user_id, session_id=session_id)
+            if result.get("status") == "interrupted":  # still pending after the last round
+                requested.extend(tc["name"] for tc in result["interrupt"]["tool_calls"])
         except Exception as e:  # noqa: BLE001
             # Never raise: Langfuse drops raising items and pass_rate would only count the survivors.
-            return {"status": "error", "response": "", "error": f"{type(e).__name__}: {e}"}
-        return result
+            return {
+                "status": "error",
+                "response": "",
+                "error": f"{type(e).__name__}: {e}",
+                "tools_requested": requested,
+            }
+        return {**result, "tools_requested": requested}
 
     return task
 
@@ -134,7 +156,7 @@ async def run_local(items: list[dict], task) -> dict[str, float]:
         status = "PASS" if item_passed(evals) else "FAIL"
         print(f"[{status}] {it.get('id')}: " + ", ".join(f"{e.name}={e.value:.2f}" for e in evals))
     passed = sum(item_passed(e) for e in rows)
-    return {"pass_rate": passed / (len(items) or 1)}
+    return {"pass_rate": passed / len(items)}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -142,14 +164,25 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--data", help="Local JSONL")
     ap.add_argument("--dataset", help="Langfuse Dataset name")
     ap.add_argument("--push", action="store_true", help="Upsert JSONL into the Langfuse Dataset")
-    ap.add_argument("--run-name", default=os.getenv("EVAL_RUN_NAME"))
+    ap.add_argument(
+        "--run-name",
+        default=os.getenv("EVAL_RUN_NAME"),
+        help="Default: <AGENT_VERSION>-<LLM_MODEL>-<UTC timestamp> (unique ⇒ reruns are not merged)",
+    )
     ap.add_argument("--hitl", choices=["approve", "reject"], default="approve")
-    ap.add_argument("--min-pass-rate", type=float, default=0.0)
-    ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--min-pass-rate", type=float, default=DEFAULT_MIN_PASS_RATE)
+    ap.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     return ap.parse_args()
 
 
+def default_run_name(settings: Any, now: datetime | None = None) -> str:
+    """Langfuse merges the results of runs with the SAME name ⇒ a timestamp keeps every rerun separate."""
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+    return f"{settings.agent_version}-{settings.llm_model}-{stamp}"
+
+
 def main() -> int:
+    load_dotenv()  # here, not at import: importing the module (tests) must not load the developer's .env
     args = _parse_args()
     try:
         return _run(args)
@@ -189,10 +222,12 @@ def _run(args: argparse.Namespace) -> int:
         raise ConfigError("--data <jsonl> or --dataset <Langfuse dataset> is required")
     if args.push and not (args.data and args.dataset):
         raise ConfigError("--push requires --data and --dataset")
+    if args.data and not load_jsonl(args.data):  # checked before any Langfuse or LLM call
+        raise ConfigError(f"dataset is empty: {args.data}")
     tracing.init_tracing(settings)
     client = tracing.get_client()
     task = make_task(args.hitl)
-    run_name = args.run_name or f"{settings.agent_version}-{settings.llm_model}"
+    run_name = args.run_name or default_run_name(settings)
 
     if client is None:
         if not args.data:
@@ -222,6 +257,10 @@ def _run(args: argparse.Namespace) -> int:
                     f"--push --data <jsonl> --dataset {args.dataset}",
                 )
                 expected = len(dataset.items)
+                if not expected:
+                    raise ConfigError(
+                        f"dataset is empty: Langfuse dataset '{args.dataset}' has no items"
+                    )
                 result = dataset.run_experiment(**common)
             else:
                 data = load_jsonl(args.data)
@@ -237,7 +276,7 @@ def _run(args: argparse.Namespace) -> int:
             print(
                 f"WARNING: {expected - done}/{expected} items produced no result", file=sys.stderr
             )
-        metrics["pass_rate"] = count_passed(result.item_results) / (expected or 1)
+        metrics["pass_rate"] = count_passed(result.item_results) / expected
 
     rate = metrics.get("pass_rate", 0.0)
     print(f"pass_rate={rate:.2%} (min {args.min_pass_rate:.0%})")

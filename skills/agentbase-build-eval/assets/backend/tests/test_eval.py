@@ -1,4 +1,5 @@
-"""Eval runner + evaluators: exit codes (1 = gate only, 2 = could not run), dataset pushes, score hygiene."""
+"""Eval runner + evaluators: exit codes (1 = gate only, 2 = could not run), dataset pushes, score hygiene,
+forbidden tools (attempts count, never executed), defaults."""
 
 from __future__ import annotations
 
@@ -48,6 +49,12 @@ class _Client:
     def run_experiment(self, **kw):
         self.calls.append(("run_experiment", kw))
         return _ok_result(len(kw["data"]))
+
+
+@pytest.fixture(autouse=True)
+def _no_dotenv(monkeypatch):
+    """main() loads .env — not in tests (the developer's real keys would leak into the test process)."""
+    monkeypatch.setattr(run_eval, "load_dotenv", lambda *a, **k: False)
 
 
 @pytest.fixture
@@ -192,7 +199,7 @@ def test_avg_is_skipped_when_no_item_has_the_score():
     assert evaluators.avg("correctness")(item_results=scored).value == 0.5
 
 
-# --- --hitl reject: a rejected tool call is NOT "used" (expected_tools fails, forbidden_tools passes)
+# --- --hitl reject: a rejected tool call is NOT "used" (expected_tools fails) — but it was ATTEMPTED
 @pytest.mark.parametrize(("action", "used"), [("approve", ["remember"]), ("reject", [])])
 async def test_hitl_reject_does_not_count_as_tool_used(fake_llm, monkeypatch, action, used):
     monkeypatch.setenv("HITL_TOOLS", '["remember"]')
@@ -203,6 +210,82 @@ async def test_hitl_reject_does_not_count_as_tool_used(fake_llm, monkeypatch, ac
     )
     out = await run_eval.make_task(action)(item={"input": {"message": "remember I like tea"}})
     assert out["status"] == "success" and out["tools_used"] == used
+    assert out["tools_requested"] == ["remember"]
     meta = {"expected_tools": ["remember"], "forbidden_tools": ["remember"]}
     assert expected_tools(output=out, metadata=meta).value == (1.0 if used else 0.0)
-    assert forbidden_tools(output=out, metadata=meta).value == (0.0 if used else 1.0)
+    # used to PASS under --hitl reject: the forbidden call was attempted, only the eval rejected it
+    assert forbidden_tools(output=out, metadata=meta).value == 0.0
+
+
+async def test_forbidden_tool_is_rejected_even_with_hitl_approve(fake_llm, monkeypatch):
+    """--hitl approve (default) used to EXECUTE a forbidden tool (real side effect) before failing the item."""
+    from app.memory.long_term import get_ltm
+
+    monkeypatch.setenv("HITL_TOOLS", '["remember"]')
+    get_settings.cache_clear()
+    fake_llm(
+        AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "tea"}, "id": "c1"}]),
+        AIMessage("Hello!"),
+    )
+    item = {
+        "input": {"message": "hi"},
+        "metadata": {"forbidden_tools": ["remember"], "user_id": "eval-forbidden"},
+    }
+    out = await run_eval.make_task("approve")(item=item)
+    assert out["tools_used"] == [] and out["tools_requested"] == ["remember"]
+    assert await get_ltm(get_settings()).search("eval-forbidden", "tea", 5) == []  # never saved
+    assert forbidden_tools(output=out, metadata=item["metadata"]).value == 0.0
+
+
+# --- empty dataset: nothing to gate on ⇒ the eval could not run (was a silent pass or a quality failure)
+def test_empty_jsonl_is_config_error(monkeypatch, langfuse, capsys, tmp_path):
+    client = langfuse(_Client())
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("\n\n", encoding="utf-8")
+    assert _main(monkeypatch, "--data", str(empty)) == run_eval.EXIT_CONFIG_ERROR
+    assert "dataset is empty" in capsys.readouterr().err
+    assert client.calls == []  # before any Langfuse (or LLM) call
+
+
+def test_empty_langfuse_dataset_is_config_error(monkeypatch, langfuse, capsys):
+    client = langfuse(_Client(dataset_items=0))
+    assert (
+        _main(monkeypatch, "--dataset", "d", "--min-pass-rate", "0") == run_eval.EXIT_CONFIG_ERROR
+    )
+    assert "dataset is empty" in capsys.readouterr().err
+    assert not any(c[0] == "run_experiment" for c in client.calls)
+
+
+# --- defaults match `make eval` / CI; reruns get their own Langfuse run
+def test_cli_defaults_and_unique_run_name(monkeypatch, langfuse, jsonl):
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(sys, "argv", ["run_eval", "--data", jsonl])
+    args = run_eval._parse_args()
+    assert args.concurrency == 1 and args.min_pass_rate == 0.8
+    s = SimpleNamespace(agent_version="0.1.0", llm_model="qwen/x")
+    name = run_eval.default_run_name(s, datetime(2026, 10, 15, 8, 30, 5, tzinfo=UTC))
+    assert name == "0.1.0-qwen/x-20261015T083005Z"
+    client = langfuse(_Client())
+    assert _main(monkeypatch, "--data", jsonl) == 0
+    (kw,) = [kw for n, kw in client.calls if n == "run_experiment"]
+    assert kw["run_name"].startswith(f"0.1.0-{get_settings().llm_model}-")
+    assert kw["max_concurrency"] == 1
+
+
+def test_dotenv_is_loaded_by_main_not_at_import(monkeypatch, langfuse, jsonl):
+    import importlib
+
+    import dotenv
+
+    calls: list[int] = []
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: calls.append(1))
+    importlib.reload(run_eval)
+    try:
+        assert calls == []  # importing the module (tests, tools) must not read .env
+        langfuse(_Client())
+        assert _main(monkeypatch, "--data", jsonl) == 0
+        assert calls == [1]
+    finally:
+        monkeypatch.undo()
+        importlib.reload(run_eval)

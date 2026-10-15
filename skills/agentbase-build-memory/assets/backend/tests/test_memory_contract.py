@@ -2,6 +2,7 @@
 - insert-directly must use MemoryRecordInsertDirectlyRequest (passing a list => TypeError in the SDK)
 - search returns list[dict] {id, memory, score, ...}; search limit within the API's 5–200
 - 429/5xx (10 concurrent requests / IAM account) are retried with backoff, other errors are not
+- recall sends a score threshold (scoreThreshold) and frames facts as data; `remember` is guarded
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ class FakeMemoryClient:
         self.calls = 0
         self.failures = list(failures)
         self.limits: list[int] = []
+        self.thresholds: list[float | None] = []
 
     def _maybe_fail(self):
         self.calls += 1
@@ -44,7 +46,10 @@ class FakeMemoryClient:
         assert isinstance(request, MemoryRecordSearchRequest)
         assert len(request.query) <= 1000  # Memory API limit (400 if exceeded)
         assert 5 <= request.limit <= 200  # Memory API range
+        # the SDK serializes the request by alias
+        assert '"scoreThreshold"' in request.model_dump_json(by_alias=True)
         self.limits.append(request.limit)
+        self.thresholds.append(request.score_threshold)
         self._maybe_fail()
         return [
             {"id": "1", "memory": "Likes green tea", "score": 0.71},
@@ -62,7 +67,7 @@ def _ltm(monkeypatch, min_score=None, failures=(), backoff="0.001"):
     ltm = AgentBaseLTM.__new__(AgentBaseLTM)
     s = get_settings()
     ltm._client, ltm._memory_id = FakeMemoryClient(failures), "mem-1"
-    ltm._strategy_id, ltm._min_score = s.memory_strategy_id, s.ltm_min_score
+    ltm._strategy_id, ltm._min_score = s.memory_strategy_id, s.ltm_min_score or None
     ltm._max_query = s.memory_query_max_chars
     ltm._max_retries, ltm._backoff_s = s.memory_max_retries, s.memory_retry_backoff_s
     return ltm
@@ -75,13 +80,14 @@ async def test_save_uses_request_model_and_namespace(monkeypatch):
 
 
 async def test_search_parses_dicts_and_min_score(monkeypatch):
-    assert await _ltm(monkeypatch).search("u1", "what to drink", 5) == [
-        "Likes green tea",
-        "Unrelated",
-    ]
-    assert await _ltm(monkeypatch, min_score=0.5).search("u1", "what to drink", 5) == [
-        "Likes green tea"
-    ]
+    """LTM_MIN_SCORE defaults to 0.5 (the top-k was injected whatever its relevance), sent server-side as
+    scoreThreshold AND checked on the results (in case the server ignores it); 0 ⇒ no threshold."""
+    ltm = _ltm(monkeypatch)
+    assert await ltm.search("u1", "what to drink", 5) == ["Likes green tea"]
+    assert ltm._client.thresholds == [0.5]
+    ltm = _ltm(monkeypatch, min_score=0)
+    assert await ltm.search("u1", "what to drink", 5) == ["Likes green tea", "Unrelated"]
+    assert ltm._client.thresholds == [None]
 
 
 async def test_long_query_truncated_to_api_limit(monkeypatch):
@@ -103,7 +109,7 @@ async def test_recall_retries_429_and_5xx(monkeypatch, failures):
     from app.memory.long_term import auto_recall
 
     ltm = _ltm(monkeypatch, failures=failures)
-    assert await auto_recall(ltm, "u1", "what to drink", 5) == ["Likes green tea", "Unrelated"]
+    assert await auto_recall(ltm, "u1", "what to drink", 5) == ["Likes green tea"]
     assert ltm._client.calls == len(failures) + 1
 
 
@@ -418,3 +424,96 @@ async def test_limiter_mixed_load_with_cancellations_never_leaks_or_exceeds():
     await asyncio.get_running_loop().run_in_executor(None, lambda: [t.join() for t in threads])
     assert state["peak"] <= 3 and state["now"] == 0
     assert c._sem._free == 3 and not c._sem._waiters  # every permit came back
+
+
+def test_recall_query_adds_the_previous_message_when_the_latest_is_short():
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.memory.long_term import recall_query
+
+    long_q = "Which of my saved addresses is closest to the Hanoi office for the delivery?"
+    assert recall_query([HumanMessage(long_q)]) == long_q
+    msgs = [
+        HumanMessage("Book a table for my wife's birthday dinner next Friday"),
+        AIMessage("Which restaurant?"),
+        HumanMessage("the usual one"),
+    ]
+    assert (
+        recall_query(msgs)
+        == "Book a table for my wife's birthday dinner next Friday\nthe usual one"
+    )
+    assert recall_query([HumanMessage("hi")]) == "hi"  # nothing before it
+    assert recall_query([]) == ""
+
+
+def _memory_tools(monkeypatch):
+    from app.memory.long_term import InMemoryLTM, build_memory_tools
+
+    get_settings.cache_clear()
+    ltm = InMemoryLTM()
+    remember, recall_memory = build_memory_tools(ltm, get_settings())
+    return ltm, remember, recall_memory
+
+
+CFG = {"configurable": {"actor_id": "u1"}}
+
+
+def test_memory_tool_descriptions_guard_against_misuse(monkeypatch):
+    """`remember` was called on a greeting and stored an invented date: the description must say when NOT to call
+    it, and `fact` needs its own description (parse_docstring)."""
+    _, remember, recall_memory = _memory_tools(monkeypatch)
+    desc = " ".join(remember.description.lower().split())
+    for rule in (
+        "explicitly asks",
+        "greetings",
+        "small talk",
+        "inferences",
+        "secrets",
+        "never add dates",
+    ):
+        assert rule in desc, rule
+    assert "user's language" in desc
+    assert "config" not in remember.tool_call_schema.model_json_schema()["properties"]
+    assert remember.args["fact"].get("description")  # documented parameter
+    assert "already provided in the context" in " ".join(recall_memory.description.split())
+
+
+async def test_remember_refuses_long_facts_and_skips_duplicates(monkeypatch):
+    ltm, remember, _ = _memory_tools(monkeypatch)
+    out = await remember.ainvoke({"fact": "x" * 301}, config=CFG)
+    assert out.startswith("Not saved") and "300" in out
+    assert await remember.ainvoke({"fact": "Prefers short answers."}, config=CFG) == (
+        "Remembered: Prefers short answers."
+    )
+    dup = await remember.ainvoke({"fact": "  prefers SHORT answers  "}, config=CFG)
+    assert dup.startswith("Already remembered")
+    assert ltm._facts["u1"] == ["Prefers short answers."]
+    # Vietnamese kept as is
+    await remember.ainvoke({"fact": "Thích câu trả lời ngắn gọn"}, config=CFG)
+    assert ltm._facts["u1"][-1] == "Thích câu trả lời ngắn gọn"
+
+
+async def test_recalled_facts_are_clipped(monkeypatch):
+    from app.memory.long_term import InMemoryLTM, auto_recall
+
+    ltm = InMemoryLTM()
+    await ltm.save("u1", "coffee " + "y" * 2000)
+    (fact,) = await auto_recall(ltm, "u1", "coffee", 5, max_chars=300)
+    assert len(fact) <= 300 and fact.endswith("…")
+
+
+async def test_truncated_summary_does_not_remove_history(fake_llm, monkeypatch):
+    """A summary cut by the summarize output cap (finish_reason=length) must not replace the old messages."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.memory.compression import summarize_if_needed
+
+    monkeypatch.setenv("CONTEXT_MAX_TOKENS", "100")
+    monkeypatch.setenv("CONTEXT_KEEP_LAST", "2")
+    get_settings.cache_clear()
+    msgs = [HumanMessage("q " * 200, id=f"h{i}") for i in range(4)]
+    fake_llm(AIMessage("- partial summ", response_metadata={"finish_reason": "length"}))
+    assert await summarize_if_needed(msgs, "", get_settings()) is None
+    fake_llm(AIMessage("- full summary", response_metadata={"finish_reason": "stop"}))
+    update = await summarize_if_needed(msgs, "", get_settings())
+    assert update and update["summary"] == "- full summary"
