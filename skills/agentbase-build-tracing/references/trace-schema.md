@@ -25,7 +25,7 @@ Pick the most specific type ([Langfuse observation types](https://langfuse.com/d
 | `tags` | `[AGENT_NAME, APP_ENV, type:<chat/resume>, stream?]` | Quick filtering |
 | `version` | `AGENT_VERSION` | Before/after release comparison |
 | `trace_name` | `<agent>.invoke` | |
-| `metadata` | request_id, llm_model, memory_backend, memory_id, auth_mode, hitl_tools, reflection_enabled | Filter by configuration |
+| `metadata` | `request_id`, `request_type`, `llm_model_<tier>`, `llm_fallbacks_<tier>`, `llm_adaptive_routing`, `memory_backend`, `memory_id`, `auth_mode`, `hitl_tools`, `reflection_enabled` | Filter by configuration |
 | `environment` / `release` | `APP_ENV` / `AGENT_VERSION` (constructor) | Separate dev/prod |
 
 Root observation `agent.invoke` (the trace's input/output — shown in the tracing table, read by evaluators, compared by dataset experiments): input = the user message (resume turn: `[Approval decision] - Approved|Rejected|Edited <tool>(<args>)…`), output = the answer **text** (waiting for approval: `[Awaiting approval] - <tool>(<args>)`; failure: `{"error", "status"}` — exactly what the caller received), metadata `tools_used`, `interrupt`, `resume`. It is the conversation line of the session page's **Conversation** view (`Is Root Observation = true`, see SKILL.md → Session view).
