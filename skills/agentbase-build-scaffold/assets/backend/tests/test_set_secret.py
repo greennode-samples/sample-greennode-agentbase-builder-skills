@@ -301,7 +301,7 @@ def test_deploy_env_file_is_filled_from_its_template(base, monkeypatch, capsys):
 def test_referenced_secret_vars_are_offered(base, monkeypatch, capsys):
     agents = {
         "agents": {
-            "stock": {"url": "${A2A_STOCK_URL}", "api_key": "${A2A_STOCK_API_KEY}"},
+            "stock": {"url": "${A2A_STOCK_AGENT_URL}", "api_key": "${A2A_STOCK_AGENT_API_KEY}"},
             "off": {"url": "x", "api_key": "${A2A_OFF_API_KEY}", "enabled": False},
         }
     }
@@ -309,13 +309,14 @@ def test_referenced_secret_vars_are_offered(base, monkeypatch, capsys):
     (base / ".env").write_text("LLM_API_KEY=\n")
     assert run(base, "--list") == 0
     listed = capsys.readouterr().out
-    assert "A2A_STOCK_API_KEY" in listed and "refs" in listed
-    assert "A2A_STOCK_URL" not in listed and "A2A_OFF_API_KEY" not in listed
+    assert "A2A_STOCK_AGENT_API_KEY" in listed and "refs" in listed
+    assert "A2A_STOCK_AGENT_URL" not in listed and "A2A_OFF_API_KEY" not in listed
 
     # declared by a2a_agents.json: no "add it?" question
     term = Terminal(monkeypatch, hidden=["peer-key-0123456789"])
-    assert run(base, "--name", "A2A_STOCK_API_KEY") == 0
-    assert (base / ".env").read_text() == "LLM_API_KEY=\nA2A_STOCK_API_KEY=peer-key-0123456789\n"
+    assert run(base, "--name", "A2A_STOCK_AGENT_API_KEY") == 0
+    env = (base / ".env").read_text()
+    assert env == "LLM_API_KEY=\nA2A_STOCK_AGENT_API_KEY=peer-key-0123456789\n"
     assert_not_shown(capsys, term, "peer-key-0123456789")
 
     term = Terminal(monkeypatch, typed=["n"])  # any other new key: confirmed first (a typo?)
