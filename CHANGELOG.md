@@ -6,6 +6,15 @@ Versions of the agentbase-build standard. The version is stamped in `.claude-plu
 `.agentbase-state.json` (`standard_version`, plus `scaffold_version` = the skills' git SHA when available), so a
 review can tell which standard a project was built from.
 
+## 0.3.1 — 2026-10-15
+
+CI (generated `ci.yml` and this repo's `skills-ci.yml`)
+- Runner pinned to `ubuntu-24.04`: `ubuntu-latest` moves to Ubuntu 26 from 2026-10-19 without a change in the repo.
+- Actions moved off the deprecated Node.js 20 runtime and pinned to commit SHAs (immutable; organizations can enforce
+  SHA pinning): `actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.3.0 (no floating major tags since v8). No input
+  changes were needed: the v8–v10 breaking changes (custom manifest format, cache pruning default, no cache on
+  `pull_request_target` / `workflow_run` / `release`) don't apply to these workflows.
+
 ## 0.3.0 — 2026-10 (enterprise review)
 
 Deploy, CI and packaging

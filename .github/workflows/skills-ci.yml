@@ -1,5 +1,8 @@
 # CI of THIS skill set (not of generated projects — those get skills/agentbase-build-scaffold/assets/root/ci.yml).
 # No secrets needed: everything runs offline against fake LLM / in-memory backends.
+# Runner and actions are pinned: `ubuntu-latest` moves to a new Ubuntu release on its own (Ubuntu 26 from
+# 2026-10-19), and actions use commit SHAs (immutable; organizations can enforce SHA pinning) with the release in a
+# comment. Update them together, e.g. with Dependabot (package-ecosystem: github-actions).
 name: skills-ci
 
 on:
@@ -21,9 +24,9 @@ defaults:
 
 jobs:
   static:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: SKILL.md frontmatter (name, description ≤ 1024 chars), internal links, version stamps
         run: python3 .github/scripts/check_skills.py
       - name: bash -n on every shell script
@@ -32,12 +35,12 @@ jobs:
         run: python3 -m py_compile skills/agentbase-build-scaffold/assets/root/*.py skills/agentbase-build-tracing/scripts/*.py .github/scripts/*.py
 
   scaffold:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PROJECT: build/ci-agent
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Scaffold a project from the skills
         run: bash skills/agentbase-build-scaffold/scripts/scaffold.sh ci-agent "$PROJECT" --no-sync
       - name: Install (creates uv.lock) and run the full backend suite + ruff
@@ -80,10 +83,10 @@ jobs:
           docker rm -f ci-agent
 
   mcp-server-template:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Instantiate the MCP server template and run its e2e suite
         run: |
           cp -R skills/agentbase-build-mcp-server/assets/mcp_server build-mcp
