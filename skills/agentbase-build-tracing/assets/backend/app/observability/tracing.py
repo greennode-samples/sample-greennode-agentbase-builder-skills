@@ -30,11 +30,12 @@ Main shape below; the full tree (every node, event and level) is in the tracing 
       │       ├─ identity.<kind> [span] output={status} (app/identity.py credential helpers; never the credential)
       │       └─ mcp.policy_denied [event, WARNING] (blocked by the Gateway's Policy Group)
       ├─ reflect           [chain]  (REFLECTION_MODE gate: the user waits) └─ reflection.judge [evaluator] →
-      │                             llm.judge.generate [generation] · reflection.judge_timeout | judge_failed [event]
+      │                             llm.judge.generate [generation] · reflection.judge_timeout |
+      │                             reflection.judge_failed [event]
       └─ agent ... (loop)
   ├─ reflection.judge      [evaluator] AFTER the response (REFLECTION_MODE background / auto), started inside the request
   │                         context ⇒ same trace, under agent.invoke · metadata{reflection_mode: background,
-  │                         reflection_reason} · reflection.judge_timeout | judge_failed [event, WARNING] next to it
+  │                         reflection_reason} · reflection.judge_timeout | reflection.judge_failed [event, WARNING]
   └─ reflection.background_skipped [event, WARNING] — background judge limit reached, answer not scored
   score user_feedback (-1|0|1) attached to trace_id when the frontend sends feedback (1 score per user+trace:
   a new tap overwrites the previous one — deterministic score id).
