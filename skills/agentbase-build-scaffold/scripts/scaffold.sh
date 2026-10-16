@@ -24,7 +24,7 @@
 # .agentbase-template.json records what the template wrote; scripts/upgrade.py upgrades a project to newer skills.
 set -eEuo pipefail # -E: the ERR trap below also fires inside functions
 
-STANDARD_VERSION="0.3.1" # the agentbase-build standard (CHANGELOG.md, plugin manifests) — bump together
+STANDARD_VERSION="0.4.0" # the agentbase-build standard (CHANGELOG.md, plugin manifests) — bump together
 SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKEND_SKILLS=(agentbase-build-scaffold agentbase-build-llm agentbase-build-memory agentbase-build-tracing
   agentbase-build-mcp agentbase-build-auth agentbase-build-identity agentbase-build-hitl agentbase-build-eval agentbase-build-a2a)

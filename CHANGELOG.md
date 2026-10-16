@@ -6,6 +6,49 @@ Versions of the agentbase-build standard. The version is stamped in `.claude-plu
 `.agentbase-state.json` (`standard_version`, plus `scaffold_version` = the skills' git SHA when available), so a
 review can tell which standard a project was built from.
 
+## 0.4.0 — 2026-10-16
+
+Upgrade path for generated projects
+- `skills/agentbase-build-scaffold/scripts/upgrade.py` brings a project to the current template: per file a 3-way merge
+  of the template as generated for that project (rebuilt from the skills' git history), the project's file and the
+  new template. Dry run by default; `--apply` only on a clean git worktree; conflicts stay as diff3 markers (exit 1).
+  Secrets, `uv.lock` and create-expo files are never read.
+- `scaffold.sh` writes `.agentbase-template.json`: per generated file its owner (managed / seed / state) and the
+  template's hash. Seeds (README, system prompt, knowledge, eval datasets, `mcp_servers.json`, `a2a_agents.json`)
+  stay yours; template changes to them arrive as `<file>.agentbase-new`.
+- 0.3.x projects are matched by SHA or version; older ones need `--from <commit>` (`--guess-from` ranks candidates);
+  plugin installs without `.git` use `--skills-repo`. skills-ci job `upgrade` runs the whole path.
+
+Secrets never go through the chat
+- `make set-secret` (generated projects and the MCP server template): hidden input in the user's own terminal,
+  validated (env-file format, `Bearer ` prefixes, whole `KEY=value` lines, swapped Langfuse keys…), written to the
+  git-ignored `.greennode.json` / `.env` / `.env.<env>` (mode 600, rest of the file kept), never printed. `LIST=1`
+  shows set / not set (safe for a coding agent), `STDIN=1` takes one value from a password manager.
+- Every credential step of the skills asks the user to run it (or `gh secret set NAME --env <env>` for CI) instead
+  of pasting; `make check-creds` hints name the `make set-secret NAME=…` to run. `references/security.md`: runbook
+  for rotating a secret that was pasted into a chat. The MCP server's API-key generator no longer prints the key.
+- Fix: `make test` failed once `src/backend/.greennode.json` existed (SDK cache in `test_mcp.py`).
+
+Latency of long turns
+- Self-eval no longer blocks long or reasoning answers: `REFLECTION_MODE` (auto / gate / background) scores them
+  after `done` in the same Langfuse trace — bounded (`REFLECTION_BACKGROUND_TIMEOUT_S`, `…_MAX_CONCURRENCY`),
+  independent of the client connection, drained at shutdown. Auto = background on the reasoning tier, above
+  `REFLECTION_GATE_MAX_CHARS` (1200) or without retries.
+- `LLM_THINKING_BUDGET` per task or tier (`thinking_budget: N` / `enable_thinking: false`, measured on MaaS); router
+  and judge run without thinking by default (router 6.9 → 1.5 s, judge 16.5 → 4.6 s); the router prompt treats
+  calculations as complex.
+- SSE `status` event (`thinking` / `tool` / `checking`, safe labels, no arguments) and a status line under the
+  pending reply in the frontend template; clients that ignore unknown events keep working.
+
+Docs ↔ code drift checks
+- `check_skills.py` runs `.github/scripts/check_drift.py` (stdlib, < 1 s, Python ≥ 3.12): settings vs `.env.example`
+  / `env.deploy.example` / `ci.yml`, emitted trace names vs the tracing tree (both ways, with types), `make` targets,
+  cited paths, config variable names, Dockerfile / uv parity, no CI step copies in docs. Exceptions live in
+  `drift_allowlist.py` with a reason; unused entries fail.
+- Fixed what it found: 7 trace names missing from the tree, `trace-schema.md` metadata keys, wrong variable names in
+  `compression.md` and the A2A client docstring, `MCP_JWT_ALGORITHMS` missing from the MCP server `.env.example`.
+- MCP server: `MCP_JWT_ALGORITHMS` is asymmetric only (HS*/none refused at startup), like the agent.
+
 ## 0.3.1 — 2026-10-15
 
 CI (generated `ci.yml` and this repo's `skills-ci.yml`)
