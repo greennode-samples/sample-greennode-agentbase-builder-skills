@@ -223,6 +223,13 @@ def test_raised_bound_warns(project):
     assert _scan(project)["S10"].status == "WARN"
 
 
+@pytest.mark.parametrize("key", ["LLM_MAX_TOKENS", "RATE_LIMIT_USER_PER_MIN", "SESSION_MAX_TURNS"])
+def test_limit_turned_off_warns(project, key):
+    _set(project, key, "0")
+    details = " ".join(d for _, d in _scan(project)["S10"].lines)
+    assert f"{key}=0 turns this limit off" in details
+
+
 def test_unpinned_action_fails(project):
     wf = project / ".github/workflows/probe.yml"
     wf.parent.mkdir(parents=True, exist_ok=True)

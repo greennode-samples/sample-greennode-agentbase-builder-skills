@@ -57,7 +57,9 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""  # use the model's `path` field on AIP (not `code`)
     llm_temperature: float = 0.2
-    llm_max_tokens: int | None = None
+    # Output cap of every LLM call without a per-task cap (reasoning tokens count too): bounds the cost and latency of
+    # one answer. 0 ⇒ no cap (the model's own limit — one runaway answer can cost the whole context window).
+    llm_max_tokens: int = Field(default=8192, ge=0)
     # Output cap per task, overrides DEFAULT_TASK_MAX_TOKENS (internal flows are bounded by default; reasoning tokens
     # count too), e.g. {"router": 512, "judge": 0} — 0 ⇒ no per-task cap (LLM_MAX_TOKENS applies)
     llm_task_max_tokens: dict[str, int] = Field(default_factory=dict)
@@ -109,6 +111,11 @@ class Settings(BaseSettings):
     # A fact saved by `remember` / injected by recall is capped at this many characters (long ones are refused / cut)
     ltm_fact_max_chars: int = Field(default=300, ge=50)
 
+    # Turns per stored session before the server rotates it (service.py): a new session_id, seeded with the summary and
+    # recent messages, is returned in `session_id` — clients adopt it. The bridge reads EVERY event of a session each
+    # turn, so without rotation each turn costs more Memory reads than the last. 0 ⇒ never rotate.
+    session_max_turns: int = Field(default=50, ge=0)
+
     # --- Graph: max agent ⇄ tools rounds per turn (exceeded ⇒ "too many steps" error, no infinite loop)
     max_tool_rounds: int = 8
 
@@ -122,6 +129,15 @@ class Settings(BaseSettings):
 
     # --- Time limit for the WHOLE request (/invocations, A2A). Exceeded ⇒ 504 / SSE error 504
     request_timeout_s: float = 180.0
+
+    # --- Request limits, per replica (app/limits.py); 0 ⇒ off. The LLM and Memory quotas are per ACCOUNT, shared by
+    # every user and replica: these keep one caller / one burst from starving everyone else.
+    max_request_bytes: int = Field(default=1_048_576, ge=1024)  # POST body ⇒ 413 above this
+    max_concurrent_requests: int = Field(
+        default=32, ge=0
+    )  # /invocations + /a2a at once ⇒ 503 above
+    rate_limit_user_per_min: int = Field(default=30, ge=0)  # chat/resume per verified user ⇒ 429
+    rate_limit_tenant_per_min: int = Field(default=0, ge=0)  # per tenant (AUTH_TENANT_CLAIM) ⇒ 429
 
     # --- Context compression ---
     context_max_tokens: int = 12_000  # over threshold => summarize older part

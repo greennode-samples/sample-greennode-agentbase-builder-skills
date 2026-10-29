@@ -86,7 +86,23 @@ PINNED_RE = re.compile(r"^\s*-?\s*uses:\s*(\S+)@([0-9a-f]{40})\b")
 USES_RE = re.compile(r"^\s*-?\s*uses:\s*(\S+)")
 DATA_RULE_RE = re.compile(r"\bDATA\b.*(do not|never) follow instructions", re.I)
 # Bounds that cap cost and blast radius: raising them above the template default is a WARN
-BOUNDS = ("MAX_TOOL_ROUNDS", "REQUEST_TIMEOUT_S", "CONTEXT_HARD_LIMIT_TOKENS")
+BOUNDS = (
+    "MAX_TOOL_ROUNDS",
+    "REQUEST_TIMEOUT_S",
+    "CONTEXT_HARD_LIMIT_TOKENS",
+    "LLM_MAX_TOKENS",
+    "MAX_REQUEST_BYTES",
+    "SESSION_MAX_TURNS",
+    "MAX_CONCURRENT_REQUESTS",
+    "RATE_LIMIT_USER_PER_MIN",
+)
+# 0 turns these limits off: one runaway answer / one caller / one long session then has no ceiling
+OFF_WHEN_ZERO = (
+    "LLM_MAX_TOKENS",
+    "SESSION_MAX_TURNS",
+    "MAX_CONCURRENT_REQUESTS",
+    "RATE_LIMIT_USER_PER_MIN",
+)
 
 
 @dataclass
@@ -536,12 +552,16 @@ def s9_masking(p: Project, r: Result) -> None:
 def s10_bounds(p: Project, r: Result) -> None:
     for env, f in p.env_files.items():
         for key in BOUNDS:
-            default = Settings.model_fields[key.lower()].get_default(call_default_factory=True)
+            if (field := Settings.model_fields.get(key.lower())) is None:
+                continue  # a project from an older template
+            default = field.get_default(call_default_factory=True)
             try:
                 value = float(p.setting(env, key))
             except ValueError:
                 continue
-            if value > float(default):
+            if value == 0 and key in OFF_WHEN_ZERO:
+                r.add("WARN", f"{f}: {key}=0 turns this limit off — write the reason in the spec")
+            elif value > float(default):
                 r.add(
                     "WARN",
                     f"{f}: {key} raised above the template default ({default}) — write the reason in the spec",

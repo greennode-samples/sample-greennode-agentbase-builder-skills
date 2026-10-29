@@ -111,8 +111,12 @@ const patch = (s: ChatState, id: string, fn: (m: UiMessage) => UiMessage): ChatS
 const open = (s: ChatState, replyId: string) => !!s.turn && s.turn.replyId === replyId && !s.turn.ended;
 const end = (s: ChatState): ChatState => (s.turn ? { ...s, turn: { ...s.turn, ended: true } } : s);
 
+// The backend rotates a long session (SESSION_MAX_TURNS): the conversation continues under the id it returns
+const nextSessionId = (current: string, returned: unknown) =>
+  typeof returned === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/.test(returned) ? returned : current;
+
 function applyResult(s: ChatState, replyId: string, r: ChatResult): ChatState {
-  s = end(s);
+  s = { ...end(s), sessionId: nextSessionId(s.sessionId, r.session_id) };
   if (r.status === 'interrupted') {
     return patch({ ...s, pending: r.interrupt, pendingNote: null, notice: null, retry: null }, replyId, (m) => ({
       ...m,

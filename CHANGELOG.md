@@ -8,6 +8,28 @@ review can tell which standard a project was built from.
 
 ## Unreleased
 
+Production hardening — the tier-1 findings of an independent production-readiness review
+- **An approved action ran twice** (reproduced): a request ending while the approved tool ran left the call dangling;
+  the bridge's "interrupted" placeholder made the model call it again and the user approved a 2nd card. The next
+  request now closes such calls as `Outcome unknown:` (event `hitl.outcome_unknown`): the model must not repeat them,
+  the card is gone. `hitl.idempotency_key(config, tool_call_id)` gives every approved call a key stable across
+  replicas and retries — side-effect tools pass it downstream (HITL skill, checklist, AGENTS.md rule).
+- **Admission control** (`app/limits.py`, per replica): POST bodies over `MAX_REQUEST_BYTES` (1 MiB) ⇒ 413 before
+  parsing (a 50 MB body used to be parsed whole); more than `MAX_CONCURRENT_REQUESTS` (32) agent requests ⇒ 503 +
+  `Retry-After`; chat/resume over `RATE_LIMIT_USER_PER_MIN` (30) per verified user / `RATE_LIMIT_TENANT_PER_MIN` per
+  tenant ⇒ 429 + `retry_after_s`. The wait for a busy session is bounded by `REQUEST_TIMEOUT_S` (409), it used to be
+  unbounded. `LLM_MAX_TOKENS` defaults to 8192 (was uncapped; 0 = no cap).
+- **Memory cost no longer grows with the session**: the graph counts `turns`; an HTTP chat past `SESSION_MAX_TURNS`
+  (50) continues in a new session seeded with the summary and messages (span `memory.session_rotated`), returned in
+  `session_id`. The web and mobile reducers adopt it (shared `chatState.ts`, +1 test). The bridge reads every event of
+  a session per turn: 6.9 MB at turn 40 in the review.
+- **Release safety** (generated `ci.yml`): an image is built once per commit and promoted — a tag is never rebuilt or
+  overwritten (prod used to rebuild on a newer base image and re-point the tag under running replicas); the digest
+  is recorded in the job summary and checked after the deploy. A rollback (`image_tag`) no longer re-runs the eval, so
+  it works while the LLM is down; staging/prod deploy only from `main` or a tag.
+- `make security-scan` S10 covers the new limits (raised above the default, or turned off with 0). Tests: +10 backend
+  (`test_limits.py`, HITL outcome-unknown + idempotency key), +3 scan, +1 web.
+
 Effectiveness of the skills for coding agents (measured, `evals/`)
 - `evals/run_triggers.py` + `triggers.jsonl` (58 cases, EN + VI, build tasks, debugging inside a scaffolded project,
   platform and no-skill requests): which skill a headless Claude Code loads. `evals/run_scenarios.py` +

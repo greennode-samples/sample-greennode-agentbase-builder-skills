@@ -10,6 +10,8 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     # Rolling summary of the compressed part of the conversation (persisted in the checkpoint)
     summary: str
+    # Turns stored in this session (counted at each turn start) — SESSION_MAX_TURNS rotation, service.py
+    turns: int
     # Long-term memories auto-recalled for the current turn (overwritten every turn)
     recalled: list[str]
     # HITL: tool_call_id -> rejection reason (cleared after the tools node runs)

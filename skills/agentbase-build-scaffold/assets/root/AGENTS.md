@@ -11,6 +11,7 @@ of this project, load the skill that owns it** — also for small fixes and erro
 |---|---|
 | Overall design, new feature spanning several parts, review against the standard | `agentbase-build` |
 | Project layout, `pyproject.toml` / `uv.lock`, dependencies, Makefile, upgrading to a newer template | `agentbase-build-scaffold` |
+| `src/backend/app/limits.py`, `app/service.py` — request size, concurrency, per-user / per-tenant rate limits, the request flow | `agentbase-build-scaffold` |
 | `src/backend/app/llm/` — models, tiers, fallback, the agent's LLM API key | `agentbase-build-llm` |
 | `src/backend/app/memory/` — conversation history, long-term facts, context compression | `agentbase-build-memory` |
 | `src/backend/app/observability/`, `app/prompts/` — Langfuse traces, cost, prompt versions | `agentbase-build-tracing` |
@@ -37,7 +38,8 @@ of this project, load the skill that owns it** — also for small fixes and erro
 | Wrong / missing model, LLM 401 / 429 / 5xx, cost or latency went up | `agentbase-build-llm`, then `agentbase-build-tracing` |
 | Slow or wrong answers, need to see what happened in a turn | `agentbase-build-tracing` |
 | The agent forgot something, context too long, one user sees another user's data | `agentbase-build-memory` (cross-user data: also `agentbase-build-security-audit`) |
-| Approval card missing or a write ran without approval, 409 on resume | `agentbase-build-hitl` |
+| Approval card missing or a write ran without approval, 409 on resume, an approved action ran twice or shows "Outcome unknown" | `agentbase-build-hitl` |
+| The agent answers 429 / 413 / 503 "busy", a limit to raise for a heavy user or tenant | `agentbase-build-scaffold` (then `agentbase-build-deploy` for a gateway quota) |
 | `make eval` below the threshold, thumbs-down answers to investigate | `agentbase-build-eval` |
 | `make security-scan` FAIL / WARN, any secret (LLM key included) pasted into a chat or committed, injection worries | `agentbase-build-security-audit` |
 | Deploy failed, health check failing, settings lost after an update, rollback | `agentbase-build-deploy` |
@@ -51,7 +53,7 @@ skills `agentbase-*` (`/agentbase-memory`, `/agentbase-llm`, `/agentbase-gateway
 
 - Config only through `src/backend/app/config.py` (`Settings`) + `.env.example`; every LLM call through `get_llm(task)`.
 - The user id comes from the verified token, never from a tool parameter or the request body.
-- Side-effect tools are listed in `HITL_TOOLS`. Secrets never go in code, git, traces or the chat: the user runs
+- Side-effect tools are listed in `HITL_TOOLS` and pass `idempotency_key(config, tool_call_id)` to the system they change. Secrets never go in code, git, traces or the chat: the user runs
   `make set-secret` in their own terminal.
 - Before you finish a change: `make test`, `make lint`, `make security-scan` pass; a new feature adds a test and an
   eval item.

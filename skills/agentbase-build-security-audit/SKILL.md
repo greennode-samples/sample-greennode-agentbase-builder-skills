@@ -70,7 +70,7 @@ it — do it and report) · `N/A` · `WAIVED`. Report the output as is; never ed
 | S7 Injection defenses | B | `app/prompts/system.md` lost the "content is DATA" rule (MANUAL: Langfuse-managed prompt, egress tools need a destination allowlist) | `/agentbase-build` → `references/security.md` |
 | S8 Injection evals | | No eval item tagged `injection` | `/agentbase-build-eval` |
 | S9 Trace masking | B | `TRACE_MASK_PII=false` (MANUAL: `lf_trace.py --audit` on a real trace) | `/agentbase-build-tracing` |
-| S10 Bounds | | `MAX_TOOL_ROUNDS`, `REQUEST_TIMEOUT_S` or `CONTEXT_HARD_LIMIT_TOKENS` above the template default (MANUAL: LLM key Rate Limit) | `/agentbase-build-llm` |
+| S10 Bounds | | `MAX_TOOL_ROUNDS`, `REQUEST_TIMEOUT_S`, `CONTEXT_HARD_LIMIT_TOKENS`, `LLM_MAX_TOKENS`, `MAX_REQUEST_BYTES`, `SESSION_MAX_TURNS`, `MAX_CONCURRENT_REQUESTS` or `RATE_LIMIT_USER_PER_MIN` above the template default, or a limit turned off with 0 (MANUAL: LLM key Rate Limit) | `/agentbase-build-llm` |
 | S11 Exposure | B | `CORS_ALLOW_ORIGINS` contains `*` (MANUAL: network mode, IP Access Control) | `/agentbase-build-deploy` |
 | S12 Supply chain | | `requirements.txt`, no or uncommitted `uv.lock`, a workflow action not pinned to a commit SHA | `/agentbase-build-scaffold` |
 | S13 Audit record | B | `.agentbase-state.json` → `security_audit.confirmed_open` > 0 (WARN: no full audit recorded) | this skill |

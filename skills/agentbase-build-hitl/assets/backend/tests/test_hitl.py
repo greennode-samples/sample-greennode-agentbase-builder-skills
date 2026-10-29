@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from greennode_agentbase import RequestContext
 from greennode_agentbase.exceptions import GreenNodeRequestError
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.prebuilt import ToolNode
 
-from app import service
+from app import hitl, service
 from app.config import get_settings
 
 
@@ -381,3 +384,52 @@ async def test_decision_event_lists_every_call_with_its_tool_and_implicit_reject
         {"tool_call_id": "c1", "tool": "remember", "action": "approve"},
         {"tool_call_id": "c2", "tool": "remember", "action": "reject", "reason": "no decision"},
     ]
+
+
+def test_idempotency_key_is_stable_per_user_session_and_call():
+    def cfg(user, session):
+        return {"configurable": {"actor_id": user, "session_id": session}}
+
+    key = hitl.idempotency_key(cfg("u1", "s1"), "c1")
+    assert key == hitl.idempotency_key(cfg("u1", "s1"), "c1") and len(key) == 32
+    others = {
+        hitl.idempotency_key(cfg("u2", "s1"), "c1"),
+        hitl.idempotency_key(cfg("u1", "s2"), "c1"),
+        hitl.idempotency_key(cfg("u1", "s1"), "c2"),
+    }
+    assert key not in others and len(others) == 3
+
+
+async def test_request_ending_inside_an_approved_tool_never_reruns_it(fake_llm, monkeypatch):
+    """Timeout while the approved tool runs: the tool may have executed. Before the fix the call was left dangling, the
+    bridge's "interrupted" placeholder made the model call it again (a 2nd card) ⇒ the action ran twice."""
+    runs: list[int] = []
+
+    class SlowToolNode(ToolNode):
+        async def ainvoke(self, input, config=None, **kwargs):  # noqa: A002 — Runnable signature
+            runs.append(1)
+            await asyncio.sleep(5)
+            return await super().ainvoke(input, config, **kwargs)
+
+    monkeypatch.setattr(hitl, "ToolNode", SlowToolNode)
+    model = fake_llm(_call(), AIMessage("It may already be saved — please check your notes."))
+    await service.handle({"message": "remember"}, ctx("hitl-unknown"))
+    monkeypatch.setenv("REQUEST_TIMEOUT_S", "0.3")
+    get_settings.cache_clear()
+    approve = {"type": "resume", "decisions": [{"tool_call_id": "c1", "action": "approve"}]}
+    with pytest.raises(GreenNodeRequestError) as e:
+        await service.handle(approve, ctx("hitl-unknown"))
+    assert e.value.status_code == 504 and runs == [1]
+
+    monkeypatch.setenv("REQUEST_TIMEOUT_S", "180")
+    get_settings.cache_clear()
+    with pytest.raises(
+        GreenNodeRequestError
+    ) as e:  # the card is gone: approving again can't re-run it
+        await service.handle(approve, ctx("hitl-unknown"))
+    assert e.value.status_code == 409
+    out = await service.handle({"message": "did you save it?"}, ctx("hitl-unknown"))
+    assert out["status"] == "success" and runs == [1]
+    results = [m for m in model.calls[-1] if isinstance(m, ToolMessage)]
+    assert results[-1].content.startswith(hitl.OUTCOME_UNKNOWN_PREFIX)
+    assert results[-1].tool_call_id == "c1" and results[-1].status == "error"

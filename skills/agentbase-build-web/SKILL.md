@@ -98,7 +98,9 @@ the browser means "sign in again"); `ApprovalCard` / `MessageBubble` are DOM com
 Identical to `/agentbase-build-frontend` → Rules (same reducer): status line, tokens, `reset`, tools, approval card
 (`key={interrupt.id}`, Approve / Edit JSON / Reject with reason), 409 re-sync, failed resume ⇒ card again, Retry,
 503 backoff, Stop, New conversation (new session id), 👍/👎 only with `trace_id` + `feedback_token`. The session id
-is created in the browser; a reload starts a new conversation. Another user signing in ⇒ new conversation.
+is created in the browser; a reload starts a new conversation. Another user signing in ⇒ new conversation. A long
+conversation is rotated by the backend (`SESSION_MAX_TURNS`): `chatState` adopts the `session_id` returned in
+`done` / `interrupt` and sends it from then on — keep that if you rewrite the reducer.
 
 ## Tests & run
 

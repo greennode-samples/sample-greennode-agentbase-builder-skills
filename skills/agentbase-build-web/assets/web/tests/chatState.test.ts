@@ -33,6 +33,25 @@ describe('chatReducer', () => {
     expect(isBusy(s)).toBe(false);
   });
 
+  it('adopts the session id the backend returns (rotation of a long session), ignores a malformed one', () => {
+    const done = (session_id: unknown) => ({
+      type: 'event' as const,
+      replyId: 'r1',
+      event: { event: 'done', status: 'success', response: 'ok', tools_used: [], session_id, trace_id: 't' } as never,
+    });
+    let s = chatReducer(start(initialChatState('s1')), done('5f0c1d2e-aaaa-4bbb-8ccc-123456789abc'));
+    expect(s.sessionId).toBe('5f0c1d2e-aaaa-4bbb-8ccc-123456789abc');
+    for (const bad of ['', '../x', 'a b', 42, undefined]) {
+      expect(chatReducer(start(initialChatState('s1')), done(bad)).sessionId).toBe('s1');
+    }
+    s = chatReducer(start(initialChatState('s1')), {
+      type: 'event',
+      replyId: 'r1',
+      event: { event: 'interrupt', status: 'interrupted', interrupt: card('i1'), session_id: 's2' } as never,
+    });
+    expect(s.sessionId).toBe('s2');
+  });
+
   it('reset clears text and tools', () => {
     let s = start(initialChatState('s1'));
     s = chatReducer(s, { type: 'event', replyId: 'r1', event: { event: 'tool_start', name: 'search' } });

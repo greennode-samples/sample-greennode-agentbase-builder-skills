@@ -138,7 +138,13 @@ def build_graph(
 
     async def compress(state: AgentState) -> dict:
         update = await summarize_if_needed(state["messages"], state.get("summary", ""), settings)
-        return {**(update or {}), "critique": "", "reflection_round": 0, "llm_task": "agent"}
+        return {
+            **(update or {}),
+            "critique": "",
+            "reflection_round": 0,
+            "llm_task": "agent",
+            "turns": state.get("turns", 0) + 1,
+        }
 
     async def recall(state: AgentState, config: RunnableConfig) -> dict:
         if ltm is None:

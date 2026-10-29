@@ -86,6 +86,10 @@ agent.invoke [agent]        input=user message|resume decisions · output=answer
 │   │                       level WARNING if an MCP server fails or a HITL_TOOLS pattern matches no tool
 │   └─ mcp.list_tools [span] input{server, transport, url, auth, cached} · output[tool names]
 ├─ memory.checkpoint_load [span] output{messages, next, interrupts} · metadata{backend, session_id, kind}
+├─ hitl.outcome_unknown [event, WARNING]  {tools} — the previous request ended while these ran; closed as
+│                           "outcome unknown" (they may have executed) — the model must not repeat them
+├─ memory.session_rotated [span] metadata{from, to, turns} · output{messages_carried} — SESSION_MAX_TURNS
+│                           reached: the turn continues in a new session (the response's session_id)
 ├─ agent.graph [chain]      (CallbackHandler; LangGraph chains carry NO input/output — see Session view)
 │   ├─ compress [chain]
 │   │   ├─ context.compress [span]   metadata{tokens_before, threshold, keep_last, removed_messages,

@@ -811,7 +811,8 @@ async def test_structured_output_through_the_fallback_chain(mock_llm_server, tas
     assert calls == ["primary", "backup"]
     body = calls.bodies[-1]
     assert body["tool_choice"]["function"]["name"] == "Verdict"
-    cap = llm.DEFAULT_TASK_MAX_TOKENS.get(task)
+    # a flow without its own cap gets LLM_MAX_TOKENS (default 8192), set on the model
+    cap = llm.DEFAULT_TASK_MAX_TOKENS.get(task) or llm.get_settings().llm_max_tokens
     assert body.get("max_completion_tokens", body.get("max_tokens")) == cap
     with pytest.raises(ValueError, match="tools or schema"):
         llm.get_llm(task, tools=[object()], schema=Verdict)  # type: ignore[list-item]

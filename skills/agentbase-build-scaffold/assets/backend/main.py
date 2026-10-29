@@ -23,6 +23,7 @@ from app import service  # noqa: E402
 from app.a2a.client import warn_if_timeouts_unsafe  # noqa: E402
 from app.auth.inbound import prefetch_jwks  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
+from app.limits import RequestLimitsMiddleware  # noqa: E402
 from app.observability import tracing  # noqa: E402
 from app.reflection import drain_background  # noqa: E402
 from app.tools.mcp import log_iam_principal  # noqa: E402
@@ -56,7 +57,15 @@ async def lifespan(_app):
 
 
 # Passing middleware => the SDK drops its default middleware, so XAccelBufferingMiddleware (SSE) must be re-added.
-middleware = [Middleware(XAccelBufferingMiddleware)]
+# Outermost: refuse oversized bodies and overload BEFORE anything parses or queues them (app/limits.py)
+middleware = [
+    Middleware(
+        RequestLimitsMiddleware,
+        max_body_bytes=settings.max_request_bytes,
+        max_concurrent=settings.max_concurrent_requests,
+    ),
+    Middleware(XAccelBufferingMiddleware),
+]
 if settings.cors_allow_origins:
     middleware.append(
         Middleware(

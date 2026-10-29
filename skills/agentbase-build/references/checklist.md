@@ -27,6 +27,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Tools / MCP
 - [B] Side-effect tools are in `HITL_TOOLS` (or the user confirmed in writing that it is not needed).
+- [B] Each local side-effect tool passes `idempotency_key(config, tool_call_id)` to the system it changes (or that system dedupes on a business key) — HITL alone does not stop a double run across replicas (`/agentbase-build-hitl`).
 - Prod MCP goes through the MCP Gateway, inbound `IAM` or `JWT`; secrets live in Identity (Secret Provider).
 - [B] The Gateway has a **Policy Group** attached (none attached ⇒ every tools/call returns 403); there is an ALLOW policy with the exact action `<connector>__<tool>` for each principal that calls it: the developer's `iam:<sub>` (`make check-creds`, local runs) and **each environment's runtime** `iam:<sub>` (runtime logs `IAM principal …`, logged at startup by `log_iam_principal()` — only when an enabled `auth: "iam"` MCP server is configured — `/agentbase-build` Step 9b). Dev and prod use separate gateways/groups (≤ 10 policies per group).
 - [B] `mcp_servers.json` points to **each connector's connectUrl** (`<gateway endpoint>/<connector>`), not the gateway root, and every entry declares `auth` explicitly.
@@ -73,7 +74,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Frontend (if any)
 - No secrets in `EXPO_PUBLIC_*`; OIDC uses PKCE; tokens in SecureStore.
-- All SSE events handled (`token`, `reset`, `interrupt`, `done`, `error`).
+- All SSE events handled (`token`, `reset`, `interrupt`, `done`, `error`); the client adopts the `session_id` returned in `done` / `interrupt` / the response (session rotation).
 
 ## Deploy
 - [B] `make check-env ENV_FILE=src/backend/.env.<env>` (or the `.example` CI uses) passes: strict KEY=VALUE, no quotes / inline comments / `export`, no `GREENNODE_*` (injected / reserved), no `AGENT_VERSION` (= image tag).
@@ -82,6 +83,8 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] After every update the new version keeps the previous network mode (VPC: same VPC/subnet/route CIDRs), IP Access Control and Inbound Auth (`/agentbase-build-deploy` Step 4).
 - [B] `.agentbase-state.json` → `environments.<env>` records `runtime_id`, `endpoint`, `image`, `network_mode`, `allowed_cidrs`, `inbound_auth`, `identity`, `memory_id`, `memory_strategy_id`, `llm_key_name`, `mcp_gateway`, `policy_group`, `principal`.
 - The agent's LLM API key is dedicated to this agent + environment and has a Protect & Govern **Rate Limit** (requests and tokens per day).
+- Request limits sized for the spec's load and replica count (`RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_TENANT_PER_MIN`, `MAX_CONCURRENT_REQUESTS`, per replica); a strict global quota (paid tiers, per-tenant contracts) is enforced in front of the runtime.
+- [B] Staging/prod run an image built once and promoted: the CI job summary shows the same digest per tag in every environment; rollbacks use `image_tag` from a release tag.
 - CI deploys with a dedicated service account (never a person's credentials); secrets live in the CI secret store; the rendered manifest is not committed (`references/iam-permissions.md`).
 - Teardown follows the checklist in `/agentbase-build-deploy` (*Teardown checklist*): also gateways, Policy Groups, connectors, the **Orphaned** service account and inbound API key hashes — `/agentbase-teardown` alone does not remove them.
 
