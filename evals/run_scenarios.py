@@ -89,6 +89,7 @@ def run_agent(scenario: dict, workdir: Path, model: str | None, max_turns: int) 
         "turns": out.get("num_turns"),
         "cost_usd": out.get("total_cost_usd"),
         "error": out.get("is_error"),
+        "models": sorted(out.get("modelUsage") or {}),  # the score belongs to this model (routing and code differ by model)
         "final_message": str(out.get("result", ""))[-1500:],
     }
 

@@ -33,6 +33,10 @@ REPO = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).with_name("triggers.jsonl")
 RESULTS = Path(__file__).with_name("results")
 TIMEOUT_S = 180
+# What the runs ran on, taken from the first `system/init` event: routing depends on the model, the Claude Code version
+# and the OTHER skills installed (a platform skill that claims "any build request" competes with ours), so a score is
+# only comparable with another one from the same environment — it is stored with the results
+ENVIRONMENT: dict = {}
 
 
 def scaffold_project(root: Path) -> Path:
@@ -69,6 +73,13 @@ def first_skill(prompt: str, model: str | None, project: Path | None = None) -> 
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if event.get("type") == "system" and event.get("subtype") == "init" and not ENVIRONMENT:
+                    ENVIRONMENT.update(
+                        model=event.get("model"),
+                        claude_code_version=event.get("claude_code_version"),
+                        plugins=sorted(f"{p.get('name')}@{p.get('version', '?')}" for p in event.get("plugins", [])),
+                        other_skills=sorted(s for s in event.get("skills", []) if not s.startswith("agentbase-build:")),
+                    )
                 if event.get("type") == "result":
                     result = event
                 if event.get("type") != "assistant":
@@ -138,12 +149,23 @@ def main() -> int:
         print(f"{mark:<6} {case['id']:<22} expect {'/'.join(case['expect']):<40} got {', '.join(picks)}")
     accuracy = sum(r["ok"] for r in rows) / max(len(rows), 1)
     print(f"\naccuracy {accuracy:.0%} over {len(rows)} runs ({len(cases)} cases × {args.runs})")
+    if ENVIRONMENT:
+        print(
+            f"environment: model {ENVIRONMENT.get('model')}, Claude Code {ENVIRONMENT.get('claude_code_version')}, "
+            f"{len(ENVIRONMENT.get('other_skills', []))} other skills installed"
+        )
     for (want, got_skill), n in confusion.most_common():
         print(f"  confused {want} → {got_skill} ×{n}")
 
     RESULTS.mkdir(exist_ok=True)
     out = RESULTS / f"triggers-{time.strftime('%Y%m%d-%H%M%S')}.json"
-    out.write_text(json.dumps({"model": args.model, "accuracy": accuracy, "rows": rows}, ensure_ascii=False, indent=2))
+    out.write_text(
+        json.dumps(
+            {"model": args.model, "environment": ENVIRONMENT, "accuracy": accuracy, "rows": rows},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     print(f"results: {out.relative_to(REPO)}")
     return 0 if accuracy >= args.min else 1
 

@@ -7,7 +7,7 @@ a description / SKILL.md change, or a release), not on every push.
 
 | Eval | Question | Cost | Command |
 |---|---|---|---|
-| Routing (`triggers.jsonl`, `run_triggers.py`) | Does the agent load the right skill for a request — English and Vietnamese, build tasks, debugging in an existing project, and requests that belong to the platform `agentbase-*` skills or to no skill? | ~1 model turn per case | `python3 evals/run_triggers.py --runs 2` |
+| Routing (`triggers.jsonl` + the held-out `triggers_heldout.jsonl`, `run_triggers.py`) | Does the agent load the right skill for a request — English and Vietnamese, build tasks, debugging in an existing project, and requests that belong to the platform `agentbase-*` skills or to no skill? | ~1 model turn per case | `python3 evals/run_triggers.py --runs 2` |
 | End to end (`scenarios.json`, `run_scenarios.py`) | From a business request, does the agent produce a project that passes `make test`, `make lint`, `make security-scan` and the scenario's checks (tools, HITL coverage, MCP config, knowledge, eval items, tests)? | a full coding session per scenario | `python3 evals/run_scenarios.py --only hr-leave --keep` |
 
 Grading is objective (skill names, exit codes, files), never an LLM's opinion. Results go to `evals/results/`
@@ -23,7 +23,41 @@ Grading is objective (skill names, exit codes, files), never an LLM's opinion. R
   `AGENTS.md` (module → skill and symptom → skill tables, `skills/agentbase-build-scaffold/assets/root/AGENTS.md`).
   Then rerun the whole file — a description change can steal cases from another skill.
 
-## Baseline (2026-10-28, default model)
+## The held-out set, and what a score depends on
+
+`triggers.jsonl` is the set the skill descriptions were tuned on — its 100% was a training score. `triggers_heldout.jsonl`
+(40 cases, EN + VI, written after the descriptions were frozen, not used to tune them) estimates what a user who words
+things their own way gets:
+
+```bash
+python3 evals/run_triggers.py --file evals/triggers_heldout.jsonl --runs 2
+```
+
+Rules: tune descriptions and `AGENTS.md` on `triggers.jsonl`; run the held-out set to check; a description change made
+because a held-out case failed makes that case a training case — say so, and write new held-out cases.
+
+**A score belongs to an environment**: the model, the Claude Code version and the other skills installed. Every result
+file now records them (`environment`), and every number below says which model produced it. The same 3 cases went from
+9/9 on Opus 5.5 to 1/12 on Sonnet 5.5 with nothing else changed: on Sonnet the platform's `agentbase-wizard` (which
+describes itself as mandatory for *any* build request) and Anthropic's `claude-api` (LLM-judge, prompts) won requests
+that Opus routed to this set. Run `--model` explicitly when you compare two scores.
+
+| Set | Model | Result |
+|---|---|---|
+| held-out, 40 cases × 2 | Sonnet 5.5 (what `claude -p` used on this machine on 2026-10-29) | **90%** (72/80) before fixing anything |
+| — misses | | plain "build me an assistant" → `agentbase-wizard` (3 of 4 runs); "conversations get slower and slower" (in a project) and the Vietnamese "how accurate is my agent" → no skill (2 of 2 each); "update the web template" → `agentbase-build-scaffold` (1 of 2) |
+| after each fix (those cases are now training cases) | Sonnet 5.5 | slowdown 3/3 (`AGENTS.md` row), Vietnamese eval 3/3 (skill phrases), web update 2/3; plain build requests 4/4 and 4/4 (description) |
+| `triggers.jsonl`, 58 cases × 2, after the fixes | Sonnet 5.5 | **97%** — misses: `eval-en` → `claude-api` (a prompt-quality request in a plain directory with no AgentBase in it: arguably right), `mcp-github` → `agentbase-gateway` once |
+| `build-en`, `build-vi`, `eval-en` × 3 | Opus 5.5 | 9/9 |
+
+Fixes the held-out run led to: the orchestrator's description now says **"Use this skill, NOT /agentbase-wizard"** (Sonnet: the
+plain build requests that mostly failed now route 4/4 and 4/4 on the held-out ones, 3/3 on three tuned ones; the
+platform-question negative stays 3/3); an `AGENTS.md` row for "gets slower the
+longer a conversation runs"; Vietnamese measuring phrases in the eval skill; the web-template update in the web skill.
+Not fixable here: the wizard and `claude-api` are other people's skills — say "use agentbase-build" (README) when both are
+installed.
+
+## Baseline (2026-10-28, the default model of that day — not recorded, hence the `environment` field now)
 
 | Set | Before | After |
 |---|---|---|
@@ -43,6 +77,8 @@ knowledge. Generated projects now ship `AGENTS.md` (+ `CLAUDE.md` importing it) 
 | 2026-10-28 | `hr-leave` | 13/13 checks | 12.7 min, 83 turns, ≈ $4.6 | Good code (user from `config`, HITL in every env, health reason traced as its length only, 18 eval items incl. 2 injection). Two template gaps fixed: `test_security_scan.py` overwrote `HITL_TOOLS` (broke once a project had a write tool); the local `.env` kept `HITL_TOOLS=[]` so `make dev` ran writes unapproved — S3 now warns about `.env` / `.env.example` |
 | 2026-10-29 | `crm-mcp` | 22/22 checks | 12.5 min, 88 turns, ≈ $4.7 | Config only, as asked: `crm` connector with `auth: iam` and the 4 `allow_tools`, writes in HITL of every env, reads not, the Policy Group statement left in the spec, evals run against a dev gateway only. Template gap: the scan test planted a server named `crm` and clashed with the real one (agent renamed it) — all planted names are now `probe…`. The local-`.env` S3 warning missed MCP write tools — now covered |
 | 2026-10-29 | `faq-docs` | 9/9 checks | 18.5 min, 98 turns, ≈ $5.8 | Two IT documents, a `search_knowledge` tool, a filter for planted instructions plus a separate `injection.jsonl` (5 items, pass bar 1.0) against a tampered document kept out of the image, `must_not_contain` check, both datasets gating deploys. No template test needed editing |
+| 2026-10-29 | `hr-leave-unprompted` | 14/14 checks | 5.4 min, 37 turns, ≈ $0.8, Sonnet 5.5 | The same request as `hr-leave` **without naming a skill**: the agent still produced a standard project (`.agentbase-template.json`, spec, HITL in dev / staging / prod, 4+ eval items) — on this run the wizard did not take it. One run, one model: routing is probabilistic (see above) |
+| 2026-10-29 | `add-ticket-tool` | 13/13 checks | 3.7 min, 24 turns, ≈ $0.5, Sonnet 5.5 | An existing standard project and a one-line request, no skill named: it followed the add-a-tool recipe — the tool in `app/tools/custom.py` with `idempotency_key`, `create_ticket` in `HITL_TOOLS` of all four committed env files (the local `.env` is left to the user: S3 warns), tests, 2+ eval items incl. an injection one. The first four rows ran before results recorded the model |
 
 ## Adding cases and scenarios
 
