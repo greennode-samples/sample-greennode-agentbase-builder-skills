@@ -41,7 +41,7 @@ Report to the user: list of created files + next steps: **they run `make set-sec
 
 | Task | Command (run in `src/backend`) |
 |---|---|
-| Install env from lock | `uv sync` (CI: `uv sync --locked`; Docker: `uv sync --locked --no-dev` — both fail when `uv.lock` no longer matches `pyproject.toml`) |
+| Install env from lock | `uv sync --locked` (CI: `uv sync --locked`; Docker: `uv sync --locked --no-dev` — both fail when `uv.lock` no longer matches `pyproject.toml`) |
 | Add dependency | `uv add <pkg>` · dev: `uv add --dev <pkg>` · extra: `uv add "pkg[extra]"` |
 | Remove dependency | `uv remove <pkg>` |
 | Upgrade version | `uv lock --upgrade-package <pkg>` then `uv sync` |
@@ -49,6 +49,8 @@ Report to the user: list of created files + next steps: **they run `make set-sec
 | Python version | **Single standard: Python 3.13** — `.python-version` = `3.13`, `requires-python = ">=3.13,<3.14"`, Docker `python:3.13-slim`. uv downloads 3.13 automatically if missing (`uv python install 3.13`) |
 
 Rules: **every Python command runs via `uv run`** (including one-liners: `uv run python -c ...`) — don't call `python`/`python3` directly since macOS/Linux often ship an old system Python (e.g. 3.9) with the wrong version and none of the project's dependencies; **no** `pip install`, **no** `requirements.txt`, **no** manual venv activation in instructions; always commit `uv.lock`; the Dockerfile and CI use `uv sync --locked` for reproducible builds.
+
+**Supply chain.** The skills ship the `uv.lock` their tests ran against (`assets/backend/uv.lock`, also for the MCP server template), and the scaffold installs it with `uv sync --locked`: every new project starts from the same, tested packages, not from whatever PyPI resolves to that day. Both Dockerfiles pin their base images by digest (`python:3.13-slim@sha256:…`, `uv:0.10@sha256:…`; the tag stays for readability), so a build never changes under you. Nothing updates itself: generated projects get `.github/dependabot.yml` (uv / docker / GitHub Actions, plus npm for `src/web` and `src/frontend` when present — grouped weekly PRs; it is a seed, edit it freely) — **review and merge those PRs, run `make test` and `make security-scan`**, and enable Dependabot alerts in the repository settings. The npm lockfiles (`package-lock.json` of `src/web`, `src/frontend`) are created by the first `npm install` — commit them, and use `npm ci` in CI. Maintainers of these skills: after changing a `pyproject.toml` run `scripts/relock.sh` (`--upgrade` for newer versions, then the full tests) and commit the locks; skills CI fails on a stale lock or a base image without a digest.
 
 ### Env files
 

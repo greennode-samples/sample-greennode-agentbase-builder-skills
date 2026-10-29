@@ -17,8 +17,12 @@ make-targets  `make <target>` in docs exists in the Makefile of its context (MCP
               the project root Makefile).
 paths         template paths cited in docs (app/…, tests/…, scripts/…, deploy/…, src/backend/…) exist in a skill.
 env-names     UPPER_SNAKE config names cited in docs and templates exist (Settings, env files, code, CI, Makefiles).
-build-sync    the scaffold and MCP server Dockerfiles share python/uv images, stages, uv flags (no `chown -R`);
-              `uv … --frozen` nowhere (`--locked`); docs cite the same python image; no CI steps copied into docs.
+build-sync    the scaffold and MCP server Dockerfiles share python/uv images, stages, uv flags (no `chown -R`) and
+              pin every base image by the same digest; `uv … --frozen` nowhere (`--locked`); docs cite the same python
+              image; no CI steps copied into docs.
+locks         the uv.lock each template ships matches its pyproject.toml (project entry, direct and dev dependencies
+              with their specifiers): a changed dependency needs scripts/relock.sh. CI's `uv lock --check` is the
+              authority; this catches it before any network.
 allowlist     every exception in drift_allowlist.py is still needed.
 """
 
@@ -28,6 +32,7 @@ import ast
 import fnmatch
 import re
 import sys
+import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1082,6 +1087,7 @@ def check_env_names(errors: list[str]) -> None:
 
 
 # ------------------------------------------------------------------------------------------------- 6. build-sync
+DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 FROZEN_RE = re.compile(r"\buv\s+(?:sync|run|export|pip\s+sync)\b[^`#\n]*--frozen")
 CI_STEP_RE = re.compile(r"^\s*(?:-\s+)?(?:uses|runs-on):\s|^\s*-\s+run:|^\s*run:\s*\|")
 
@@ -1099,7 +1105,7 @@ def dockerfile_facts(path: Path) -> dict[str, tuple[object, int]]:
     return {
         "python images": (sorted(set(re.findall(r"^FROM\s+(python:\S+)", instr, re.M))), at(r"^FROM\s+python")),
         "stages": (len(re.findall(r"^FROM\s", instr, re.M)), at(r"^FROM\s")),
-        "uv image": (sorted(set(re.findall(r"--from=(\S*astral-sh/uv\S*)", instr))), at(r"astral-sh/uv")),
+        "uv image": (sorted(set(re.findall(r"^FROM\s+(\S*astral-sh/uv\S*)", instr, re.M))), at(r"astral-sh/uv")),
         "uv env": (sorted(set(re.findall(r"\b(UV_[A-Z_]+=\S+)", instr))), at(r"UV_[A-Z_]+=")),
         "uv sync flags": (
             [
@@ -1122,6 +1128,16 @@ def check_build_sync(errors: list[str]) -> None:
         images, n = f["python images"]
         if len(images) != 1:  # type: ignore[arg-type]
             err(p, n, f"stages use different python images {images} — use one tag")
+        for key in ("python images", "uv image"):
+            for img in f[key][0]:  # type: ignore[union-attr]
+                if not DIGEST_RE.search(img):
+                    err(
+                        p,
+                        f[key][1],
+                        f"base image {img} is not pinned by digest — a tag moves under a build; pin it with "
+                        f"`{img.split('@')[0]}@sha256:<digest>` (`docker buildx imagetools inspect {img}`; "
+                        "Dependabot's docker ecosystem keeps the digest current)",
+                    )
         chown, n = f["chown"]
         if chown:
             err(
@@ -1138,7 +1154,7 @@ def check_build_sync(errors: list[str]) -> None:
                 f"{key}: {fb[key][0]} here vs {fa[key][0]} in {rel(a)}:{fa[key][1]} — "
                 "the two Dockerfiles share their build settings: change them together",
             )
-    image = (fa["python images"][0] or ["?"])[0]  # type: ignore[index]
+    image = (fa["python images"][0] or ["?"])[0].split("@")[0]  # type: ignore[index]  # tag, without the digest
     pyver = re.match(r"python:(\d+\.\d+)", str(image))
     for d in (SCAFFOLD / "assets/backend", MCP_SERVER):
         pv = (d / ".python-version").read_text().strip()
@@ -1192,10 +1208,79 @@ def check_build_sync(errors: list[str]) -> None:
                     f"{ALLOWLIST} CI_SNIPPET_EXCEPTIONS",
                 )
     if len(errors) == n0:
-        print(f"ok  build-sync: both Dockerfiles on {image} + {fa['uv image'][0][0]}, --locked; no CI copies in docs")
+        uv_image = fa["uv image"][0][0].split("@")[0]  # type: ignore[index]
+        print(f"ok  build-sync: both Dockerfiles on {image} + {uv_image}, same digests, --locked; no CI copies in docs")
 
 
-CHECKS = (check_settings_env, check_trace_names, check_make_targets, check_paths, check_env_names, check_build_sync)
+# ------------------------------------------------------------------------------------------------- 7. locks
+_REQ_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*(.*?)\s*$")
+
+
+def _requirement(spec: str) -> tuple[str, tuple[str, ...], str]:
+    """`pyjwt[crypto]>=2.14,<3` → ("pyjwt", ("crypto",), ">=2.14,<3") — the shape uv.lock records it in."""
+    m = _REQ_RE.match(spec.split(";")[0])
+    if not m:
+        return spec, (), ""
+    extras = tuple(sorted(e.strip().lower() for e in (m.group(2) or "").split(",") if e.strip()))
+    return re.sub(r"[-_.]+", "-", m.group(1)).lower(), extras, re.sub(r"\s+", "", m.group(3))
+
+
+def _locked(entries: list[dict]) -> set[tuple[str, tuple[str, ...], str]]:
+    return {
+        (
+            re.sub(r"[-_.]+", "-", e["name"]).lower(),
+            tuple(sorted(e.get("extras", []))),
+            re.sub(r"\s+", "", e.get("specifier", "")),
+        )
+        for e in entries
+    }
+
+
+def check_locks(errors: list[str]) -> None:
+    err = reporter(errors, "locks")
+    n0 = len(errors)
+    for d, project in ((SCAFFOLD / "assets/backend", "__PROJECT_NAME__-backend"), (MCP_SERVER, "__SERVER_NAME__")):
+        lock_path, toml_path = d / "uv.lock", d / "pyproject.toml"
+        if not lock_path.exists():
+            err(lock_path, 1, "missing — run agentbase-build-scaffold/scripts/relock.sh (the Dockerfile needs a lock)")
+            continue
+        lock = tomllib.loads(read(lock_path))
+        proj = tomllib.loads(read(toml_path))
+        entry = next((p for p in lock.get("package", []) if (p.get("source") or {}).get("virtual") == "."), None)
+        if entry is None or entry["name"] != project:
+            got = entry["name"] if entry else None
+            err(lock_path, 1, f"project entry is {got!r}, expected the placeholder {project!r} (relock.sh writes it)")
+            continue
+        meta = entry.get("metadata", {})
+        pairs = (
+            ("dependencies", {_requirement(x) for x in proj["project"].get("dependencies", [])}, _locked(meta.get("requires-dist", []))),
+            (
+                "dev dependencies",
+                {_requirement(x) for x in proj.get("dependency-groups", {}).get("dev", []) if isinstance(x, str)},
+                _locked((meta.get("requires-dev") or {}).get("dev", [])),
+            ),
+        )
+        for what, want, have in pairs:
+            if want != have:
+                err(
+                    lock_path,
+                    1,
+                    f"{what} differ from {rel(toml_path)}: only in pyproject {sorted(want - have)}, only in the lock "
+                    f"{sorted(have - want)} — run agentbase-build-scaffold/scripts/relock.sh and commit the lock",
+                )
+    if len(errors) == n0:
+        print("ok  locks: uv.lock of the backend and MCP server templates match their pyproject.toml")
+
+
+CHECKS = (
+    check_settings_env,
+    check_trace_names,
+    check_make_targets,
+    check_paths,
+    check_env_names,
+    check_build_sync,
+    check_locks,
+)
 
 
 def run(errors: list[str]) -> None:

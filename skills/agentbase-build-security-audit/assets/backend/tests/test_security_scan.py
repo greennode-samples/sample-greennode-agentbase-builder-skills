@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,7 +33,12 @@ def project(tmp_path):
     """A copy of this project (backend + the root files the scan reads), committed in a throwaway git repo."""
     backend = tmp_path / "src/backend"
     shutil.copytree(BACKEND, backend, ignore=_skip)
-    for name in (".gitignore", ".agentbase-state.json", ".github/workflows/ci.yml"):
+    for name in (
+        ".gitignore",
+        ".agentbase-state.json",
+        ".github/workflows/ci.yml",
+        ".github/dependabot.yml",
+    ):
         if (PROJECT / name).exists():
             (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(PROJECT / name, tmp_path / name)
@@ -243,6 +249,27 @@ def test_limit_turned_off_warns(project, key):
     _set(project, key, "0")
     details = " ".join(d for _, d in _scan(project)["S10"].lines)
     assert f"{key}=0 turns this limit off" in details
+
+
+def test_base_image_without_digest_warns_and_stage_references_do_not(project):
+    dockerfile = project / "src/backend/Dockerfile"
+    text = dockerfile.read_text()
+    assert not any(
+        "pinned by digest" in d for _, d in _scan(project)["S12"].lines
+    )  # the template is pinned
+    dockerfile.write_text(re.sub(r"(FROM python:3\.13-slim)@sha256:[0-9a-f]{64}", r"\1", text))
+    lines = [d for s, d in _scan(project)["S12"].lines if s == "WARN"]
+    assert lines and all("python:3.13-slim is not pinned by digest" in d for d in lines)
+    assert not any(
+        " builder " in d or "uv " in d for d in lines
+    )  # `FROM builder` / `COPY --from=uv` are stages
+
+
+def test_missing_update_config_warns(project):
+    (project / ".github/dependabot.yml").unlink()
+    assert any("no Dependabot" in d for s, d in _scan(project)["S12"].lines if s == "WARN")
+    (project / "renovate.json").write_text("{}")  # another updater is as good
+    assert not any("no Dependabot" in d for _, d in _scan(project)["S12"].lines)
 
 
 def test_unpinned_action_fails(project):

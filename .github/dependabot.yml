@@ -1,0 +1,23 @@
+# Keeps what this repo itself runs current: the CI workflows' pinned actions and the two Dockerfiles' base images.
+# The python / npm packages of the templates are locked by scripts/relock.sh (agentbase-build-scaffold) — run it with
+# --upgrade, then the full tests, before a release; a project generated from the skills has its own dependabot.yml.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+  # Both Dockerfiles pin the same python and uv digests (check_skills.py `build-sync` fails when they differ):
+  # one grouped pull request updates them together.
+  - package-ecosystem: "docker"
+    directories:
+      - "/skills/agentbase-build-scaffold/assets/backend"
+      - "/skills/agentbase-build-mcp-server/assets/mcp_server"
+    schedule:
+      interval: "weekly"
+    groups:
+      base-images:
+        patterns: ["*"]

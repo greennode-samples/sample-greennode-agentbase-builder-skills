@@ -130,6 +130,7 @@ copy_new "$ROOT_TPL/CLAUDE.md" "$TARGET/CLAUDE.md"
 copy_new "$ROOT_TPL/gitignore" "$TARGET/.gitignore"
 copy_new "$ROOT_TPL/agentbase-state.json" "$TARGET/.agentbase-state.json"
 copy_new "$ROOT_TPL/ci.yml" "$TARGET/.github/workflows/ci.yml"
+copy_new "$ROOT_TPL/dependabot.yml" "$TARGET/.github/dependabot.yml"
 copy_new "$ROOT_TPL/agent.yaml.tpl" "$TARGET/deploy/agent.yaml.tpl"
 copy_new "$ROOT_TPL/render_runtime_spec.py" "$TARGET/deploy/render_runtime_spec.py"
 copy_new "$ROOT_TPL/env_file.py" "$TARGET/deploy/env_file.py"
@@ -155,6 +156,29 @@ if [[ $WITH_WEB -eq 1 ]]; then
     $([[ $SYNC -eq 0 ]] && echo --no-install)
 fi
 
+# Dependabot for the UI apps that exist (npm), appended to the file THIS run created. Major updates are left out: Expo
+# SDK packages move together with `npx expo install --fix`, and Next.js / React majors are a deliberate migration.
+DEPENDABOT="$TARGET/.github/dependabot.yml"
+if [[ " ${CREATED[*]-} " == *" $DEPENDABOT "* ]]; then
+  for app in "src/web:$WITH_WEB" "src/frontend:$WITH_FE"; do
+    if [[ "${app##*:}" -eq 1 ]]; then
+      cat >> "$DEPENDABOT" <<YAML
+  - package-ecosystem: "npm"
+    directory: "/${app%%:*}"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 5
+YAML
+    fi
+  done
+fi
+
 # Replace the placeholders — only in files created above that contain them (untouched files keep inode & mtime)
 for f in ${CREATED[@]+"${CREATED[@]}"}; do
   if grep -q "__PROJECT_NAME__\|__STANDARD_VERSION__\|__SCAFFOLD_VERSION__" "$f" 2>/dev/null; then
@@ -178,7 +202,7 @@ fi
 if [[ $SYNC -eq 1 ]]; then
   cd "$TARGET/src/backend" # no subshell: bash 3.2 (macOS) does not run the ERR trap for a failed ( … )
   PHASE="uv sync"
-  uv sync
+  uv sync --locked # the uv.lock the skills ship = the dependency set their tests ran against (scripts/relock.sh)
   PHASE="uv run pytest"
   uv run pytest -q -p no:warnings
   cd - >/dev/null
@@ -187,7 +211,7 @@ trap - ERR
 
 echo "✔ Scaffolded '$NAME' at $TARGET (standard $STANDARD_VERSION, skills $SCAFFOLD_VERSION)"
 if [[ $SYNC -eq 0 ]]; then
-  echo "  ⚠ --no-sync: no uv.lock yet — run 'cd src/backend && uv lock && uv sync' before make test / docker-build."
+  echo "  ⚠ --no-sync: nothing installed yet — run 'cd src/backend && uv sync --locked' (uv.lock is the tested one) before make test."
 fi
 echo "  Next: in YOUR own terminal (a coding agent cannot type into it), run: make set-secret — hidden prompt for"
 echo "        the IAM client_id/secret (→ src/backend/.greennode.json) and LLM_API_KEY (→ src/backend/.env)."

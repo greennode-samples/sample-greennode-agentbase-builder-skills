@@ -52,10 +52,11 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Scaffold a project from the skills
         run: bash skills/agentbase-build-scaffold/scripts/scaffold.sh ci-agent "$PROJECT" --no-sync
-      - name: Install (creates uv.lock) and run the full backend suite + ruff
+      - name: Install from the shipped uv.lock (a stale lock fails here) and run the full backend suite + ruff
         working-directory: build/ci-agent/src/backend
         run: |
-          uv sync
+          uv lock --check
+          uv sync --locked
           uv run ruff check . && uv run ruff format --check .
           uv run pytest -q
       - name: Generated deploy files — workflow YAML, env templates, manifest render
@@ -100,7 +101,8 @@ jobs:
         run: |
           cp -R skills/agentbase-build-mcp-server/assets/mcp_server build-mcp
           cd build-mcp
-          sed -i 's/__SERVER_NAME__/ci-mcp/g' pyproject.toml settings.py .env.example Makefile
+          sed -i 's/__SERVER_NAME__/ci-mcp/g' pyproject.toml uv.lock settings.py .env.example Makefile
+          uv lock --check # the shipped lock must match pyproject.toml (scripts/relock.sh)
           make setup
           uv run ruff check . && uv run ruff format --check .
           make test

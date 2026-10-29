@@ -86,6 +86,17 @@ PINNED_RE = re.compile(r"^\s*-?\s*uses:\s*(\S+)@([0-9a-f]{40})\b")
 USES_RE = re.compile(r"^\s*-?\s*uses:\s*(\S+)")
 DATA_RULE_RE = re.compile(r"\bDATA\b.*(do not|never) follow instructions", re.I)
 # Bounds that cap cost and blast radius: raising them above the template default is a WARN
+FROM_RE = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", re.I)
+UPDATE_CONFIGS = (
+    ".github/dependabot.yml",
+    ".github/dependabot.yaml",
+    "renovate.json",
+    "renovate.json5",
+    ".github/renovate.json",
+    ".github/renovate.json5",
+    ".renovaterc",
+    ".renovaterc.json",
+)
 BOUNDS = (
     "MAX_TOOL_ROUNDS",
     "REQUEST_TIMEOUT_S",
@@ -606,8 +617,33 @@ def s12_supply_chain(p: Project, r: Result) -> None:
                 r.add(
                     "FAIL", f"{wf.relative_to(p.root)}:{n}: {m.group(1)} not pinned to a commit SHA"
                 )
+    dockerfile = p.backend / "Dockerfile"
+    if dockerfile.exists():
+        stages: set[str] = set()
+        for n, line in enumerate(dockerfile.read_text(encoding="utf-8").splitlines(), start=1):
+            m = FROM_RE.match(line)
+            if not m:
+                continue
+            image = m.group(1)
+            if image.lower() != "scratch" and image not in stages and "@sha256:" not in image:
+                r.add(
+                    "WARN",
+                    f"src/backend/Dockerfile:{n}: base image {image} is not pinned by digest — a tag moves under "
+                    "a build (`docker buildx imagetools inspect <image>`; Dependabot keeps the digest current)",
+                )
+            if m.group(2):
+                stages.add(m.group(2))
+    if not any((p.root / f).exists() for f in UPDATE_CONFIGS):
+        r.add(
+            "WARN",
+            "no Dependabot / Renovate config — packages, base images and actions are never updated "
+            "(.github/dependabot.yml of the template)",
+        )
     if not any(s in ("FAIL", "WARN") for s, _ in r.lines):
-        r.add("PASS", "uv.lock present, CI actions pinned to commit SHAs")
+        r.add(
+            "PASS",
+            "uv.lock present, base images and CI actions pinned, automatic updates configured",
+        )
 
 
 def s13_audit_record(p: Project, r: Result) -> None:

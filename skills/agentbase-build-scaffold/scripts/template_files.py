@@ -54,6 +54,7 @@ SEEDS = {
     "src/backend/evals/datasets/*": "your eval items; template sample rows would change your pass rate",
     "src/backend/mcp_servers.json": "your connectors and URLs; a text merge can leave invalid JSON",
     "src/backend/a2a_agents.json": "your A2A peers; a text merge can leave invalid JSON",
+    ".github/dependabot.yml": "your update schedule, groups and reviewers",
 }
 
 # create-expo output in src/frontend (only the template overlay of agentbase-build-frontend is managed)

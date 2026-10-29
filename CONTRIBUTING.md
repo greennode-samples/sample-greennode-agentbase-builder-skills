@@ -14,6 +14,14 @@ cd /tmp/demo && make lint && make security-scan && make web-test
 CI (`.github/workflows/skills-ci.yml`) runs the same checks, the MCP server template suite and the upgrade of older
 projects.
 
+## Dependencies and base images
+
+The backend and MCP server templates ship the `uv.lock` their tests ran against, and their Dockerfiles pin the python
+and uv images by digest. After changing a `pyproject.toml`, run `bash skills/agentbase-build-scaffold/scripts/relock.sh`
+and commit the lock (`--upgrade` for the newest allowed versions, then the full tests). CI fails on a stale lock
+(`uv lock --check`) and on a base image without a digest; Dependabot proposes new digests and action versions
+(`.github/dependabot.yml`) — both Dockerfiles move together.
+
 ## Rules
 
 - **Fix it in the owning skill.** Each module belongs to one skill (table in

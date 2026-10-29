@@ -44,6 +44,7 @@ of this project, load the skill that owns it** — also for small fixes and erro
 | `make security-scan` FAIL / WARN, any secret (LLM key included) pasted into a chat or committed, injection worries | `agentbase-build-security-audit` |
 | Deploy failed, health check failing, settings lost after an update, rollback | `agentbase-build-deploy` |
 | `make test` broken after editing the template, dependency conflicts | `agentbase-build-scaffold` |
+| A Dependabot pull request to review (a package or a base-image digest), a stale `uv.lock`, a vulnerable dependency | `agentbase-build-scaffold` (*Supply chain*) |
 
 Platform operations (create memory stores, API keys, gateways, runtimes; read runtime logs) go through the platform
 skills `agentbase-*` (`/agentbase-memory`, `/agentbase-llm`, `/agentbase-gateway`, `/agentbase-deploy`,

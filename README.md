@@ -209,6 +209,10 @@ Plugin skills may appear namespaced, like `/agentbase-build:agentbase-build` or 
 - Long-term memory auto-extraction from this template's events (see `agentbase-build-memory`).
 - Session rotation (`SESSION_MAX_TURNS`) on real AgentBase Memory, and the CI's build-once / digest steps (`docker buildx imagetools`) against the AgentBase Container Registry.
 
+## Supply chain
+
+The backend and MCP server templates ship a tested `uv.lock` (installed with `uv sync --locked`) and pin their base images by digest; generated projects get a `.github/dependabot.yml` (uv, docker, GitHub Actions, npm) and `make security-scan` S12 warns when a project has none. Details: `agentbase-build-scaffold` → *Supply chain*.
+
 ## License, security, contributing
 
 MIT — see `LICENSE`. Report vulnerabilities privately as described in `SECURITY.md`. How to change a skill and what CI checks: `CONTRIBUTING.md`.

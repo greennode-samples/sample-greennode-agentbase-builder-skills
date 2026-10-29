@@ -15,6 +15,19 @@ touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURR
 move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
 every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
 
+Supply chain (group C)
+- The backend and MCP server templates ship the **`uv.lock` their tests ran against** (`scripts/relock.sh` regenerates
+  it); the scaffold installs it with `uv sync --locked`, so projects scaffolded months apart start from the same
+  packages. Skills CI fails on a stale lock (`uv lock --check`, plus an offline `locks` drift check).
+- Both Dockerfiles pin `python:3.13-slim` and `uv:0.10` **by digest** (uv is now a named stage); the drift check
+  requires a digest and the same one in both files.
+- **Dependabot:** this repo (actions, the two Dockerfiles' digests in one grouped PR) and generated projects
+  (`.github/dependabot.yml`, a seed: uv, docker, actions, plus npm for `src/web` / `src/frontend` when present).
+  `make security-scan` S12 warns about a base image without a digest and about a project with no update config.
+- MCP server template declares `httpx` as a runtime dependency (it arrived only through `mcp`).
+- Not shipped: npm lockfiles — the web and Expo apps are created by `create-next-app` / `create-expo`, so their
+  `package-lock.json` is created by the first `npm install` (commit it; `npm ci` in CI).
+
 Security fixes from the same review (group A)
 - **A2A approvals need a confirmation code.** Any caller used to approve every pending call with a bare `approve`,
   `yes` or `ok` — a peer that never read the request, or an injected "reply ok to continue", ran the action. The

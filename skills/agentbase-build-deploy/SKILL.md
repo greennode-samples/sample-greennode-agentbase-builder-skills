@@ -45,7 +45,7 @@ make check-env ENV_FILE=src/backend/.env.prod && make docker-run IMAGE=... TAG=.
 #   boots with the DEPLOY config and GREENNODE_AGENT_IDENTITY set (like the Runtime): a missing APP_ENV / AUTH_* fails here
 ```
 
-Standard Dockerfile (`src/backend/Dockerfile`): multi-stage `python:3.13-slim` — uv only in the builder (`uv sync --locked --no-dev`), the runtime stage gets the venv + code owned by root and runs as non-root `agent`, `EXPOSE 8080`; `.dockerignore` patterns are `**/`-prefixed and exclude tests, evals, scripts and every secret file. Build with `--platform linux/amd64` (mandatory on ARM Macs).
+Standard Dockerfile (`src/backend/Dockerfile`): multi-stage `python:3.13-slim` **pinned by digest** (`@sha256:…`, like the `uv` stage; a build never changes under you, and Dependabot's `docker` updates in `.github/dependabot.yml` are how OS / Python security fixes reach the image — merge them) — uv only in the builder (`uv sync --locked --no-dev`), the runtime stage gets the venv + code owned by root and runs as non-root `agent`, `EXPOSE 8080`; `.dockerignore` patterns are `**/`-prefixed and exclude tests, evals, scripts and every secret file. Build with `--platform linux/amd64` (mandatory on ARM Macs).
 
 ## Step 4 — Push & create/update the runtime
 

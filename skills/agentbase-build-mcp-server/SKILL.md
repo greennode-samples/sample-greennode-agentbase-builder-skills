@@ -47,8 +47,8 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
 1. **Scaffold** (separate directory, e.g. `src/mcp_servers/<name>/` or a separate repo):
    ```bash
    cp -R <skill-dir>/assets/mcp_server <dest> && cd <dest>
-   sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml settings.py .env.example Makefile   # Linux: sed -i
-   make setup && make test      # uv sync + .env from .env.example · 47 passed
+   sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml uv.lock settings.py .env.example Makefile   # Linux: sed -i
+   make setup && make test      # uv sync + .env from .env.example · 47 passed (the shipped `uv.lock` is the tested dependency set; commit it)
    ```
 2. **Write tools** in `server.py` — **read `references/tool-design.md` first**; copy the closest sample, then delete the samples you don't need (and their tests):
    - Shared data from an internal system ⇒ copy `get_product` + `backend.py` (`MCP_BACKEND_URL`, timeout, error mapping).
