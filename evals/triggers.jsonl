@@ -1,0 +1,58 @@
+{"id": "build-en", "prompt": "Build an HR assistant agent on GreenNode AgentBase that answers leave-policy questions and creates leave requests.", "expect": ["agentbase-build"]}
+{"id": "build-vi", "prompt": "Tạo giúp mình một agent chăm sóc khách hàng trên AgentBase, trả lời câu hỏi về đơn hàng và tạo ticket hỗ trợ.", "expect": ["agentbase-build"]}
+{"id": "build-review", "prompt": "Review my existing agent in this repo against the AgentBase build standard and list what is missing.", "expect": ["agentbase-build"], "in_project": true}
+{"id": "scaffold-en", "prompt": "Initialize the standard src/backend project structure for a new AgentBase agent called invoice-bot.", "expect": ["agentbase-build-scaffold", "agentbase-build"]}
+{"id": "scaffold-uv", "prompt": "Add the pandas dependency to my AgentBase agent backend the right way.", "expect": ["agentbase-build-scaffold"], "in_project": true}
+{"id": "scaffold-upgrade-vi", "prompt": "Project agent của mình tạo từ bản skill cũ 0.3.0, nâng cấp lên template mới giúp mình.", "expect": ["agentbase-build-scaffold", "agentbase-build"], "in_project": true}
+{"id": "llm-tier", "prompt": "Which model should my AgentBase agent use for routing vs. answering, and how do I add a fallback model?", "expect": ["agentbase-build-llm"]}
+{"id": "llm-vi", "prompt": "Agent tốn chi phí LLM quá, tối ưu giúp mình: chọn model nhỏ cho tóm tắt, model lớn cho trả lời.", "expect": ["agentbase-build-llm"], "in_project": true}
+{"id": "memory-ltm", "prompt": "Make my agent remember each user's preferences across sessions.", "expect": ["agentbase-build-memory"]}
+{"id": "memory-vi", "prompt": "Hội thoại dài quá vượt context window, agent bị lỗi. Làm sao tóm tắt và cắt bớt lịch sử?", "expect": ["agentbase-build-memory"], "in_project": true}
+{"id": "tracing-en", "prompt": "Add Langfuse tracing to my AgentBase agent so I can see token cost and TTFT per step.", "expect": ["agentbase-build-tracing"]}
+{"id": "tracing-debug", "prompt": "My agent answers slowly; use the traces to find which step is slow.", "expect": ["agentbase-build-tracing"], "in_project": true}
+{"id": "mcp-github", "prompt": "Connect my agent to GitHub through the MCP Gateway so it can read issues.", "expect": ["agentbase-build-mcp"]}
+{"id": "mcp-403", "prompt": "Every MCP tool call from my deployed agent returns 403 denied by policy. Fix it.", "expect": ["agentbase-build-mcp"], "in_project": true}
+{"id": "mcp-server-en", "prompt": "Write an MCP server that exposes our internal orders API with OAuth 3LO so each user only sees their orders.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "mcp-server-vi", "prompt": "Viết MCP server cho hệ thống kho nội bộ, có xác thực API key, để agent gọi.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "a2a-en", "prompt": "Let my sales agent call the separate pricing agent owned by another team, and expose my agent so others can call it.", "expect": ["agentbase-build-a2a"]}
+{"id": "a2a-vi", "prompt": "Mình muốn agent này gọi được agent chứng khoán của team khác qua A2A.", "expect": ["agentbase-build-a2a"]}
+{"id": "auth-en", "prompt": "Protect my agent endpoint with Keycloak JWT login; user id must come from the token.", "expect": ["agentbase-build-auth"]}
+{"id": "auth-vi", "prompt": "Thêm đăng nhập OIDC cho agent, chặn giả mạo header User-Id.", "expect": ["agentbase-build-auth"]}
+{"id": "identity-en", "prompt": "One of my agent's tools calls the Google Calendar API on behalf of each user. How should it get the OAuth token?", "expect": ["agentbase-build-identity"]}
+{"id": "identity-vi", "prompt": "Tool của agent cần API key của Stripe, lưu key ở đâu cho đúng chuẩn?", "expect": ["agentbase-build-identity"]}
+{"id": "hitl-en", "prompt": "Before my agent sends an email or deletes a record, it must ask the user to approve.", "expect": ["agentbase-build-hitl"]}
+{"id": "hitl-vi", "prompt": "Agent chuyển tiền thì phải có người duyệt trước khi chạy, làm sao?", "expect": ["agentbase-build-hitl"], "in_project": true}
+{"id": "eval-en", "prompt": "Set up an evaluation dataset and an LLM judge so a prompt change can't silently reduce quality before deploy.", "expect": ["agentbase-build-eval"]}
+{"id": "eval-vi", "prompt": "So sánh chất lượng 2 model cho agent của mình bằng bộ dataset đánh giá.", "expect": ["agentbase-build-eval"], "in_project": true}
+{"id": "frontend-en", "prompt": "Build a mobile chat app (React Native) for my agent with login and streaming answers.", "expect": ["agentbase-build-frontend"]}
+{"id": "frontend-vi", "prompt": "Làm app mobile giao diện chat cho agent, có nút duyệt hành động.", "expect": ["agentbase-build-frontend"]}
+{"id": "deploy-en", "prompt": "Deploy my standard agent to staging and prod on AgentBase Runtime, keeping the VPC settings.", "expect": ["agentbase-build-deploy"], "in_project": true}
+{"id": "deploy-rollback", "prompt": "The new version of my agent is broken in prod, roll it back.", "expect": ["agentbase-build-deploy"], "in_project": true}
+{"id": "security-en", "prompt": "Do a security audit of my AgentBase agent before we go to production.", "expect": ["agentbase-build-security-audit"]}
+{"id": "security-vi", "prompt": "Kiểm tra bảo mật agent này giúp mình, nhất là prompt injection từ tài liệu.", "expect": ["agentbase-build-security-audit"], "in_project": true}
+{"id": "neg-memory-store", "prompt": "Create a new AgentBase memory store named crm-memory.", "expect": ["agentbase-memory"], "kind": "platform"}
+{"id": "neg-logs", "prompt": "Show me the logs of my deployed agent runtime, it crashed.", "expect": ["agentbase-monitor"], "kind": "platform", "in_project": true}
+{"id": "neg-llm-key", "prompt": "Create a new platform LLM API key for my agent.", "expect": ["agentbase-llm"], "kind": "platform"}
+{"id": "neg-gateway-crud", "prompt": "Delete the MCP gateway called old-gw.", "expect": ["agentbase-gateway"], "kind": "platform"}
+{"id": "neg-teardown", "prompt": "Tear down every AgentBase resource of my test agent, I am starting over.", "expect": ["agentbase-teardown"], "kind": "platform"}
+{"id": "neg-platform-question", "prompt": "What services does GreenNode AgentBase offer?", "expect": ["agentbase"], "kind": "platform"}
+{"id": "neg-unrelated", "prompt": "Explain what a Python decorator is.", "expect": ["none"], "kind": "unrelated"}
+{"id": "neg-subagent", "prompt": "Add a planner node before the answer node in my agent's LangGraph graph.", "expect": ["agentbase-build", "none"], "kind": "boundary", "in_project": true}
+{"id": "neg-unit-test", "prompt": "Write a pytest unit test for the get_current_time tool in my agent.", "expect": ["none", "agentbase-build", "agentbase-build-mcp"], "kind": "boundary", "in_project": true}
+{"id": "hard-apikey-ambiguous", "prompt": "Set up the API key my agent needs.", "expect": ["agentbase-build-llm", "agentbase-llm"], "kind": "hard", "in_project": true}
+{"id": "hard-apikey-weather", "prompt": "My agent's get_weather tool needs an OpenWeather API key — wire it in.", "expect": ["agentbase-build-identity"], "kind": "hard", "in_project": true}
+{"id": "hard-401-endpoint", "prompt": "Calls to my agent's /invocations return 401 since I switched to Auth0.", "expect": ["agentbase-build-auth"], "kind": "hard", "in_project": true}
+{"id": "hard-tool-permission", "prompt": "Only allow the agent to use the read-only GitHub tools, never the write ones.", "expect": ["agentbase-build-mcp", "agentbase-policy"], "kind": "hard", "in_project": true}
+{"id": "hard-approval-vs-policy", "prompt": "The create_invoice tool should only run after a manager confirms the amount in the chat.", "expect": ["agentbase-build-hitl"], "kind": "hard", "in_project": true}
+{"id": "hard-trace-vs-eval", "prompt": "Users gave thumbs-down on many answers last week; turn those into test cases and check the fix.", "expect": ["agentbase-build-eval"], "kind": "hard", "in_project": true}
+{"id": "hard-oauth-mcp-vs-identity", "prompt": "Our MCP server must accept OAuth tokens and only let each user see their own tickets.", "expect": ["agentbase-build-mcp-server"], "kind": "hard"}
+{"id": "hard-new-vs-wizard", "prompt": "I need a chatbot on AgentBase for answering FAQ from our PDF docs, production-ready.", "expect": ["agentbase-build"], "kind": "hard"}
+{"id": "hard-cost-vs-trace", "prompt": "Why did my agent's token cost double this week?", "expect": ["agentbase-build-tracing", "agentbase-build-llm"], "kind": "hard", "in_project": true}
+{"id": "hard-secret-leak", "prompt": "I accidentally pasted my LLM API key in a Slack channel. What do I do?", "expect": ["agentbase-build", "agentbase-build-security-audit"], "kind": "hard", "in_project": true}
+{"id": "hard-isolation-bug", "prompt": "User B could see user A's past conversation in my agent. Find the cause.", "expect": ["agentbase-build-memory", "agentbase-build-security-audit", "agentbase-build-auth"], "kind": "hard", "in_project": true}
+{"id": "hard-scan-fail", "prompt": "CI failed on the security scan step with S3 FAIL send_report. Fix it.", "expect": ["agentbase-build-security-audit", "agentbase-build-hitl"], "kind": "hard", "in_project": true}
+{"id": "hard-web-ui-vi", "prompt": "Làm giao diện web chat cho agent để nhân viên dùng trên trình duyệt.", "expect": ["agentbase-build-web"], "kind": "hard", "in_project": true}
+{"id": "tenant-en", "prompt": "Our agent will serve several customer companies from one deployment; company A must never see company B's data.", "expect": ["agentbase-build-auth", "agentbase-build"], "in_project": true}
+{"id": "roles-vi", "prompt": "Chỉ admin mới được dùng tool xoá khách hàng, user thường không được thấy tool đó.", "expect": ["agentbase-build-auth", "agentbase-build-mcp"], "in_project": true}
+{"id": "web-en", "prompt": "Build a browser-based chat UI for my agent with company SSO login.", "expect": ["agentbase-build-web"], "in_project": true}
+{"id": "web-vi", "prompt": "Làm web app Next.js để nhân viên chat với agent trên trình duyệt.", "expect": ["agentbase-build-web"], "in_project": true}

@@ -1,5 +1,7 @@
 # Security & guardrails for AgentBase agents
 
+This file describes the template's defenses. To check that a project still has them — quick pre-deploy scan or a full source audit with Cloudflare's `security-audit` skill — use `/agentbase-build-security-audit`.
+
 ## Attack surface and corresponding defenses
 
 | Risk | Defense in the template |

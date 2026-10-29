@@ -12,6 +12,14 @@
   "cr_repo_name": null,
   "gateway_name": null,
   "langfuse_project": null,
+  "security_audit": {
+    "date": null,
+    "source_ref": null,
+    "profile": null,
+    "report_dir": null,
+    "confirmed_open": 0,
+    "waivers": {}
+  },
   "environments": {
     "dev": {
       "runtime_id": null,

@@ -6,6 +6,47 @@ Versions of the agentbase-build standard. The version is stamped in `.claude-plu
 `.agentbase-state.json` (`standard_version`, plus `scaffold_version` = the skills' git SHA when available), so a
 review can tell which standard a project was built from.
 
+## Unreleased
+
+Effectiveness of the skills for coding agents (measured, `evals/`)
+- `evals/run_triggers.py` + `triggers.jsonl` (58 cases, EN + VI, build tasks, debugging inside a scaffolded project,
+  platform and no-skill requests): which skill a headless Claude Code loads. `evals/run_scenarios.py` +
+  `scenarios.json`: a coding agent builds 3 agents from business requests offline; graded on make test / lint /
+  security-scan, HITL coverage, MCP config, knowledge, eval items, tests.
+- Finding: debugging requests in an existing project loaded no skill (hard cases 54%). Generated projects now ship
+  `AGENTS.md` (+ `CLAUDE.md` importing it, both seeds): module → skill and symptom → skill tables, platform skills,
+  rules. Descriptions of auth, mcp, llm, memory, tracing, deploy, hitl, security-audit name their troubleshooting
+  cases. Routing: 100% of 58 cases (hard cases 100%).
+- End to end: hr-leave 13/13, faq-docs 9/9, crm-mcp 22/22 (12–19 min, ≈ $5 each). Fixed from what the runs showed:
+  `test_security_scan.py` planted names that real projects use (`crm`, `send_*`, overwritten `HITL_TOOLS`) and broke
+  their `make test` — every planted tool / server / file is now `probe…` and patterns are appended; the local
+  `.env` keeps `HITL_TOOLS=[]` from scaffold time, so `make dev` ran writes unapproved — S3 warns, for local tools
+  and MCP `allow_tools`.
+
+Product coverage
+- New skill `agentbase-build-web`: Next.js web chat in `src/web` with a BFF (server-side OIDC code + PKCE, sealed
+  httpOnly cookie, CSRF, IAM to the Runtime, nonce CSP), SSE, HITL cards, feedback; contract / SSE / chat state /
+  linkify byte-identical with the Expo app (skills-ci `cmp`). `scaffold.sh --with-web`, `make web-setup / web-dev /
+  web-test`; `src/web` is outside upgrade.py (refresh with `setup_web.sh --force`).
+- Organizations and roles: `AUTH_TENANT_CLAIM` scopes every user id to its tenant (`u-<sha256([iss, tenant, sub])>`,
+  so memory, HITL, A2A tasks, feedback and traces are per tenant), `AUTH_ALLOWED_TENANTS`, `AUTH_ROLES_CLAIM`,
+  `TOOL_ROLES` (role-gated tools removed before the model sees them, fail closed); `tenant_id` / `roles` in
+  `config["configurable"]`, `tenant:<id>` trace tag; `tests/test_tenancy.py` (13 tests).
+
+Security audit
+- New skill `agentbase-build-security-audit`: a CI-gating quick scan and a full source-first audit with Cloudflare's `security-audit` skill, seeded with
+  `references/threat-model.md` (assets, trust boundaries T1–T10, seed coverage units U1–U12, facts outside the repo,
+  companion selection). Findings are fixed in the owning skill with a regression test / eval item.
+- `make security-scan` (`scripts/security_scan.py`, asset of the new skill, 18 tests, also run inside generated projects): 13 offline checks S1–S13
+  (inbound auth, tool parameters, HITL coverage incl. MCP `allow_tools`, MCP entries, committed secrets, outbound
+  credentials, injection defenses and evals, trace masking, bounds, CORS, supply chain, open audit findings), PASS /
+  FAIL / WARN / MANUAL per check, key names only (never values), waivers in `.agentbase-state.json` →
+  `security_audit.waivers`. Generated projects get it through `scaffold.sh`; the CI `test` job runs it, so a blocking
+  FAIL stops every deploy. `.agentbase-state.json` template gains `security_audit`.
+- `/agentbase-build`: Step 9 requires `make security-scan` to pass, security review routed from review mode;
+  `references/checklist.md` → *Security* points to the scan instead of repeating its rules; `references/security.md`
+  points to the new skill.
+
 ## 0.4.0 — 2026-10-16
 
 Upgrade path for generated projects

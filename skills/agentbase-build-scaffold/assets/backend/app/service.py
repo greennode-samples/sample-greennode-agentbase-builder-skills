@@ -254,6 +254,8 @@ def _trace_auth(principal: Principal) -> None:
         "auth",
         output={
             "user_id": principal.user_id,
+            "tenant_id": principal.tenant_id,
+            "roles": sorted(principal.roles),
             "mode": get_settings().auth_mode,
             "iss": claims.get("iss"),
             "aud": claims.get("aud"),
@@ -382,7 +384,11 @@ class _Run:
             session_id=self.session_id,
             input=self.trace_input,
             metadata=_trace_meta(self.kind),
-            tags=[f"type:{self.kind}", *tags],
+            tags=[
+                f"type:{self.kind}",
+                *tags,
+                *([f"tenant:{t}"] if (t := self.principal.tenant_id) else []),
+            ],
             error_output=_user_error,
         )
 
@@ -409,6 +415,9 @@ class _Run:
             # only allowlisted claims — tools read them via config["configurable"]["user_claims"]
             user_claims={k: claims[k] for k in self.settings.auth_forward_claims if k in claims},
         )
+        # tenant / roles from the verified token (multi-tenant agents) — tools read them, never a tool parameter
+        config["configurable"]["tenant_id"] = self.principal.tenant_id
+        config["configurable"]["roles"] = sorted(self.principal.roles)
         config["callbacks"] = tracing.langchain_callbacks()
         config["recursion_limit"] = recursion_limit(self.settings)
         config["run_name"] = "agent.graph"

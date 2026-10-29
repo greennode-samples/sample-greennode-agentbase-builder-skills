@@ -8,7 +8,7 @@ settings-env  app/config.py Settings ↔ .env.example (every field, as an active
               env.deploy.example (subset of .env.example; no GREENNODE_* / AGENT_VERSION; APP_ENV templated) ↔ ci.yml
               (`<set-in-deploy>` keys in `--secrets`; `export --keys` globs match settings and are named by the eval
               SKILL; every secrets.* / vars.* listed in the header comment); MCP server settings.py ↔ its .env.example;
-              frontend process.env ↔ its .env.example.
+              frontend (Expo) and web (Next.js) templates: process.env ↔ their .env.example.
 trace-names   names emitted by the backend templates (tracing.step/event/score_trace, run_name, graph nodes, get_llm,
               trace_request) ↔ the Step 2 tree of agentbase-build-tracing/SKILL.md, both ways and with observation
               types; tracing.py's docstring tree ⊆ that tree; names cited in references/trace-schema.md are emitted;
@@ -46,6 +46,9 @@ ROOT_MAKEFILE = ROOT_TPL / "Makefile"
 MCP_SKILL = SKILLS / "agentbase-build-mcp-server"
 MCP_SERVER = MCP_SKILL / "assets/mcp_server"
 FRONTEND = SKILLS / "agentbase-build-frontend/assets/frontend"
+WEB = SKILLS / "agentbase-build-web/assets/web"  # Next.js web chat + BFF (src/web), checked like FRONTEND
+# Each JS/TS template → the file that reads its config (named in the settings-env hint)
+JS_TEMPLATES = {FRONTEND: "src/config/env.ts", WEB: "src/config/env.ts (NEXT_PUBLIC_*) or src/server/config.ts (BFF_*)"}
 TRACING_SKILL = SKILLS / "agentbase-build-tracing/SKILL.md"
 TRACING_PY = SKILLS / "agentbase-build-tracing/assets/backend/app/observability/tracing.py"
 TRACE_SCHEMA = SKILLS / "agentbase-build-tracing/references/trace-schema.md"
@@ -315,7 +318,7 @@ def env_world() -> EnvWorld:
             if "/assets/backend/" in py.as_posix():
                 backend_reads.add(name)
         constants |= _py_constants(py)
-    for ts in [*FRONTEND.rglob("*.ts"), *FRONTEND.rglob("*.tsx")]:
+    for ts in [p for base in JS_TEMPLATES for p in (*base.rglob("*.ts"), *base.rglob("*.tsx"))]:
         text = read(ts)
         for m in re.finditer(r"process\.env\.([A-Z][A-Z0-9_]*)", text):
             line = text[text.rfind("\n", 0, m.start()) + 1 : m.start()].lstrip()
@@ -343,7 +346,8 @@ def env_world() -> EnvWorld:
     for sh in SKILLS.glob("*/scripts/*.sh"):  # variables of the skill scripts, incl. env overrides (EXPO_SDK=<n>)
         other |= set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", read(sh)))
     env_files = {
-        p: env_keys(p) for p in (BACKEND_ENV, DEPLOY_ENV, MCP_SERVER / ".env.example", FRONTEND / ".env.example")
+        p: env_keys(p)
+        for p in (BACKEND_ENV, DEPLOY_ENV, MCP_SERVER / ".env.example", *(t / ".env.example" for t in JS_TEMPLATES))
     }
     _WORLD = EnvWorld(
         agent=settings_fields(AGENT_CONFIG),
@@ -485,25 +489,33 @@ def check_settings_env(errors: list[str]) -> None:
                 n,
                 f"{key} is not a field of {rel(MCP_SERVER / 'settings.py')} — remove it or add the field",
             )
-    # Frontend template: process.env.EXPO_PUBLIC_* ↔ its .env.example
-    fe_env_path = FRONTEND / ".env.example"
-    fe_env = w.env_files[fe_env_path]
-    fe_reads = {k: v for k, v in w.code_reads.items() if v[0].is_relative_to(FRONTEND)}
-    for key, (path, n) in fe_reads.items():
-        if key not in fe_env:
-            err(path, n, f"{key} is read here but missing from {rel(fe_env_path)} — add it with a comment")
-    for key, (n, _) in fe_env.items():
-        if key not in fe_reads:
-            err(
-                fe_env_path,
-                n,
-                f"{key} is not read by the frontend template (process.env.{key}) — "
-                "remove it or read it in src/config/env.ts",
-            )
+    # JS/TS templates (Expo frontend, Next.js web): process.env.* ↔ their .env.example
+    fe_keys = 0
+    for tpl, reader in JS_TEMPLATES.items():
+        fe_env_path = tpl / ".env.example"
+        fe_env = w.env_files[fe_env_path]
+        fe_keys += len(fe_env)
+        # code_reads keeps the first reader of a name: match by the template's own files
+        fe_reads = {
+            m.group(1): (ts, line_of(read(ts), m.start()))
+            for ts in (*tpl.rglob("*.ts"), *tpl.rglob("*.tsx"))
+            for m in re.finditer(r"process\.env\.([A-Z][A-Z0-9_]*)", read(ts))
+            if m.group(1) in w.code_reads
+        }
+        for key, (path, n) in fe_reads.items():
+            if key not in fe_env and key != "NODE_ENV":
+                err(path, n, f"{key} is read here but missing from {rel(fe_env_path)} — add it with a comment")
+        for key, (n, _) in fe_env.items():
+            if key not in fe_reads:
+                err(
+                    fe_env_path,
+                    n,
+                    f"{key} is not read by the {tpl.name} template (process.env.{key}) — remove it or read it in {reader}",
+                )
     if len(errors) == n0:
         print(
             f"ok  settings-env: {len(w.agent)} agent settings, {len(local)}/{len(deploy)} keys in "
-            f".env.example/env.deploy.example, {len(w.mcp)} MCP server settings, {len(fe_env)} frontend keys"
+            f".env.example/env.deploy.example, {len(w.mcp)} MCP server settings, {fe_keys} frontend/web keys"
         )
 
 
@@ -932,11 +944,11 @@ def resolve_template_path(p: str) -> bool:
     skills = [s for s in sorted(SKILLS.iterdir()) if s.is_dir()]
     if allowed(p.rstrip("/"), "NON_TEMPLATE_PATHS", "NON_TEMPLATE_PATH_PATTERNS"):
         return True
-    if p.startswith("src/"):  # generated project: src/backend ← assets/backend, src/frontend ← assets/frontend
+    if p.startswith("src/"):  # generated project: src/<sub> ← assets/<sub> (backend, frontend, web)
         _, sub, *rest = p.split("/", 2) + [""]
         if sub == "":
             return True  # src/ itself
-        if sub not in ("backend", "frontend"):
+        if sub not in ("backend", "frontend", "web"):
             return False
         p = rest[0]
         if not p:
@@ -955,7 +967,7 @@ def resolve_template_path(p: str) -> bool:
             ROOT,
             SKILLS,
             *skills,
-            *(s / "assets" / sub for s in skills for sub in ("backend", "mcp_server", "frontend")),
+            *(s / "assets" / sub for s in skills for sub in ("backend", "mcp_server", "frontend", "web")),
         ]
     p = p.rstrip("/")
     candidates = [p]
@@ -1007,7 +1019,7 @@ def check_paths(errors: list[str]) -> None:
                         doc,
                         ml.n,
                         f"`{tok}` exists in no skill (assets/backend, assets/mcp_server, "
-                        "assets/frontend, assets/root via scaffold.sh's mapping, the skill dirs) — fix the path, or "
+                        "assets/frontend, assets/web, assets/root via scaffold.sh's mapping, the skill dirs) — fix the path, or "
                         f"allowlist it in {ALLOWLIST} (NON_TEMPLATE_PATHS) with who creates it",
                     )
     if len(errors) == n0:
@@ -1059,7 +1071,7 @@ def check_env_names(errors: list[str]) -> None:
         for ml in md_lines(doc):
             verify(doc, ml.n, ml.text)
     for path in text_files(
-        SKILLS / "agentbase-build-scaffold/assets", *SKILLS.glob("*/assets/backend"), MCP_SERVER, FRONTEND
+        SKILLS / "agentbase-build-scaffold/assets", *SKILLS.glob("*/assets/backend"), MCP_SERVER, *JS_TEMPLATES
     ):
         if path.suffix in (".md", ".jsonl") or path.name == "package-lock.json":
             continue

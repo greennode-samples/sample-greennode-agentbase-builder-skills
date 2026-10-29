@@ -74,6 +74,8 @@ jobs:
           shopt -s nullglob
           files=(.env.*.example)
           if [ ${#files[@]} -gt 0 ]; then uv run python ../../deploy/env_file.py check "${files[@]}"; fi
+      - name: Security quick scan (blocking checks gate every deploy — /agentbase-build-security-audit)
+        run: uv run python -m scripts.security_scan
 
   eval:
     needs: test

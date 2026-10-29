@@ -84,3 +84,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - The agent's LLM API key is dedicated to this agent + environment and has a Protect & Govern **Rate Limit** (requests and tokens per day).
 - CI deploys with a dedicated service account (never a person's credentials); secrets live in the CI secret store; the rendered manifest is not committed (`references/iam-permissions.md`).
 - Teardown follows the checklist in `/agentbase-build-deploy` (*Teardown checklist*): also gateways, Policy Groups, connectors, the **Orphaned** service account and inbound API key hashes — `/agentbase-teardown` alone does not remove them.
+
+## Security — `make security-scan` (`/agentbase-build-security-audit`; the checks live in the scan, not here)
+- [B] `make security-scan` exits 0: no blocking check FAILs (CI runs it too); each WARN fixed or explained; each MANUAL line done with the skill it names and reported.
+- Prod: a full audit (`security-audit` skill, seeded with the AgentBase threat model) has run on the deployed `source_ref`, or a scoped run covers every change since; its result is recorded in `.agentbase-state.json` → `security_audit` (S13 blocks while findings are open).

@@ -37,6 +37,11 @@ jobs:
         run: |
           cmp skills/agentbase-build-scaffold/assets/backend/scripts/set_secret.py \
             skills/agentbase-build-mcp-server/assets/mcp_server/scripts/set_secret.py
+      - name: Web (Next.js) and Expo templates share the platform-neutral chat logic byte for byte
+        run: |
+          for f in src/api/contract.ts src/api/sse.ts src/chat/chatState.ts src/components/linkify.ts; do
+            cmp "skills/agentbase-build-frontend/assets/frontend/$f" "skills/agentbase-build-web/assets/web/$f"
+          done
 
   scaffold:
     runs-on: ubuntu-24.04

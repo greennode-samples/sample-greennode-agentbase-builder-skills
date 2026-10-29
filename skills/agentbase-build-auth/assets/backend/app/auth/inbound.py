@@ -16,6 +16,9 @@ Principles:
 - The caller's User-Id is read from the HTTP request itself, never from `context.user_id`: the SDK fills that
   from the `agent_user_id` config value (.greennode.json / env) when the header is absent.
 - Every user_id (header or JWT sub) goes through validate_user_id() before touching memory.
+- Multi-tenant (AUTH_TENANT_CLAIM): the tenant comes from the verified token only and is part of the user id
+  (`u-<sha256([iss, tenant, sub])>`), so every per-user store is per tenant too. api_key callers (trusted BFF) send that
+  id themselves: `user_id_from_subject(sub, iss, tenant)`. Roles (AUTH_ROLES_CLAIM) gate tools via TOOL_ROLES.
 - The IdP is bounded: JWKS fetch timeout JWKS_TIMEOUT_S, whole authentication AUTH_TIMEOUT_S ⇒ 503 (PyJWKClient
   fetches under one process-wide lock — an unbounded IdP outage would queue every request behind it).
 """
@@ -29,6 +32,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from functools import lru_cache
 from typing import Any
 
@@ -52,6 +56,7 @@ USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+=-]{0,127}$")
 # normalizes "../" ⇒ "../../victim/sessions/x" reads/writes another user's history (confirmed). Disallow
 # "_" (the bridge cache key is f"{thread}_{actor}"), ":" (in-memory key), ".", "/", "%".
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,127}$")
+TENANT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$")
 
 
 def validate_user_id(user_id: str) -> str:
@@ -74,9 +79,13 @@ def validate_session_id(session_id: str | None) -> str:
 HASHED_USER_ID_RE = re.compile(r"^u-[0-9a-f]{40}$")
 
 
-def user_id_from_subject(subject: str, issuer: str | None) -> str:
+def user_id_from_subject(subject: str, issuer: str | None, tenant: str | None = None) -> str:
     """An IdP `sub` may contain path-unsafe characters (Auth0 `auth0|abc`, ...) ⇒ map it stably
-    to `u-<sha256(iss|sub)>` instead of rejecting."""
+    to `u-<sha256(iss|sub)>` instead of rejecting. With a tenant the id is always hashed with it, JSON-encoded so
+    no two (tenant, sub) pairs share an input ("a" + "b|c" vs "a|b" + "c")."""
+    if tenant:
+        scoped = json.dumps([issuer or "", tenant, subject], ensure_ascii=False)
+        return "u-" + hashlib.sha256(scoped.encode()).hexdigest()[:40]
     if (
         USER_ID_RE.fullmatch(subject)
         and ".." not in subject
@@ -92,6 +101,56 @@ class Principal:
     # repr=False: a Principal in a log line / exception / trace must not print the bearer token or the claims
     token: str | None = field(default=None, repr=False)
     claims: dict[str, Any] = field(default_factory=dict, repr=False)
+    tenant_id: str | None = None
+    roles: frozenset[str] = frozenset()
+
+
+def _claim(claims: dict[str, Any], path: str) -> Any:
+    """`realm_access.roles` → claims["realm_access"]["roles"] (a top-level key with dots wins)."""
+    if path in claims:
+        return claims[path]
+    value: Any = claims
+    for part in path.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value
+
+
+def tenant_from_claims(claims: dict[str, Any], settings: Settings) -> str | None:
+    if not settings.auth_tenant_claim:
+        return None
+    raw = _claim(claims, settings.auth_tenant_claim)
+    tenant = str(raw) if isinstance(raw, str | int) and str(raw) else ""
+    if not tenant:
+        raise _unauthorized(
+            f"Token missing tenant claim '{settings.auth_tenant_claim}'", status=403
+        )
+    if not TENANT_ID_RE.fullmatch(tenant) or ".." in tenant:
+        raise _unauthorized("Invalid tenant id format", status=403)
+    if settings.auth_allowed_tenants and tenant not in settings.auth_allowed_tenants:
+        raise _unauthorized("Tenant not allowed", status=403)
+    return tenant
+
+
+def roles_from_claims(claims: dict[str, Any], settings: Settings) -> frozenset[str]:
+    if not settings.auth_roles_claim:
+        return frozenset()
+    raw = _claim(claims, settings.auth_roles_claim)
+    if isinstance(raw, str):
+        raw = raw.split()
+    return (
+        frozenset(str(r) for r in raw if isinstance(r, str | int))
+        if isinstance(raw, list)
+        else frozenset()
+    )
+
+
+def tool_allowed(tool_name: str, principal: Principal, settings: Settings) -> bool:
+    """TOOL_ROLES: a tool matching a pattern needs at least one of that pattern's roles (every matching pattern)."""
+    return all(
+        principal.roles & set(roles)
+        for pattern, roles in settings.tool_roles.items()
+        if fnmatch(tool_name, pattern)
+    )
 
 
 def _unauthorized(msg: str, status: int = 401) -> GreenNodeRequestError:
@@ -218,10 +277,20 @@ def _principal(context: RequestContext, settings: Settings, claims: dict | None,
         raw = (claims or {}).get(settings.auth_user_claim)
         if not raw:
             raise _unauthorized(f"Token missing claim '{settings.auth_user_claim}'")
-        user_id = user_id_from_subject(str(raw), (claims or {}).get("iss"))
-        if claimed_user and claimed_user not in (str(raw), user_id):
+        tenant = tenant_from_claims(claims or {}, settings)
+        user_id = user_id_from_subject(str(raw), (claims or {}).get("iss"), tenant)
+        accepted = (
+            (user_id,) if tenant else (str(raw), user_id)
+        )  # with tenants the raw sub is not an id
+        if claimed_user and claimed_user not in accepted:
             raise _unauthorized("User-Id header does not match token subject", status=403)
-        principal = Principal(user_id=user_id, token=token, claims=claims or {})
+        principal = Principal(
+            user_id=user_id,
+            token=token,
+            claims=claims or {},
+            tenant_id=tenant,
+            roles=roles_from_claims(claims or {}, settings),
+        )
     validate_user_id(principal.user_id)
     GreenNodeAgentBaseContext.set_user_id(principal.user_id)
     return principal

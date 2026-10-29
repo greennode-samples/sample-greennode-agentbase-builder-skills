@@ -1,6 +1,6 @@
 ---
 name: agentbase-build
-description: "Prefer this skill (over /agentbase-wizard) when a standardized architecture is needed. Standard + process for a coding agent to BUILD a production-ready AI agent on GreenNode AgentBase (Python + uv + LangGraph, src/backend + optional React Native src/frontend). Use when the user wants to build/create/design an agent, chatbot, assistant or copilot for a new business requirement, or to review an existing agent against the standard. Trigger: build agent, create an agent for ..., design agent, standard agent, agentbase build, review agent, check agent standard, upgrade project, tạo agent cho ..., thiết kế agent, agent chuẩn, kiểm tra chuẩn agent, nâng cấp project. ORCHESTRATES the agentbase-build-* skills (scaffold, llm, memory, tracing, mcp, mcp-server, auth, identity, hitl, eval, a2a, frontend, deploy) and the platform agentbase-* skills. DO NOT use for platform reference questions (use /agentbase) or single operations on an existing resource (use the platform skill)."
+description: "Prefer this skill (over /agentbase-wizard) when a standardized architecture is needed. Standard + process for a coding agent to BUILD a production-ready AI agent on GreenNode AgentBase (Python + uv + LangGraph, src/backend + optional React Native src/frontend or Next.js src/web). Use when the user wants to build/create/design an agent, chatbot, assistant or copilot for a new business requirement, or to review an existing agent against the standard. Trigger: build agent, create an agent for ..., design agent, standard agent, agentbase build, review agent, check agent standard, upgrade project, tạo agent cho ..., thiết kế agent, agent chuẩn, kiểm tra chuẩn agent, nâng cấp project. ORCHESTRATES the agentbase-build-* skills (scaffold, llm, memory, tracing, mcp, mcp-server, auth, identity, hitl, eval, a2a, frontend, web, deploy, security-audit) and the platform agentbase-* skills. DO NOT use for platform reference questions (use /agentbase) or single operations on an existing resource (use the platform skill)."
 ---
 
 # AgentBase Build — Standardizing how AI agents are built on GreenNode AgentBase
@@ -26,7 +26,8 @@ Goal: **every agent, whatever its business requirements, has the same structure,
 | Evaluation | Langfuse Experiments (offline) + scores (online) + self-eval loop | `agentbase-build-eval` |
 | Build MCP server | FastMCP streamable HTTP + auth (API key / OAuth JWT, scopes, user from token) on Runtime | `agentbase-build-mcp-server` |
 | Agent ↔ agent | **A2A** (a2a-sdk; server + client, per-user isolation) — **only when decision guide §5 is satisfied** | `agentbase-build-a2a` |
-| UI | Expo React Native (TypeScript) in `src/frontend` — **only when a UI is needed** | `agentbase-build-frontend` |
+| UI | Mobile: Expo React Native (TypeScript) in `src/frontend`; web: Next.js + BFF in `src/web` — **only when a UI is needed** | `agentbase-build-frontend`, `agentbase-build-web` |
+| Security audit | `make security-scan` (offline, gates CI deploys) + full audit with Cloudflare's `security-audit` skill | `agentbase-build-security-audit` |
 | Deploy | Docker linux/amd64 → AgentBase CR → Agent Runtime | `agentbase-build-deploy` |
 
 ## Standard project structure
@@ -65,6 +66,7 @@ Goal: **every agent, whatever its business requirements, has the same structure,
     │   ├── evals/            # datasets/*.jsonl, evaluators.py, run_eval.py
     │   └── tests/
     ├── frontend/             # (optional) Expo React Native
+    ├── web/                  # (optional) Next.js web chat + BFF
     └── mcp_servers/<name>/   # (optional) self-built MCP server — /agentbase-build-mcp-server
 ```
 
@@ -94,15 +96,15 @@ Per-module responsibilities and the request flow: read **`references/architectur
 
 Show progress as `Step X/9`. Each step checks whether it is already done (idempotent) and writes resource IDs to `.agentbase-state.json`.
 
-1. **Analyze requirements → Agent Spec.** Read `references/requirements-to-spec.md` **and `references/decision-guide.md`**, fill in the Agent Spec template. For **each** optional component (long-term memory, reflection, HITL, MCP server, A2A, frontend), state *on/off + reason* based on the decision guide. Principle: **minimal by default** — do not enable anything "because it might be needed later". Present the spec to the user and **wait for confirmation** before coding; save it to `docs/agent-spec.md`.
-2. **Scaffold** — `/agentbase-build-scaffold`: create `src/backend` (+ `src/frontend` if the spec needs a UI) via the script, `uv sync`, `make test` must be green. "Off" components stay in the code and are **disabled via env** — never delete their modules (they import each other; only `app/identity.py` may go). Then the user runs `make set-secret` in their own terminal (Enter = the required keys: IAM `client_id`/`client_secret`, then `LLM_API_KEY` if they already have one — see *Credentials*) and `make check-creds` shows OK for IAM.
+1. **Analyze requirements → Agent Spec.** Read `references/requirements-to-spec.md` **and `references/decision-guide.md`**, fill in the Agent Spec template. For **each** optional component (long-term memory, reflection, HITL, MCP server, A2A, frontend, multi-tenant), state *on/off + reason* based on the decision guide. Principle: **minimal by default** — do not enable anything "because it might be needed later". Present the spec to the user and **wait for confirmation** before coding; save it to `docs/agent-spec.md`.
+2. **Scaffold** — `/agentbase-build-scaffold`: create `src/backend` (+ `--with-frontend` for a mobile UI, `--with-web` for a web UI) via the script, `uv sync`, `make test` must be green. "Off" components stay in the code and are **disabled via env** — never delete their modules (they import each other; only `app/identity.py` may go). Then the user runs `make set-secret` in their own terminal (Enter = the required keys: IAM `client_id`/`client_secret`, then `LLM_API_KEY` if they already have one — see *Credentials*) and `make check-creds` shows OK for IAM.
 3. **LLM** — `/agentbase-build-llm`: get an API key via `/agentbase-llm` run from `src/backend` (its `api-keys create` / `--save-env` writes `LLM_API_KEY` into `./.env` itself, never shown; an existing key: the user runs `make set-secret NAME=LLM_API_KEY` in their terminal; `make check-creds` must now show OK for LLM); the user picks a model for each tier (reasoning/large/small) + fallback; map flows → tiers; decide on adaptive routing.
 4. **Memory** — `/agentbase-build-memory`: create a memory store via `/agentbase-memory`, set `MEMORY_ID`, tune strategy/namespace and the context-compression threshold.
 5. **Tools / MCP / A2A** — if a new MCP server is needed for an internal system: `/agentbase-build-mcp-server` (deploy it first). If another agent is needed (decision guide §5): `/agentbase-build-a2a`. Then `/agentbase-build-mcp`: write local tools; create/select an MCP Gateway (`/agentbase-gateway` — separate dev and prod gateways), connect MCP Connectors (catalog or custom), create a Policy Group (`/agentbase-policy`) with an ALLOW for the **developer principal** (`make check-creds`) for local runs — each environment's **runtime principal** is added after its first deploy (Step 9b) — and declare each `connectUrl` in `mcp_servers.json`. Plan for **10 policies per group** (`/agentbase-policy`; the MCP docs say 20) and one group per gateway. Mark side-effect tools in `HITL_TOOLS` (`/agentbase-build-hitl`).
 6. **Auth** — `/agentbase-build-auth`: configure inbound JWT (JWKS/issuer/audience). Tools calling external services with a key or OAuth ⇒ `/agentbase-build-identity` (providers via `/agentbase-identity`, helpers in `app/identity.py`).
 7. **Tracing + Eval** — install the official Langfuse skill (`npx skills add langfuse/skills --skill langfuse`) next to this set, then `/agentbase-build-tracing` (Langfuse v4 keys — the user runs `make set-secret NAME=langfuse` first —, prompt management, model prices; run a few requests and `lf_trace.py --latest 3 --audit` until it reports no FAIL) and `/agentbase-build-eval` (write the dataset from the spec, `make eval` meets the threshold).
-8. **Frontend** (if any) — `/agentbase-build-frontend`.
-9. **Deploy + verify** — `/agentbase-build-deploy` (CI: the user sets the GitHub Environment secrets with `gh secret set <NAME> --env <env>`; `/agentbase-deploy`: the user runs `make set-secret ENV_FILE=src/backend/.env.<env>`), check `/health`, send a test call, inspect the trace in Langfuse (`release` = image tag), logs via `/agentbase-monitor`.
+8. **Frontend** (if any) — mobile `/agentbase-build-frontend`, web `/agentbase-build-web`.
+9. **Deploy + verify** — `make security-scan` exits 0 (`/agentbase-build-security-audit`; CI runs it before every deploy; a full audit before the first prod release). Then `/agentbase-build-deploy` (CI: the user sets the GitHub Environment secrets with `gh secret set <NAME> --env <env>`; `/agentbase-deploy`: the user runs `make set-secret ENV_FILE=src/backend/.env.<env>`), check `/health`, send a test call, inspect the trace in Langfuse (`release` = image tag), logs via `/agentbase-monitor`.
    - **9b. Grant the runtime principal** (when the agent uses an MCP Gateway with IAM inbound): the runtime has its own service account (`auto-sa-<agent>`), so a fresh deploy gets 403 on every tool. Read its principal from the runtime logs (`IAM principal … iam:<sub>`, logged at startup by `log_iam_principal()` — only when an enabled `auth: "iam"` MCP server is configured: `runtime.sh logs <id> --query "IAM principal"`), add it to the environment's Policy Group with `/agentbase-policy`, record it in `.agentbase-state.json` → `environments.<env>.principal`, re-test a tool call. Repeat per environment and after a service-account reset.
 
 Finish: run **`references/checklist.md`** (Definition of Done) and report PASS/FAIL per item.
@@ -131,7 +133,7 @@ Finish: run **`references/checklist.md`** (Definition of Done) and report PASS/F
 
 ## Review mode (`/agentbase-build review`)
 
-For an existing project: compare against the standard structure + run `references/checklist.md`, list deviations by severity (BLOCKER / SHOULD / NICE), propose fixes per sub-skill.
+For an existing project: compare against the standard structure + run `references/checklist.md`, list deviations by severity (BLOCKER / SHOULD / NICE), propose fixes per sub-skill. Security review ("audit / pentest this agent") ⇒ `/agentbase-build-security-audit`.
 
 ## Upgrade mode (`/agentbase-build upgrade`)
 

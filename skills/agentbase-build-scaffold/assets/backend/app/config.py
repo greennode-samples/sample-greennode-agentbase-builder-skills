@@ -154,6 +154,19 @@ class Settings(BaseSettings):
     # JWT claims passed to tools via config["configurable"]["user_claims"] (allowlist, JSON
     # list) — e.g. ["employee_id","roles","email"]. Tools do NOT read the token directly.
     auth_forward_claims: list[str] = Field(default_factory=list)
+    # --- Organizations (multi-tenant) and roles — /agentbase-build-auth → Multi-tenant and roles ---
+    # Claim holding the caller's tenant / organization (e.g. "org_id", Entra ID "tid"). Set ⇒ every user id is
+    # scoped to its tenant (memory, history, HITL, A2A tasks, feedback, traces): the same person in two tenants is two
+    # users, and a token without the claim is refused (403). Empty = single tenant.
+    auth_tenant_claim: str = ""
+    # Tenants allowed to call this agent (JSON list); empty = every tenant the IdP issues tokens for.
+    auth_allowed_tenants: list[str] = Field(default_factory=list)
+    # Claim with the caller's roles: a list or a space-separated string; dotted path for nested claims
+    # (Keycloak "realm_access.roles"). Tools read them via config["configurable"]["roles"].
+    auth_roles_claim: str = ""
+    # Tools that only some roles may use, JSON {"<tool glob>": ["role", ...]}. A matching tool is removed from the
+    # turn when the caller holds none of its roles — the model never sees it (fail closed: no roles ⇒ no such tool).
+    tool_roles: dict[str, list[str]] = Field(default_factory=dict)
     auth_algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"])
     # api_key: header carrying the key + SHA-256 hex list of valid keys (JSON list, allows rotation)
     auth_api_key_header: str = "X-GreenNode-AgentBase-Custom-Api-Key"
@@ -326,6 +339,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AUTH_ALLOW_NO_AUDIENCE outside local requires AUTH_ALLOWED_CLIENT_IDS (JSON list of the app "
                 "client ids allowed to call this agent; checked against the `azp`/`client_id` claim)."
+            )
+        if self.auth_allowed_tenants and not self.auth_tenant_claim:
+            raise ValueError(
+                "AUTH_ALLOWED_TENANTS requires AUTH_TENANT_CLAIM (the claim holding the tenant id)."
             )
         if self.auth_mode == "api_key" and not self.auth_api_key_sha256:
             raise ValueError(
