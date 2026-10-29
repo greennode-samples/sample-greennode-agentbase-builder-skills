@@ -48,7 +48,7 @@ The Runtime has **Security Settings** ([create-runtime](https://docs.greennode.a
   `uv run python -c "import secrets,hashlib,os,pathlib;k=secrets.token_urlsafe(32);p=pathlib.Path.home()/'.my-agent-api-key';os.write(os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),k.encode());print(hashlib.sha256(k.encode()).hexdigest())"` — then the user moves the key into the caller's secret store and deletes the file.
 - Env holds only the hash: `AUTH_API_KEY_SHA256=["<sha256>"]` (multiple hashes ⇒ zero-downtime rotation).
 - Caller sends `X-GreenNode-AgentBase-Custom-Api-Key: <key>` + **mandatory** `X-GreenNode-AgentBase-User-Id` (no shared bucket — missing ⇒ 400; the trusted caller is responsible for this value). **An api_key holder can act as ANY user** (memory, sessions, and connected accounts if `IDENTITY_TRUST_ASSERTED_USER=true`).
-- A BFF that verified the user's IdP token sends `User-Id = user_id_from_subject(sub, iss)` (`app.auth.inbound`) — the same id jwt mode derives, so switching a client between BFF and direct jwt keeps the user's memory.
+- The web template's BFF (`/agentbase-build-web`) does **not** use this mode: it forwards the user's access token (`jwt`). A BFF of your own that verified the user's IdP token and calls with an API key sends `User-Id = user_id_from_subject(sub, iss)` (`app.auth.inbound`) — the same id jwt mode derives, so switching a client between BFF and direct jwt keeps the user's memory.
 - **Never** embed the key in a mobile/web app ⇒ user-facing apps use `jwt` or go through a BFF.
 
 ## Calling the runtime endpoint: 2 patterns

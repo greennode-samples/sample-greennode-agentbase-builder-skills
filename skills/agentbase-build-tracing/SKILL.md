@@ -228,7 +228,7 @@ Rules (all enforced by the template; keep them when adding code):
 Instrumentation is not done when the code compiles. Loop until the trace is clean:
 
 1. **Run** the instrumented path end to end: `make test` (offline: `tests/test_tracing_tree.py` checks names, types, root I/O, thinking, masking), then `make dev` + 2–3 real requests (1 with a tool call, 1 HITL approval if enabled, 1 follow-up in the same session).
-2. **Fetch** what was sent: `uv run python <skill-dir>/scripts/lf_trace.py --latest 3 --audit` (tree + findings, exit 1 on FAIL), or `npx langfuse-cli api observations list --trace-id <id> --json`.
+2. **Fetch** what was sent — from `src/backend` (the script reads its `.env` and runs with the project's packages): `cd src/backend && uv run python <skill-dir>/scripts/lf_trace.py --latest 3 --audit` (tree + findings, exit 1 on FAIL), or `npx langfuse-cli api observations list --trace-id <id> --json`.
 3. **Audit** against the best-practices page fetched **fresh** (`https://langfuse.com/docs/observability/best-practices.md`) and the Step 2 tree. For each observation ask: could someone see exactly what context the agent had when it decided (messages, tool results, recalled facts, thinking)?
    - exactly 1 trace per request, user/session/environment set, the session view replays the conversation;
    - generations have model, usage, cost (TTFT when streaming) and thinking when `output_reasoning > 0`;
@@ -246,7 +246,7 @@ Server v4 **drops** the old `/api/public/traces`, `/sessions`, `/scores`, `/metr
 - `GET /api/public/v2/observations?traceId=<id>&fields=core,basic,time,io,metadata,model,usage,prompt,metrics` (CLI: `observations`, not `traces` or `legacy-*`)
 - `GET /api/public/v3/scores?traceId=<id>&fields=core,details` (without `details` no `comment`) · datasets: `GET /api/public/v2/datasets`
 
-Bundled script: `uv run python <skill-dir>/scripts/lf_trace.py <trace_id> | --latest N | --session S [--latest N] [--audit]` (`--session` = every turn of that conversation, oldest first; without it the 3 newest traces of the project). It prints the tree with latency, model (+ `llm_role`), usage (input/output/reasoning/cache), cost, TTFT, prompt version, statusMessage of failed observations, plus scores; `--audit` adds the best-practice findings. **Use it first when debugging "slow / wrong / expensive"**.
+Bundled script, run from `src/backend`: `uv run python <skill-dir>/scripts/lf_trace.py <trace_id> | --latest N | --session S [--latest N] [--audit]` (`--session` = every turn of that conversation, oldest first; without it the 3 newest traces of the project). It prints the tree with latency, model (+ `llm_role`), usage (input/output/reasoning/cache), cost, TTFT, prompt version, statusMessage of failed observations, plus scores; `--audit` adds the best-practice findings. **Use it first when debugging "slow / wrong / expensive"**.
 
 Real example (a "Hello" message took 55s); the trace showed it immediately: `mcp.list_tools` connector failed for 15s (sequential loading, failures not cached); `reflect` ran for a greeting and retried (+27s); judge glm 503 ⇒ fallback. After fixing (parallel MCP loading + negative cache, skip reflection for simple messages) it dropped to 11s.
 

@@ -1,4 +1,4 @@
-// Content-Security-Policy of the pages — pure, unit-tested in tests/csp.test.ts. Used by src/proxy.ts with a fresh
+// Content-Security-Policy of the pages — pure, unit-tested in tests/upstream.test.ts. Used by src/proxy.ts with a fresh
 // nonce per request (Next.js applies it to its own scripts and styles).
 //  - script-src: only scripts carrying this request's nonce (+ what they load: 'strict-dynamic') — an injected
 //    <script> or inline handler never runs; 'unsafe-eval' in development only (React's dev tooling)

@@ -42,8 +42,10 @@ is imported only by them.
   derived by HKDF-SHA256 from `BFF_SESSION_SECRET`; the cookie name is the AAD (an `ab_oidc` value cannot be replayed
   as a session) and an expiry is sealed inside. Tampered / foreign / expired ⇒ treated as signed out.
 - Attributes: `HttpOnly; Secure; SameSite=Lax; Path=/`, name prefix `__Host-` on https (plain `ab_session` on
-  http://localhost). Max-Age `BFF_SESSION_MAX_AGE_S` (default 8 h) — the absolute session length; access tokens are
-  refreshed inside it.
+  http://localhost). `BFF_SESSION_MAX_AGE_S` (default 8 h) — the absolute session length, counted from the sign-in
+  (`authTime` in the sealed session): a token refresh rewrites the cookie for the time LEFT, never a new full period,
+  so a stolen cookie dies at the same moment as the real one (`sessionSecondsLeft`, tests `session lifetime`). Access
+  tokens are refreshed inside it.
 - Size: split into `…ab_session.0`, `.1`, … of 3 800 chars (max 6); stale chunks are deleted. Too large even then ⇒
   the ID token is dropped (sign-out then works without `id_token_hint`).
 - Stateless: any replica with the same secret reads it. Rotating `BFF_SESSION_SECRET` signs everyone out.

@@ -38,8 +38,8 @@ dev:              ## Run the agent locally on :8080
 test:             ## Unit test offline
 	cd $(BACKEND) && uv run pytest -q
 
-eval:             ## Offline eval on the local dataset (Langfuse Experiment if keys are set): make eval MIN=0.8 CONCURRENCY=1
-	cd $(BACKEND) && uv run python -m evals.run_eval --data $(or $(DATA),evals/datasets/smoke.jsonl) --min-pass-rate $(or $(MIN),0.8) --concurrency $(CONCURRENCY)
+eval:             ## Eval gate: every evals/datasets/*.jsonl must reach MIN (ltm.jsonl with LTM on; live/ by hand): make eval MIN=0.8 DATA=<file>
+	cd $(BACKEND) && uv run python -m evals.run_eval --data $(or $(DATA),evals/datasets) --min-pass-rate $(or $(MIN),0.8) --concurrency $(CONCURRENCY)
 
 eval-push:        ## Sync a JSONL to a Langfuse Dataset (named after the file), then run a gated Dataset Run: make eval-push DATA=evals/datasets/ltm.jsonl MIN=0.8
 	cd $(BACKEND) && uv run python -m evals.run_eval --data $(or $(DATA),evals/datasets/smoke.jsonl) --push --dataset __PROJECT_NAME__-$(basename $(notdir $(or $(DATA),evals/datasets/smoke.jsonl))) --min-pass-rate $(or $(MIN),0.8) --concurrency $(CONCURRENCY)

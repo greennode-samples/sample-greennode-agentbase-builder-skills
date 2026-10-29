@@ -4,6 +4,11 @@ compare across runs, block regressions in CI.
   # local dataset (JSONL); results go to Langfuse if keys are set, otherwise runs locally
   uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl --min-pass-rate 0.8
 
+  # the GATE (make eval, CI): every *.jsonl directly in the directory, each must reach --min-pass-rate. ltm.jsonl
+  # only with LTM_ENABLED=true; sub-directories (e.g. datasets/live/ — items needing deployed MCP servers, a dev
+  # gateway, real accounts) are not included: run them by hand with --data <file>
+  uv run python -m evals.run_eval --data evals/datasets --min-pass-rate 0.8
+
   # sync JSONL to a Langfuse Dataset, then run on the Dataset (Dataset Run, compare in the UI)
   uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl --push --dataset __PROJECT_NAME__-smoke
 
@@ -217,19 +222,47 @@ def _push(client: Any, data: str, dataset: str) -> None:
         )
 
 
+def gated_datasets(directory: str, settings: Any) -> list[str]:
+    """Datasets the gate runs from a directory: every *.jsonl directly in it, ltm.jsonl only with LTM on (its
+    items need the remember / recall tools). Sub-directories are skipped (datasets/live/: deployed services)."""
+    files = sorted(Path(directory).glob("*.jsonl"))
+    return [str(f) for f in files if f.name != "ltm.jsonl" or settings.ltm_enabled]
+
+
 def _run(args: argparse.Namespace) -> int:
     try:
         settings = get_settings()
     except ValueError as e:  # e.g. LLM_API_KEY missing — not a quality regression
         errors = getattr(e, "errors", None)
         raise ConfigError(errors()[0]["msg"] if callable(errors) else str(e)) from e
+    if args.data and Path(args.data).is_dir():
+        # One gate per feature dataset: a dataset added for a new feature gates deploys too (it used to be smoke only)
+        if args.push or args.dataset:
+            raise ConfigError("--push / --dataset take one JSONL file, not a directory")
+        paths = gated_datasets(args.data, settings)
+        if not paths:
+            raise ConfigError(f"no *.jsonl dataset in {args.data}")
+        run_name = args.run_name or default_run_name(settings)
+        codes = []
+        # ONE Langfuse client for every dataset: the SDK caches its client per key, a 2nd one after shutdown drops spans
+        tracing.init_tracing(settings)
+        try:
+            for path in paths:
+                print(f"== {path}")
+                sub = {**vars(args), "data": path, "run_name": f"{run_name}-{Path(path).stem}"}
+                codes.append(_run(argparse.Namespace(**sub, tracing_open=True)))
+        finally:
+            tracing.shutdown_tracing()
+        return max(codes)  # one failing dataset fails the gate; a config error (2) wins
     if not (args.data or args.dataset):
         raise ConfigError("--data <jsonl> or --dataset <Langfuse dataset> is required")
     if args.push and not (args.data and args.dataset):
         raise ConfigError("--push requires --data and --dataset")
     if args.data and not load_jsonl(args.data):  # checked before any Langfuse or LLM call
         raise ConfigError(f"dataset is empty: {args.data}")
-    tracing.init_tracing(settings)
+    own_tracing = not getattr(args, "tracing_open", False)  # False: a directory run owns the client
+    if own_tracing:
+        tracing.init_tracing(settings)
     client = tracing.get_client()
     task = make_task(args.hitl)
     run_name = args.run_name or default_run_name(settings)
@@ -272,7 +305,8 @@ def _run(args: argparse.Namespace) -> int:
                 expected = len(data)
                 result = client.run_experiment(data=data, **common)
         finally:
-            tracing.shutdown_tracing()
+            if own_tracing:
+                tracing.shutdown_tracing()
         print(result.format())
         metrics = {e.name: float(e.value) for e in result.run_evaluations}
         # Gate over the WHOLE dataset: an item without a result (dropped by Langfuse) counts as failed

@@ -1,10 +1,12 @@
+import { NextRequest, NextResponse } from 'next/server';
 import { describe, expect, it } from 'vitest';
 
-import { parseConfig } from '../src/server/config';
+import { type BffConfig, parseConfig } from '../src/server/config';
 import { cookieNames, joinChunks, MAX_CHUNKS, splitChunks, staleChunks } from '../src/server/cookies';
 import { b64urlDecode, b64urlEncode, pkceChallenge, randomToken, seal, timingSafeEqual, unseal } from '../src/server/crypto';
 import { csrfViolation } from '../src/server/csrf';
 import { idTokenClaims, OidcError } from '../src/server/oidc';
+import { sessionSecondsLeft, writeSession } from '../src/server/session';
 
 const SECRET = 'x'.repeat(48);
 const ORIGIN = 'https://chat.example.com';
@@ -105,5 +107,27 @@ describe('ID token claims', () => {
     for (const bad of [{ nonce: 'n2' }, { aud: 'other' }, { iss: 'https://evil' }, { exp: 1 }, { sub: '' }]) {
       expect(() => idTokenClaims(jwt({ ...base, ...bad }), expect_)).toThrow(OidcError);
     }
+  });
+});
+
+describe('session lifetime', () => {
+  const cfg = { secure: true, sessionSecret: SECRET, sessionMaxAgeS: 8 * 3600 } as BffConfig;
+  const now = () => Math.floor(Date.now() / 1000);
+
+  it('is absolute from the sign-in: rewriting it (token refresh) never extends it', async () => {
+    const res = NextResponse.json({});
+    const req = new NextRequest(ORIGIN);
+    await writeSession(res, req, cfg, { sub: 'u', csrf: 'c', authTime: now() - 7 * 3600 });
+    const cookie = res.cookies.get(`${cookieNames(true).session}.0`)!;
+    expect(cookie.maxAge).toBeGreaterThan(3500);
+    expect(cookie.maxAge).toBeLessThanOrEqual(3600);
+    expect(sessionSecondsLeft({ authTime: now() - 7 * 3600 }, cfg)).toBeLessThanOrEqual(3600);
+  });
+
+  it('is cleared once the sign-in is older than BFF_SESSION_MAX_AGE_S, and stamps a new one', async () => {
+    const res = NextResponse.json({});
+    await writeSession(res, new NextRequest(ORIGIN), cfg, { sub: 'u', csrf: 'c', authTime: now() - 9 * 3600 });
+    expect(res.cookies.getAll().every((c) => c.value === '' && c.maxAge === 0)).toBe(true);
+    expect(sessionSecondsLeft({}, cfg)).toBe(8 * 3600); // no authTime yet (first write) ⇒ starts now
   });
 });

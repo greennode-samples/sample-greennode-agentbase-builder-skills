@@ -16,7 +16,7 @@ HITL ≠ Policy: Policy Group (Gateway) **blocks statically** by who/which tool;
 
 ## Configuration
 
-`.env`: `HITL_TOOLS=["hr_create_leave_request","*_delete_*","send_email"]` — globs over **tool names inside the agent**: MCP tool = `<server key in mcp_servers.json>_<tool name>`, local tool = function name. Check the real names in the `tools.collect.output` trace.
+`HITL_TOOLS=["hr_create_leave_request","*_delete_*","send_email"]` in **every** env file: each `src/backend/.env.<env>.example` (deploys), `.env.example` and your local `.env` (`make dev` reads `.env`, created once at scaffold time — `make security-scan` S3 warns when it misses a write tool) — globs over **tool names inside the agent**: MCP tool = `<server key in mcp_servers.json>_<tool name>`, local tool = function name. Check the real names in the `tools.collect.output` trace.
 
 Note the 2 different naming schemes: HITL/eval use the tool name **inside the agent** (`hr_create_leave_request`), while Policy Group uses the action **`<connector>__<tool>`** (`hr__create_leave_request`). Don't mix them up.
 

@@ -125,7 +125,8 @@ jobs:
             echo "gate=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl \
+          # every dataset in evals/datasets/ (ltm.jsonl with LTM on; evals/datasets/live/ is run by hand)
+          uv run python -m evals.run_eval --data evals/datasets \
             --min-pass-rate "$MIN_PASS_RATE" --concurrency 1
           echo "gate=passed" >> "$GITHUB_OUTPUT"
 

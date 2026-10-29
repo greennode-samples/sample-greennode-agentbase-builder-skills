@@ -5,7 +5,7 @@ description: "Standard for BUILDING an MCP server (Python, uv, FastMCP streamabl
 
 # Build an MCP Server with Authentication / OAuth
 
-Verified template (`assets/mcp_server/`, 46 tests — e2e: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
+Verified template (`assets/mcp_server/`, 47 tests — e2e: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
 
 | File | Role |
 |---|---|
@@ -48,7 +48,7 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    ```bash
    cp -R <skill-dir>/assets/mcp_server <dest> && cd <dest>
    sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml settings.py .env.example Makefile   # Linux: sed -i
-   make setup && make test      # uv sync + .env from .env.example · 46 passed
+   make setup && make test      # uv sync + .env from .env.example · 47 passed
    ```
 2. **Write tools** in `server.py` — **read `references/tool-design.md` first**; copy the closest sample, then delete the samples you don't need (and their tests):
    - Shared data from an internal system ⇒ copy `get_product` + `backend.py` (`MCP_BACKEND_URL`, timeout, error mapping).

@@ -29,7 +29,10 @@ export async function GET(req: NextRequest) {
     const tokens = await exchangeCode(cfg, code, tx.verifier);
     if (!tokens.id_token) return fail('login_failed', 'no id_token (is "openid" in BFF_OIDC_SCOPES?)');
     const claims = idTokenClaims(tokens.id_token, { issuer: cfg.oidc.issuer, clientId: cfg.oidc.clientId, nonce: tx.nonce });
-    const session = withTokens({ sub: claims.sub, name: claims.name, csrf: randomToken() }, tokens);
+    const session = withTokens(
+      { sub: claims.sub, name: claims.name, csrf: randomToken(), authTime: Math.floor(Date.now() / 1000) },
+      tokens,
+    );
     const res = redirectHome(cfg);
     clearOidcTx(res, cfg);
     await writeSession(res, req, cfg, session);

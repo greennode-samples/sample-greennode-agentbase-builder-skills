@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
   let created = false;
   if (!s && cfg.authMode === 'none') {
     // local development against a backend with AUTH_MODE=none: one fixed local user (refused in production)
-    s = { sub: 'local-user', name: 'Local user', csrf: randomToken() } satisfies Session;
+    s = { sub: 'local-user', name: 'Local user', csrf: randomToken(), authTime: Math.floor(Date.now() / 1000) } satisfies Session;
     created = true;
   }
   if (!s) return json(200, { authenticated: false, mode: cfg.authMode });

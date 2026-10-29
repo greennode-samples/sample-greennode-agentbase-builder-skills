@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-frontend
-description: "React Native UI standard (Expo, TypeScript) for AI agents on GreenNode AgentBase in src/frontend: OIDC PKCE login (expo-auth-session) + SecureStore, client calling POST /invocations per the contract (session header, JWT), SSE streaming via expo/fetch, human-in-the-loop approval cards, 👍👎 feedback buttons sent to Langfuse. Use when the agent needs a mobile/web chat app, adding a chat screen, connecting a frontend to the agent, handling stream/interrupt on the client. Trigger: UI, frontend, React Native, Expo, mobile app for agent, chat interface, chat screen, app mobile cho agent, giao diện chat, màn hình chat. DO NOT use for the agent backend (use the other agentbase-build-* skills)."
+description: "React Native UI standard (Expo, TypeScript) for AI agents on GreenNode AgentBase in src/frontend: OIDC PKCE login (expo-auth-session) + SecureStore, client calling POST /invocations per the contract (session header, JWT), SSE streaming via expo/fetch, human-in-the-loop approval cards, 👍👎 feedback buttons sent to Langfuse. Use when the agent needs a mobile chat app (iOS / Android), adding a chat screen, connecting a frontend to the agent, handling stream/interrupt on the client. Trigger: UI, frontend, React Native, Expo, mobile app for agent, chat interface, chat screen, app mobile cho agent, giao diện chat, màn hình chat. DO NOT use for a chat page in the browser (use agentbase-build-web) or the agent backend (use the other agentbase-build-* skills)."
 ---
 
 # React Native Frontend (Expo)

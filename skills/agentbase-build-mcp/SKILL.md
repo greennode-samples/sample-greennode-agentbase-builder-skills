@@ -80,7 +80,7 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 {
   "servers": {
     "tavily": {"transport": "streamable_http", "url": "${MCP_GATEWAY_URL}/tavily", "auth": "iam",
-               "envs": ["dev", "staging", "prod"], "allow_tools": ["tavily_search"]},
+               "envs": ["local", "dev", "staging", "prod"], "allow_tools": ["tavily_search"]},
     "github": {"transport": "streamable_http", "url": "${MCP_GATEWAY_URL}/github", "auth": "user_jwt"},
     "kb":     {"transport": "streamable_http", "url": "${MCP_GATEWAY_URL}/kb", "auth": "iam",
                "prefix": false, "allow_tools": ["search_knowledge"]}
@@ -102,7 +102,7 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 `${VAR}` (braces only; `$VAR` stays literal) is expanded **after** parsing the JSON, inside string values only — any value is safe (quotes/backslashes can't break the file or inject keys) and substituted values are not re-expanded. An **unset or empty** variable makes that server a config error: it is skipped with an ERROR log naming the variable (never sent as a literal `${VAR}`/empty key); entries filtered out by `envs`/`enabled: false` are not expanded. `user_jwt` servers need the caller's JWT: in `AUTH_MODE=api_key` (incl. A2A callers using an API key) there is none ⇒ that server is skipped (`tools.collect.output.mcp_errors`); A2A calls authenticated with a user JWT keep it (the verified principal is passed through `/a2a`).
 
 6. **Naming & HITL** — tool name in the agent = `<server>_<tool>` (e.g. `tavily_tavily_search`; the bare `<tool>` with `"prefix": false`); policy action = `<connector>__<tool>` (e.g. `tavily__tavily_search`). Side-effect tools (GitHub create issue, Slack post, M365 send mail…) ⇒ add to `HITL_TOOLS` using the agent-side name (`github_create_issue`) — mandatory on OAuth 3LO connectors (see step 3).
-7. **Verify** — `make dev`, trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
+7. **Verify** — `make dev` (loads only entries whose `envs` include `local`, or have no `envs`; needs `MCP_GATEWAY_URL` in `.env` and your own `iam:<sub>` allowed in the Policy Group), trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
 
 ## Managing connectors after they're connected
 

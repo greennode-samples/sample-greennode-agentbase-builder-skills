@@ -9,7 +9,7 @@ description: "Scaffold a standard AI agent project for GreenNode AgentBase: src/
 
 - **Project name**: `^[a-z][a-z0-9-]{1,38}[a-z0-9]$` — 3–40 chars, lowercase letters/digits/`-`, starts with a letter, does not end with `-` (used for the image name, Langfuse tag, `AGENT_NAME`). Name with spaces/uppercase ⇒ propose a normalized version and confirm.
 - **Target directory** (default: current directory).
-- **Need a UI?** ⇒ add `--with-frontend` (Expo React Native).
+- **Need a UI?** ⇒ `--with-frontend` = mobile app (Expo React Native, `/agentbase-build-frontend`) · `--with-web` = web app in the browser (Next.js with its own BFF: login, cookies, CSRF — `/agentbase-build-web`). "Web chat", "chat page on our site" ⇒ `--with-web`; both flags can be combined.
 
 Present a summary and **wait for confirmation (HARD GATE)** before creating files. If `src/backend` already exists ⇒ stop and ask the user (the script also refuses to overwrite).
 
@@ -18,10 +18,10 @@ Present a summary and **wait for confirmation (HARD GATE)** before creating file
 The script lives in this skill's directory (the one containing SKILL.md):
 
 ```bash
-bash <skill-dir>/scripts/scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]
+bash <skill-dir>/scripts/scaffold.sh <project-name> <target-dir> [--with-frontend] [--with-web] [--no-sync]
 ```
 
-The script merges the `assets/backend/` of these skills: scaffold · llm · memory · tracing · mcp · auth · identity · hitl · eval · a2a (each skill owns its module), adds the root files, replaces `__PROJECT_NAME__`, creates `.env` from `.env.example`, runs `uv sync` and `uv run pytest`. If sync or tests fail, the script prints the recovery command (`cd src/backend && uv sync && uv run pytest`); if it fails while writing files, it says what to remove before re-running.
+The script merges the `assets/backend/` of these skills: scaffold · llm · memory · tracing · mcp · auth · identity · hitl · eval · a2a · security-audit (each skill owns its module), adds the root files, replaces `__PROJECT_NAME__`, creates `.env` from `.env.example`, runs `uv sync` and `uv run pytest`. If sync or tests fail, the script prints the recovery command (`cd src/backend && uv sync && uv run pytest`); if it fails while writing files, it says what to remove before re-running.
 
 **All backend modules are required.** Optional components (long-term memory, reflection, HITL, MCP, A2A) ship code but are **disabled via env** — enable per the decision guide; do not delete their files: the modules import each other (`app/tools` imports `app/a2a`, the graph imports `app/reflection`/`app/hitl`, `app/service` imports `app/tools.mcp`/`app/hitl`…). Only `app/identity.py` (+ `tests/test_identity.py`) may be removed when no tool uses outbound credentials.
 

@@ -6,7 +6,27 @@ Versions of the agentbase-build standard. The version is stamped in `.claude-plu
 `.agentbase-state.json` (`standard_version`, plus `scaffold_version` = the skills' git SHA when available), so a
 review can tell which standard a project was built from.
 
-## Unreleased
+## 0.5.0 — 2026-10-29
+
+Upgrade: run `skills/agentbase-build-scaffold/scripts/upgrade.py` on a 0.4.0 project. Your local `.env` is never
+touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURRENT_REQUESTS`,
+`RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_TENANT_PER_MIN` use their defaults until you set them (compare with
+`.env.example`); check `HITL_TOOLS` there too (`make security-scan` S3). Then
+move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
+every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
+
+Fixes from the production-readiness review below (instructions a coding agent followed into a failure)
+- The eval gate ran `smoke.jsonl` only: `make eval` and CI now run every `evals/datasets/*.jsonl` (each gated, worst
+  exit code; `ltm.jsonl` with LTM on). Items needing deployed services go in `evals/datasets/live/` (run by hand).
+- Web BFF: the "absolute" session length was sliding (each token refresh resealed a full period, an 8 h session
+  lived 24 h with hourly use). The session now carries `authTime` and is resealed for the time left.
+- Docs: the checklist's `os.environ` grep flagged the untouched template as a BLOCKER; the decision guide mapped a
+  BFF to `api_key` (the web BFF forwards the user's token — 401 when followed); the MCP example had no `local` env
+  (`make dev` loaded no gateway tools); the erasure runbook hashed ids without the tenant and missed rotated sessions
+  and MCP server data; `lf_trace.py` needs cwd `src/backend`; `HITL_TOOLS` belongs in every env file; scaffold Step 1
+  offers `--with-web` and the mobile skill no longer claims web; stale counts (backend skills, MCP server tests,
+  marketplace list, reflection latency).
+- Repo: LICENSE (MIT, as the manifests declare), SECURITY.md (private vulnerability reporting), CONTRIBUTING.md.
 
 Production hardening — the tier-1 findings of an independent production-readiness review
 - **An approved action ran twice** (reproduced): a request ending while the approved tool ran left the call dangling;
