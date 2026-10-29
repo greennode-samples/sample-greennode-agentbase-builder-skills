@@ -54,8 +54,22 @@ TEMPLATE_EVAL_IDS = {
 DENIED = ["WebFetch", "WebSearch", "Bash(curl:*)", "Bash(wget:*)", "Bash(grn:*)", "Bash(docker:*)"]
 
 
+def start_project(scenario: dict, workdir: Path) -> Path:
+    """`start_from: scaffold` — the agent starts in an existing standard project (a one-line request, no skill named)."""
+    project = workdir / scenario["name"]
+    script = REPO / "skills/agentbase-build-scaffold/scripts/scaffold.sh"
+    subprocess.run(["bash", str(script), scenario["name"], str(project)], check=True, capture_output=True, timeout=1800)
+    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    return project
+
+
 def run_agent(scenario: dict, workdir: Path, model: str | None, max_turns: int) -> dict:
-    prompt = scenario["prompt"] + "\n\n" + SPEC["common_prompt"].format(name=scenario["name"])
+    existing = scenario.get("start_from") == "scaffold"
+    if existing:
+        workdir = start_project(scenario, workdir)
+    prompt = scenario["prompt"] + "\n\n" + (
+        SPEC["existing_project_prompt"] if existing else SPEC["common_prompt"].format(name=scenario["name"])
+    )
     cmd = [
         "claude", "-p", prompt, "--output-format", "json", "--plugin-dir", str(REPO),
         "--permission-mode", "acceptEdits", "--max-turns", str(max_turns),
@@ -133,7 +147,9 @@ def grade(project: Path | None, scenario: dict) -> list[dict]:
     for target in ("test", "lint", "security-scan"):
         ok, tail = _make(project, target)
         check(f"make {target}", ok, "" if ok else tail)
-    check("agent spec written", (project / "docs/agent-spec.md").exists(), "docs/agent-spec.md")
+    if scenario.get("start_from") != "scaffold":  # a one-line change to an existing project has no spec to write
+        check("agent spec written", (project / "docs/agent-spec.md").exists(), "docs/agent-spec.md")
+    check("project is a standard one", (project / ".agentbase-template.json").exists(), "no .agentbase-template.json: not made by scaffold.sh")
 
     c = scenario["checks"]
     tools = _tools(backend)

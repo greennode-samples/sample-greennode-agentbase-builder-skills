@@ -148,6 +148,8 @@ Console *AgentBase → MCP Connectors* ([browse-connector-catalog](https://docs.
 
 ## Local tool — rules
 
+Adding one end to end (where it goes, `HITL_TOOLS` in every env file, idempotency, tests, eval items, proof): `/agentbase-build` → `references/add-a-tool.md`. Put yours in **`app/tools/custom.py`** (`custom_tools()`; a seed that upgrades never merge into).
+
 - `@tool`, docstring states clearly when to use it; async if I/O; compact output.
 - Never take `user_id` as a parameter. Declare `config: RunnableConfig` (LangChain injects it, the LLM doesn't see it):
   `config["configurable"]["actor_id"]` = authenticated user; `config["configurable"]["user_claims"]` = only the claims in `AUTH_FORWARD_CLAIMS` (e.g. `["email","department"]`). Sample: `whoami` in `local_tools.py`.

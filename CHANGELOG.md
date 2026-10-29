@@ -15,6 +15,25 @@ touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURR
 move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
 every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
 
+Workflows coding agents use most (group D)
+- **Add a tool, end to end:** `agentbase-build/references/add-a-tool.md` — where it lives (local / MCP / A2A /
+  Identity), identity from `config`, idempotency key, `HITL_TOOLS` in every env file, tests (approve, reject, twice,
+  tenant), eval items (`expected_tools`, `forbidden_tools`, injection), proof; run in a generated project (scan FAIL
+  → PASS). New seed **`app/tools/custom.py`** (`custom_tools()`): the one file local tools are added to, so a
+  template upgrade never conflicts with them. Routed from `AGENTS.md`, the MCP skill and the orchestrator.
+- **Self-built MCP server: CI + a deploy path.** Template `.github/workflows/ci.yml` (`uv lock --check`, ruff, tests,
+  image build) and `scripts/smoke_image.sh` (`make docker-smoke`): the image must refuse to start without
+  authentication and answer 401 to a tokenless `POST /mcp` — run locally and by skills CI. `dependabot.yml`. The skill's
+  deploy step now lists the env-file rules, the manual publish with `/agentbase-deploy`, and rollback.
+- **`src/web` can be updated:** `setup_web.sh … --update` (and `.agentbase-web.json`, SHA-256 of each template file
+  written) adds new files, replaces the ones you never edited and writes `<file>.agentbase-new` for the ones you did —
+  so BFF security fixes reach existing apps. Tested in skills CI (`test_web_update.py`).
+- **Evals:** a held-out routing set (`evals/triggers_heldout.jsonl`, 40 fresh cases never used to tune a description,
+  `run_triggers.py --file`) and two end-to-end scenarios: `hr-leave-unprompted` (no skill named) and `add-ticket-tool`
+  (an existing project and a one-line request). Results in `evals/README.md`. Routing fixes the held-out run showed:
+  a `AGENTS.md` row for "slower the longer a conversation runs", Vietnamese measuring phrases in the eval skill, the
+  web-template update in the web skill.
+
 Operations (group B)
 - **`GET /ready`** (readiness; `/health` stays the platform's liveness probe): 200 `ready` / `degraded`, 503 `not_ready` when
   `AUTH_MODE=jwt` and the JWKS cannot be fetched — it re-fetches the JWKS itself, so it recovers without a user request.

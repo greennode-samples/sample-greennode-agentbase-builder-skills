@@ -11,6 +11,7 @@ conflicts are with them.
     python3 evals/run_triggers.py --runs 3 --jobs 4     # 3 runs per case (routing is not deterministic)
     python3 evals/run_triggers.py --only hitl-vi,neg-logs --model sonnet
     python3 evals/run_triggers.py --min 0.9             # exit 1 below 90% (CI / before merging a description change)
+    python3 evals/run_triggers.py --file evals/triggers_heldout.jsonl --runs 2   # the held-out set: see evals/README.md
 
 Uses your Claude Code login and quota: ~1 turn per case per run. Results: evals/results/triggers-<timestamp>.json.
 """
@@ -97,9 +98,15 @@ def main() -> int:
     ap.add_argument("--model")
     ap.add_argument("--only", help="comma-separated case ids")
     ap.add_argument("--min", type=float, default=0.0, help="minimum accuracy (0–1)")
+    ap.add_argument(
+        "--file",
+        type=Path,
+        default=CASES,
+        help="cases file (default triggers.jsonl, the set descriptions are tuned on; triggers_heldout.jsonl is not)",
+    )
     args = ap.parse_args()
 
-    cases = [json.loads(ln) for ln in CASES.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    cases = [json.loads(ln) for ln in args.file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     if args.only:
         wanted = set(args.only.split(","))
         cases = [c for c in cases if c["id"] in wanted]

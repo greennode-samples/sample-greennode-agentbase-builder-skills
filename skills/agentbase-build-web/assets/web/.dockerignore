@@ -6,6 +6,7 @@
 !**/.env.example
 **/*.log
 **/.agentbase-setup-pending
+**/.agentbase-web.json
 tests
 Dockerfile
 .dockerignore

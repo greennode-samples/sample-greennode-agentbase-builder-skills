@@ -35,6 +35,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.config import get_settings
 from app.observability import tracing
+from app.tools.custom import custom_tools
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +231,8 @@ def whoami(config: RunnableConfig) -> str:
 
 
 def get_local_tools() -> list[BaseTool]:
-    tools: list[BaseTool] = [get_current_time]
+    # custom_tools(): app/tools/custom.py — yours
+    tools: list[BaseTool] = [get_current_time, *custom_tools()]
     kb = _knowledge_index(get_settings().knowledge_dir)
     if kb.chunks:  # only enabled when documents exist
         # Tell the LLM the documents' language: keyword search cannot match a query in another language

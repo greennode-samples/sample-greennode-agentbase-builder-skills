@@ -63,6 +63,7 @@ NON_TEMPLATE_PATHS: dict[str, str] = {
     ".greennode.json": "created by the user from .greennode.json.example (git-ignored)",
     "deploy/agent.yaml": "rendered from deploy/agent.yaml.tpl in CI (temp dir, never committed)",
     "deploy/runtime.yaml": "rendered by deploy/render_runtime_spec.py in CI (temp dir, never committed)",
+    "src/web/.agentbase-web.json": "written by setup_web.sh (scripts/sync_template.mjs record) into the generated web app; commit it",
     "src/app": "Expo Router's directory, named in the frontend SKILL only to say this template does not use it",
 }
 NON_TEMPLATE_PATH_PATTERNS: dict[str, str] = {

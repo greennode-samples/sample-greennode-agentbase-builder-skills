@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-web
-description: "Next.js web chat (App Router, TypeScript) for AI agents on GreenNode AgentBase in src/web: BFF route handlers (OIDC code + PKCE, tokens in an encrypted httpOnly cookie, CSRF, IAM for the Runtime), SSE streaming, HITL approval cards, 👍👎 feedback, strict CSP. Trigger: web app, web UI, Next.js, browser chat, giao diện web. DO NOT use for the mobile app (/agentbase-build-frontend) or the backend."
+description: "Next.js web chat (App Router, TypeScript) for AI agents on GreenNode AgentBase in src/web: BFF route handlers (OIDC code + PKCE, tokens in an encrypted httpOnly cookie, CSRF, IAM for the Runtime), SSE streaming, HITL approval cards, 👍👎 feedback, strict CSP. Also for updating the web template files to a newer version of these skills (setup_web.sh --update). Trigger: web app, web UI, Next.js, browser chat, giao diện web. DO NOT use for the mobile app (/agentbase-build-frontend) or the backend."
 ---
 
 # Next.js Web Chat (BFF)
@@ -17,6 +17,7 @@ Same contract and chat behavior as the Expo app; the difference is **where the t
 
 ```bash
 bash <skill-dir>/scripts/setup_web.sh <project-name> <project>/src/web [--no-install] [--force]
+bash <skill-dir>/scripts/setup_web.sh <project-name> <project>/src/web --update     # a newer version of these skills
 ```
 
 Tested with **create-next-app 16.4.3** (next 16.4.3, react 19.3.0, TypeScript 5) and **vitest 4.1.12** — pinned in the
@@ -29,6 +30,8 @@ repo) → overlays `assets/web/` (replaces Next's page, layout and `next.config.
 `.env.example` copied to `.env.local` and un-ignored (`!.env.example`) → `package.json` gets `test` / `typecheck`
 scripts → `npm install` + `vitest`. Existing app: only **missing** template files are added (`--force` overwrites);
 a failed run leaves `.agentbase-setup-pending` and the next run re-applies the template.
+
+**Updating the template files** (BFF security fixes, new components) — `upgrade.py` does not touch `src/web`; `setup_web.sh … --update` does it safely: setup records the SHA-256 of every template file it wrote in `src/web/.agentbase-web.json` (**commit it**); `--update` then adds new files, **replaces the ones you never edited**, and for a file you edited keeps yours and writes the new version to `<file>.agentbase-new` — merge it, delete it, run again (exit 1 while something is left to merge). Dropped template files are listed, never deleted; `package.json`, the lock and your `.env.local` are never touched. An app from before the manifest existed has none: every file that differs is treated as yours. Run `make web-test` afterwards. Test: `.github/scripts/test_web_update.py`.
 
 ## Step 2 — Configure `.env.local`
 

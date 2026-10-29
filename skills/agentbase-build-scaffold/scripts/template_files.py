@@ -40,7 +40,7 @@ STATE = ".agentbase-state.json"
 MANIFEST = ".agentbase-template.json"
 SIDECAR = ".agentbase-new"  # suffix of the new template written next to a file upgrade.py did not merge
 FRONTEND = "src/frontend"
-WEB = "src/web"  # Next.js app (agentbase-build-web): its own setup_web.sh --force, never upgrade.py
+WEB = "src/web"  # Next.js app (agentbase-build-web): its own setup_web.sh --update (hash manifest), never upgrade.py
 USAGE = "Usage: template_files.py record <project-dir> <name> <standard-version> <scaffold-version> <0|1> <file>..."
 
 # Created once, then the developer's. Why each one is not merged:
@@ -54,6 +54,7 @@ SEEDS = {
     "src/backend/evals/datasets/*": "your eval items; template sample rows would change your pass rate",
     "src/backend/mcp_servers.json": "your connectors and URLs; a text merge can leave invalid JSON",
     "src/backend/a2a_agents.json": "your A2A peers; a text merge can leave invalid JSON",
+    "src/backend/app/tools/custom.py": "your local tools: the one file the recipe adds them to",
     ".github/dependabot.yml": "your update schedule, groups and reviewers",
 }
 
@@ -83,7 +84,7 @@ NEVER_TOUCH_DOC = [
     "deploy/agent.yaml, deploy/runtime.yaml (rendered, contain secrets)",
     ".git/, .venv/, node_modules/, caches",
     "src/frontend files created by create-expo (package.json, app.json, tsconfig.json, index.ts, assets/, …)",
-    "src/web/ (Next.js web app: refresh template files with agentbase-build-web's setup_web.sh --force)",
+    "src/web/ (Next.js web app: bring its template files up to date with agentbase-build-web's `setup_web.sh <name> src/web --update`)",
 ]
 
 

@@ -104,6 +104,8 @@ jobs:
         run: |
           bash skills/agentbase-build-scaffold/scripts/scaffold.sh ci-web build/ci-web --with-web --no-sync
           make -C build/ci-web web-setup
+      - name: setup_web.sh --update keeps your edits and updates the rest
+        run: python3 .github/scripts/test_web_update.py
       - name: Type-check, unit tests, production build, known vulnerabilities
         working-directory: build/ci-web
         run: |
@@ -132,6 +134,9 @@ jobs:
           make setup
           uv run ruff check . && uv run ruff format --check .
           make test
+          # the image: builds, refuses to start without authentication, 401 without a token (scripts/smoke_image.sh —
+          # the same script the template's own .github/workflows/ci.yml runs)
+          make docker-build docker-smoke IMAGE=ci-mcp TAG=ci
 
   upgrade:
     runs-on: ubuntu-24.04

@@ -1,0 +1,40 @@
+{"id": "ho-build-support", "prompt": "We need a customer-support bot for our telecom business on the GreenNode agent platform: it should look up order status from our ERP and hand over to a human when it is stuck. Can you build it?", "expect": ["agentbase-build"]}
+{"id": "ho-build-vi", "prompt": "Mình muốn làm một trợ lý ảo trả lời câu hỏi nhân sự cho nhân viên, chạy trên AgentBase. Bắt đầu từ đâu?", "expect": ["agentbase-build"]}
+{"id": "ho-review-vi", "prompt": "Kiểm tra giúp mình dự án agent này đã đạt chuẩn chưa, còn thiếu gì?", "expect": ["agentbase-build"], "in_project": true}
+{"id": "ho-add-tool", "prompt": "Add a tool so the agent can look up an invoice by number and email the customer a copy.", "expect": ["agentbase-build", "agentbase-build-mcp"], "in_project": true}
+{"id": "ho-add-tool-vi", "prompt": "Thêm cho agent khả năng tạo ticket Jira khi người dùng báo lỗi.", "expect": ["agentbase-build", "agentbase-build-mcp"], "in_project": true}
+{"id": "ho-scaffold-lock", "prompt": "uv sync complains that the lock file is out of date after I edited pyproject, and there is a Dependabot pull request open too. What should I do?", "expect": ["agentbase-build-scaffold"], "in_project": true}
+{"id": "ho-upgrade-vi", "prompt": "Project của mình tạo từ bản skills cũ, làm sao cập nhật lên bản mới mà không mất phần code mình đã sửa?", "expect": ["agentbase-build-scaffold"], "in_project": true}
+{"id": "ho-llm-cost", "prompt": "Our agent's answers are fine but too slow and too expensive. I'd like a small model for the easy questions and the big one only for the hard ones.", "expect": ["agentbase-build-llm"], "in_project": true}
+{"id": "ho-llm-502", "prompt": "The agent started answering 502 'LLM configuration error' right after we rotated the model key. How do I fix it?", "expect": ["agentbase-build-llm"], "in_project": true}
+{"id": "ho-memory-forget", "prompt": "A customer asked us to delete everything the agent remembers about them. How do we do that?", "expect": ["agentbase-build-memory", "agentbase-build", "agentbase-build-security-audit"], "in_project": true}
+{"id": "ho-memory-long", "prompt": "Conversations that run for hundreds of turns get slower and slower. Why does that happen?", "expect": ["agentbase-build-memory"], "in_project": true}
+{"id": "ho-tracing-where", "prompt": "I can't tell which step of the agent takes 20 seconds. Where do I look?", "expect": ["agentbase-build-tracing"], "in_project": true}
+{"id": "ho-tracing-vi", "prompt": "Mình muốn xem chi phí token theo từng người dùng trên Langfuse.", "expect": ["agentbase-build-tracing"], "in_project": true}
+{"id": "ho-mcp-denied", "prompt": "The agent says it has no permission to call create_order on our CRM connector, although the connector works fine in the console.", "expect": ["agentbase-build-mcp"], "in_project": true}
+{"id": "ho-mcp-owner", "prompt": "One of our MCP tools takes an owner_id argument and I'm worried the model could pass someone else's id. How do I prevent that?", "expect": ["agentbase-build-mcp", "agentbase-build-auth"], "in_project": true}
+{"id": "ho-mcpserver-wrap", "prompt": "We have an internal inventory REST API. Wrap it as an MCP server our agents can call, with OAuth.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "ho-mcpserver-ship", "prompt": "How do I ship the MCP server I wrote, and how do I know its image refuses to run without authentication?", "expect": ["agentbase-build-mcp-server", "agentbase-build-deploy"]}
+{"id": "ho-a2a-two-teams", "prompt": "Our billing agent and our support agent were built by different teams. Support needs to ask billing about invoices.", "expect": ["agentbase-build-a2a"]}
+{"id": "ho-a2a-approve", "prompt": "Another agent keeps replying 'ok' to our confirmation request and the action never runs.", "expect": ["agentbase-build-a2a", "agentbase-build-hitl"], "in_project": true}
+{"id": "ho-auth-keycloak", "prompt": "How do I let users sign in with our Keycloak and make sure each of them only sees their own conversations?", "expect": ["agentbase-build-auth"]}
+{"id": "ho-auth-companies", "prompt": "We sell this agent to several companies; users of company A must never see anything that belongs to company B.", "expect": ["agentbase-build-auth", "agentbase-build-security-audit"], "in_project": true}
+{"id": "ho-identity-sf", "prompt": "The agent has to call Salesforce on behalf of each user, with the account that user connected.", "expect": ["agentbase-build-identity"]}
+{"id": "ho-identity-vi", "prompt": "Lưu API key của dịch vụ thời tiết ở đâu cho an toàn để tool của agent dùng?", "expect": ["agentbase-build-identity"], "in_project": true}
+{"id": "ho-hitl-twice", "prompt": "A refund was issued twice after the user clicked approve and the connection dropped.", "expect": ["agentbase-build-hitl"], "in_project": true}
+{"id": "ho-hitl-vi", "prompt": "Mình muốn người dùng phải bấm xác nhận trước khi agent gửi email.", "expect": ["agentbase-build-hitl"]}
+{"id": "ho-eval-gate", "prompt": "The CI eval gate blocks the deploy but the pass rate only drops on one dataset. How do I see why?", "expect": ["agentbase-build-eval"], "in_project": true}
+{"id": "ho-eval-vi", "prompt": "Làm sao đo được agent trả lời đúng bao nhiêu phần trăm trước khi đưa lên production?", "expect": ["agentbase-build-eval"]}
+{"id": "ho-fe-mobile", "prompt": "I'd like an iPhone and Android app for chatting with the agent, including the approval cards.", "expect": ["agentbase-build-frontend"]}
+{"id": "ho-web-update", "prompt": "We want the latest security fixes of the web chat template without losing the changes we made.", "expect": ["agentbase-build-web"], "in_project": true}
+{"id": "ho-web-token", "prompt": "Where does the browser keep the user's token in the web chat, and is that safe?", "expect": ["agentbase-build-web"], "in_project": true}
+{"id": "ho-deploy-503", "prompt": "The post-deploy smoke test fails with HTTP 503 on /ready. What does that mean?", "expect": ["agentbase-build-deploy", "agentbase-build-auth"], "in_project": true}
+{"id": "ho-deploy-vi", "prompt": "Mình cần đưa agent lên staging rồi prod, quy trình như thế nào?", "expect": ["agentbase-build-deploy"], "in_project": true}
+{"id": "ho-sec-injection", "prompt": "Before launch our security team wants to know what an attacker could do to this agent through prompt injection.", "expect": ["agentbase-build-security-audit"], "in_project": true}
+{"id": "ho-sec-env", "prompt": "I committed my .env with the LLM key by mistake and pushed it. What now?", "expect": ["agentbase-build-security-audit", "agentbase-build"], "in_project": true}
+{"id": "ho-supply", "prompt": "Is it OK to ignore the Dependabot pull requests for the agent's base image?", "expect": ["agentbase-build-scaffold", "agentbase-build-deploy", "agentbase-build-security-audit"], "in_project": true}
+{"id": "ho-neg-memory", "prompt": "Create a new memory store called prod-memory with 30 days of retention.", "expect": ["agentbase-memory"]}
+{"id": "ho-neg-logs", "prompt": "Show me the last 100 log lines of my deployed runtime.", "expect": ["agentbase-monitor"]}
+{"id": "ho-neg-policy", "prompt": "Write a policy that lets only the finance group call delete_invoice on the gateway.", "expect": ["agentbase-policy"]}
+{"id": "ho-neg-none", "prompt": "Explain the difference between a mutex and a semaphore.", "expect": ["none"]}
+{"id": "ho-neg-refactor", "prompt": "Refactor this function to get rid of the nested loops.", "expect": ["none"], "in_project": true}

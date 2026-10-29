@@ -2,8 +2,12 @@
 # Creates a Next.js web app (App Router, TypeScript, src/ dir) and overlays the standard AgentBase web chat + BFF code.
 # Creating the app always needs network access (create-next-app downloads its template), even with --no-install.
 #   bash setup_web.sh <project-name> <web-dir> [--no-install] [--force]
+#   bash setup_web.sh <project-name> <web-dir> --update    # bring the template files up to date (see below)
 # Existing app (<web-dir>/package.json present): only the template files that are MISSING are added — your
 # src/… files are never overwritten. --force overwrites them with the template (review the diff afterwards).
+# --update (after a newer version of these skills): per template file — new ⇒ added; you never edited it ⇒ replaced by the
+# new template; you edited it ⇒ kept, the new version is written to <file>.agentbase-new to merge. Needs
+# <web-dir>/.agentbase-web.json (written by setup; commit it). Nothing else of the app is touched (package.json, lock).
 #
 # Environment overrides (defaults = the combination this skill is tested with, see SKILL.md):
 #   CREATE_NEXT_APP_VERSION=16.4.3   create-next-app version = the Next.js version it pins in package.json
@@ -16,11 +20,12 @@ VITEST_VERSION="${VITEST_VERSION:-4.1.12}"
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TPL="$SKILL_DIR/assets/web"
-NAME="${1:?project-name}"; DIR="${2:?web-dir}"; INSTALL=1; FORCE=0
+NAME="${1:?project-name}"; DIR="${2:?web-dir}"; INSTALL=1; FORCE=0; UPDATE=0
 for a in "${@:3}"; do
   case "$a" in
     --no-install) INSTALL=0 ;;
     --force) FORCE=1 ;;
+    --update) UPDATE=1 ;;
     *) echo "Unknown flag: $a" >&2; exit 2 ;;
   esac
 done
@@ -33,6 +38,13 @@ fi
   || { echo "CREATE_NEXT_APP_VERSION must be an exact version x.y.z (got '$CREATE_NEXT_APP_VERSION')" >&2; exit 2; }
 [[ "$VITEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || { echo "VITEST_VERSION must be an exact version x.y.z (got '$VITEST_VERSION')" >&2; exit 2; }
+
+if [[ $UPDATE -eq 1 ]]; then
+  [[ -f "$DIR/package.json" ]] || { echo "$DIR has no package.json — nothing to update (run setup without --update first)." >&2; exit 1; }
+  command -v node >/dev/null || { echo "Node.js is required" >&2; exit 1; }
+  [[ -f "$DIR/.agentbase-web.json" ]] || echo "⚠ $DIR/.agentbase-web.json is missing (an app from before --update existed): every template file you may have changed is treated as yours — merge the .agentbase-new files." >&2
+  exec node "$SKILL_DIR/scripts/sync_template.mjs" "$TPL" "$DIR" "$NAME" update
+fi
 
 check_node() {
   command -v node >/dev/null && command -v npx >/dev/null || { echo "Node.js (with npx) is required" >&2; exit 1; }
@@ -114,6 +126,7 @@ node -e '
   j.scripts.typecheck = j.scripts.typecheck || "tsc --noEmit";
   fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
 ' "$DIR/package.json" "$NAME" "$FRESH"
+node "$SKILL_DIR/scripts/sync_template.mjs" "$TPL" "$DIR" "$NAME" record # what the template wrote ⇒ a later --update tells your edits apart
 rm -f "$PENDING" # the template is in place — from now on a re-run treats the app as existing
 
 if [[ $INSTALL -eq 0 ]]; then
