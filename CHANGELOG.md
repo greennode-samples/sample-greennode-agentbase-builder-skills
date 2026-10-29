@@ -16,6 +16,9 @@ move eval items that need deployed services into `src/backend/evals/datasets/liv
 every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
 
 Known problems fixed (after the group A–D release work)
+- **Checked on a real environment** (see README): session rotation on real Memory and on a deployed runtime, the digest / `imagetools` deploy steps against the
+  Container Registry, `/ready` 200 / `degraded` / 503, the CI smoke step, 413 / 429 / 401, JSON logs, `LLM_MAX_TOKENS=8192` on 12 models. Found and fixed: an INFO line per
+  Memory call (`httpx`) made a turn write ~28 log lines — now silenced.
 - **A2A:** the task store is bounded (`A2A_MAX_TASKS` 10 000, `A2A_TASK_TTL_S` 1 h, oldest first — the SDK's store never
   forgot); a target's validated Agent Card is cached `A2A_CARD_TTL_S` (300 s) instead of fetched on every call.
 - **Identity:** the agent-wide OAuth2 token is reused `IDENTITY_M2M_CACHE_S` (60 s, capped by the token's own `exp`);

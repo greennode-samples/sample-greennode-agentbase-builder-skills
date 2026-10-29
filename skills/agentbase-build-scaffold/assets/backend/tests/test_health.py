@@ -217,6 +217,20 @@ def test_log_format_selection(log_format, is_local, json_expected):
         root.handlers[:], root.level = saved
 
 
+def test_per_request_info_lines_of_http_clients_are_silenced():
+    """On a real runtime a chat turn wrote ~28 httpx INFO lines (one per Memory event) next to 1 `request` line."""
+    root = logging.getLogger()
+    saved = root.handlers[:], root.level
+    try:
+        configure_logging(SimpleNamespace(log_format="json", is_local=False, log_level="INFO"))
+        for name in ("httpx", "httpx2", "httpcore"):
+            assert not logging.getLogger(name).isEnabledFor(logging.INFO)
+            assert logging.getLogger(name).isEnabledFor(logging.WARNING)
+        assert logging.getLogger("app.service").isEnabledFor(logging.INFO)
+    finally:
+        root.handlers[:], root.level = saved
+
+
 async def test_every_request_writes_one_structured_line_without_content(fake_llm, caplog):
     fake_llm(AIMessage("The secret answer"))
     with caplog.at_level(logging.INFO, logger="app.service"):

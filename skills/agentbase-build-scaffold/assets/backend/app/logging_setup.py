@@ -23,6 +23,8 @@ from greennode_agentbase import GreenNodeAgentBaseContext
 from app.config import Settings
 from app.observability import tracing
 
+NOISY_LOGGERS = ("httpx", "httpx2", "httpcore")
+
 
 def _ids() -> dict[str, str]:
     """request_id / trace_id of the request being served — never raises (a log call must not break a request)."""
@@ -76,3 +78,9 @@ def configure_logging(settings: Settings) -> None:
     root.handlers[:] = [h for h in root.handlers if type(h) is not logging.StreamHandler]
     root.addHandler(handler)
     root.setLevel(settings.log_level)
+    # An INFO line per HTTP request of these clients: ~28 per chat turn on a real runtime (every Memory event), 25 times
+    # the `request` line that matters. Failures are WARNINGs and still show.
+    for noisy in NOISY_LOGGERS:
+        logging.getLogger(noisy).setLevel(
+            max(logging.getLevelName(settings.log_level), logging.WARNING)
+        )
