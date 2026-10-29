@@ -47,7 +47,7 @@ from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Mount
 
-from app.a2a.decisions import parse_decision
+from app.a2a.decisions import code_matches, confirmation_code, parse_decision
 from app.auth.inbound import Principal, authenticate_async, validate_session_id
 from app.config import Settings, get_settings
 
@@ -117,6 +117,25 @@ NOTHING_PENDING = (
 FAILED_GENERIC = "The agent failed to process the request."
 
 
+def _describe(calls: list[dict]) -> str:
+    return ", ".join(f"{t['name']}({t['args']})" for t in calls)
+
+
+def _code_for(user_id: str, session_id: str, calls: list[dict]) -> str:
+    return confirmation_code(
+        get_settings().signing_key, user_id, session_id, [t["id"] for t in calls]
+    )
+
+
+def _ask_text(lead: str, user_id: str, session_id: str, calls: list[dict]) -> str:
+    """The confirmation request: what would run, and the code that approving it needs (see decisions.py)."""
+    code = _code_for(user_id, session_id, calls)
+    return (
+        f"{lead}: {_describe(calls)}. Reply 'approve {code}' to run it, or 'reject: <reason>' to cancel. "
+        "Only the person this request is for may decide."
+    )
+
+
 class AgentBaseExecutor(AgentExecutor):
     """Wraps the standard graph (service.run_chat / run_resume) as an A2A task."""
 
@@ -169,7 +188,25 @@ class AgentBaseExecutor(AgentExecutor):
                 await updater.failed(updater.new_agent_message([pb.Part(text=NOTHING_PENDING)]))
                 return
             if pending:
-                approve, reason = decision
+                approve, reason, code = decision
+                if approve and not code_matches(code, _code_for(user_id, session_id, pending)):
+                    # A bare / wrong / stale "approve" decides nothing: it is answered with the request again
+                    await updater.requires_input(
+                        updater.new_agent_message(
+                            [
+                                pb.Part(
+                                    text=_ask_text(
+                                        "Approving needs the code of this request — an action is awaiting "
+                                        "confirmation",
+                                        user_id,
+                                        session_id,
+                                        pending,
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                    return
                 decisions = [
                     {
                         "tool_call_id": tc["id"],
@@ -194,13 +231,16 @@ class AgentBaseExecutor(AgentExecutor):
                     user_id=user_id, session_id=session_id
                 )
                 if still_pending:
-                    calls = ", ".join(f"{t['name']}({t['args']})" for t in still_pending)
                     await updater.requires_input(
                         updater.new_agent_message(
                             [
                                 pb.Part(
-                                    text=f"An action is awaiting confirmation: {calls}. "
-                                    "Reply 'approve' or 'reject: <reason>'."
+                                    text=_ask_text(
+                                        "An action is awaiting confirmation",
+                                        user_id,
+                                        session_id,
+                                        still_pending,
+                                    )
                                 )
                             ]
                         )
@@ -218,15 +258,16 @@ class AgentBaseExecutor(AgentExecutor):
             return
 
         if result["status"] == "interrupted":
-            calls = ", ".join(
-                f"{t['name']}({t['args']})" for t in result["interrupt"]["tool_calls"]
-            )
             await updater.requires_input(
                 updater.new_agent_message(
                     [
                         pb.Part(
-                            text=f"Confirmation required before running: {calls}. "
-                            "Reply 'approve' or 'reject: <reason>'."
+                            text=_ask_text(
+                                "Confirmation required before running",
+                                user_id,
+                                session_id,
+                                result["interrupt"]["tool_calls"],
+                            )
                         )
                     ]
                 )

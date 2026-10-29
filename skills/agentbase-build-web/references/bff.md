@@ -28,7 +28,7 @@ is imported only by them.
      `X-GreenNode-AgentBase-Custom-User-Token: Bearer <user access token>`;
    - `BFF_AUTH_MODE=none` (local): `X-GreenNode-AgentBase-User-Id: local-user`, no token.
    In jwt mode no User-Id header is sent — the agent takes the user from `sub`.
-4. Agent **401** ⇒ refresh the user token (and the IAM token) once and retry — 401 is answered before the turn
+4. Agent **401** ⇒ force a NEW user token (and IAM token) — never the one just rejected: an IdP that does not rotate refresh tokens would otherwise hand back the cached result of the refresh made seconds ago — and retry once. 401 is answered before the turn
    runs, so the retry cannot run it twice. Still 401 ⇒ session cookie cleared, 401 passed to the browser (sign in).
 5. The agent's status and body are passed through **unchanged** (409 + `details.interrupt` included); SSE is streamed
    as it arrives: `Cache-Control: no-store, no-transform` (Next.js does not gzip it), `X-Accel-Buffering: no`.

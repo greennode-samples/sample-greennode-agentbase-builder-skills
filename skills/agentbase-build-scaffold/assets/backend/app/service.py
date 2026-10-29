@@ -86,6 +86,7 @@ from app.tools.mcp import reset_policy_denials
 log = logging.getLogger(__name__)
 MAX_MESSAGE_CHARS = 16_000
 MAX_TRACE_ID_CHARS = 128
+MAX_COMMENT_CHARS = 2000  # a user's free-text feedback; it is stored and forwarded to Langfuse
 
 
 class _ClientError(GreenNodeRequestError):
@@ -230,6 +231,9 @@ def _handle_feedback(payload: dict[str, Any], principal: Principal) -> dict:
     valid_trace = isinstance(trace_id, str) and 0 < len(trace_id) <= MAX_TRACE_ID_CHARS
     if not valid_trace or isinstance(score, bool) or score not in (-1, 0, 1):
         raise _error("feedback requires trace_id and score in {-1, 0, 1}")
+    comment = payload.get("comment")
+    if comment is not None and (not isinstance(comment, str) or len(comment) > MAX_COMMENT_CHARS):
+        raise _error(f"`comment` must be a string of at most {MAX_COMMENT_CHARS} chars")
     token = payload.get("feedback_token")
     token = token if isinstance(token, str) else ""
     # bytes: compare_digest on str raises TypeError for non-ASCII input (a 500 instead of a 403)
@@ -240,7 +244,7 @@ def _handle_feedback(payload: dict[str, Any], principal: Principal) -> dict:
     ok = tracing.record_feedback(
         trace_id=trace_id,
         value=float(score),
-        comment=payload.get("comment"),
+        comment=comment,
         user_id=principal.user_id,
     )
     return {"status": "success" if ok else "ignored"}

@@ -146,6 +146,21 @@ def test_mcp_write_tool_from_allow_tools_needs_approval(project):
     assert any(f"{PROBE}_delete_contact" in d for d in env_lines)
 
 
+def test_tenants_with_mcp_servers_ask_for_inject_args(project):
+    cfg = project / "src/backend/mcp_servers.json"
+    data = json.loads(cfg.read_text())
+    data["servers"][f"{PROBE}_t"] = {
+        "transport": "streamable_http",
+        "url": f"${{MCP_GATEWAY_URL}}/{PROBE}_t",
+        "auth": "iam",
+    }
+    cfg.write_text(json.dumps(data))
+    ask = "inject_args"
+    assert not any(ask in d for _, d in _scan(project)["S4"].lines)  # single tenant: nothing to say
+    _set(project, "AUTH_TENANT_CLAIM", "org_id")
+    assert any(s == "MANUAL" and ask in d for s, d in _scan(project)["S4"].lines)
+
+
 def test_unsafe_mcp_entries_fail(project):
     cfg = project / "src/backend/mcp_servers.json"
     data = json.loads(cfg.read_text())

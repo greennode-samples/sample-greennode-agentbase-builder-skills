@@ -122,8 +122,18 @@ export function exchangeCode(cfg: BffConfig, code: string, verifier: string): Pr
 // BFF replicas, use sticky sessions or accept a rare forced re-login.)
 const refreshing = new Map<string, Promise<TokenSet>>();
 
-export function refreshTokens(cfg: BffConfig, refreshToken: string): Promise<TokenSet> {
+/**
+ * `rejectedAccessToken`: the agent answered 401 to this access token. When the shared result of an earlier refresh IS
+ * that token (an IdP that does not rotate refresh tokens hands out the same one), reusing it would retry with the
+ * token just rejected and sign the user out — a new refresh is made instead (still one per rejected token, shared).
+ */
+export async function refreshTokens(cfg: BffConfig, refreshToken: string, rejectedAccessToken?: string): Promise<TokenSet> {
   let p = refreshing.get(refreshToken);
+  if (p && rejectedAccessToken) {
+    const done = await p.catch(() => undefined);
+    if (done?.access_token === rejectedAccessToken && refreshing.get(refreshToken) === p) refreshing.delete(refreshToken);
+    p = refreshing.get(refreshToken); // a parallel request may already have started the new refresh
+  }
   if (!p) {
     p = tokenRequest(cfg, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }));
     refreshing.set(refreshToken, p);

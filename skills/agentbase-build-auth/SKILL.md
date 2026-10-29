@@ -84,6 +84,7 @@ some users (admin, finance…). Single-tenant agents leave all four settings emp
 - Tools read `config["configurable"]["tenant_id"]` / `["roles"]` (never a tool parameter — `make security-scan` S2) and
   must scope their own backend queries by `tenant_id`; the agent's stores are already scoped by the user id.
 - Traces get the tag `tenant:<id>` and the `auth` event shows tenant and roles — filter Langfuse per customer.
+- **MCP tools** that scope by an argument: set it with `inject_args` in `mcp_servers.json` (`/agentbase-build-mcp` *User and tenant identity*) so the model cannot write another tenant's id.
 - `api_key` mode (trusted BFF): the BFF verifies the user and sends the scoped id itself,
   `inbound.user_id_from_subject(sub, iss, tenant)`; the raw `sub` is refused when tenants are on.
 - TOOL_ROLES hides tools; it does not replace HITL (approval of an allowed write) or the Gateway Policy Group (what

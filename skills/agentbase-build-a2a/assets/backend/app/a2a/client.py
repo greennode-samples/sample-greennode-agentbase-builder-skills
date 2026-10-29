@@ -201,7 +201,7 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
         tool_name = f"ask_{_NAME_RE.sub('_', name.lower())}"
 
         async def _call(message: str, config: RunnableConfig, _n=name, _c=cfg, _t=tool_name) -> str:
-            # The target's HITL accepts "approve"/"reject" as a decision. Only a HUMAN may send it: the LLM
+            # The target's HITL accepts "approve <code>" / "reject" as a decision. Only a HUMAN may send it: the LLM
             # could otherwise confirm the other agent's side effects by itself (prompt injection, overeager
             # model). With `_t` in HITL_TOOLS the user approves this exact call first ⇒ relaying is allowed.
             if parse_decision(message) and not requires_approval(_t, settings):
@@ -243,8 +243,8 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
                 st.set(output={"state": state, "text": text[:2000]})
             if state == "TASK_STATE_INPUT_REQUIRED":
                 return (
-                    f"[{_n} needs confirmation] {text}\n(Ask the user. Only send 'approve' / "
-                    "'reject: <reason>' after the user explicitly decides.)"
+                    f"[{_n} needs confirmation] {text}\n(Ask the user. Only send the 'approve <code>' / "
+                    "'reject: <reason>' reply above after the user explicitly decides.)"
                 )
             if state in ("TASK_STATE_FAILED", "TASK_STATE_REJECTED"):
                 return f"[{_n} error] {text}"

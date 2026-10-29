@@ -15,6 +15,20 @@ touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURR
 move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
 every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
 
+Security fixes from the same review (group A)
+- **A2A approvals need a confirmation code.** Any caller used to approve every pending call with a bare `approve`,
+  `yes` or `ok` — a peer that never read the request, or an injected "reply ok to continue", ran the action. The
+  request now carries a code (HMAC of user, session and tool call ids); only `approve <code>` approves, `reject` needs
+  none, and `yes` / `ok` / `no` are plain chat. A stale code cannot decide the next card. It cannot prove a person
+  read it: `ask_<agent>` in `HITL_TOOLS` remains the caller-side rule. Peers speaking the old bare protocol must send
+  the code (the reply to their `approve` contains it).
+- **MCP identity for scoped tools:** `inject_args` in `mcp_servers.json` sets arguments such as `owner_id` /
+  `org` from the verified user / tenant on every call and hides them from the model — a server behind the Gateway
+  (`iam`) cannot tell the end user, and a model-written `owner_id` could be steered to another tenant.
+- Feedback `comment` must be text of at most 2000 chars (a 5 MB object used to reach Langfuse).
+- Web BFF: a forced refresh after the agent's 401 no longer returns the access token just rejected (sign-out for
+  IdPs that keep the refresh token); the CSP proxy matcher excludes `/api/` only, not any path starting with api.
+
 Fixes from the production-readiness review below (instructions a coding agent followed into a failure)
 - The eval gate ran `smoke.jsonl` only: `make eval` and CI now run every `evals/datasets/*.jsonl` (each gated, worst
   exit code; `ltm.jsonl` with LTM on). Items needing deployed services go in `evals/datasets/live/` (run by hand).

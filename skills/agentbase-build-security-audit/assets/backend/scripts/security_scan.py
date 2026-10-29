@@ -418,6 +418,12 @@ def s4_mcp(p: Project, r: Result) -> None:
             "MANUAL",
             "Policy Group allows only the spec's <connector>__<tool> actions per principal — /agentbase-policy",
         )
+        if any(p.setting(env, "AUTH_TENANT_CLAIM") for env in p.env_files):
+            r.add(
+                "MANUAL",
+                "tenants are on: an MCP tool that scopes data by an argument (owner_id, org…) must get it from "
+                '"inject_args" in mcp_servers.json, never from the model — /agentbase-build-mcp',
+            )
 
 
 def s5_secrets_committed(p: Project, r: Result) -> None:

@@ -32,8 +32,8 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
 
 // Feedback on 1 answer (records a user_feedback score on the Langfuse trace)
 {"type": "feedback", "trace_id": "…", "feedback_token": "…", "score": 1, "comment": "spot on"}
-// score ∈ {-1, 0, 1}; trace_id string ≤ 128; feedback_token comes from the response (HMAC of user+trace) — used by
-// another user ⇒ 403
+// score ∈ {-1, 0, 1}; trace_id string ≤ 128; comment: text of at most 2000 chars (else 400); feedback_token comes
+// from the response (HMAC of user+trace) — used by another user ⇒ 403
 ```
 
 **HITL loop**: a `resume` can be answered by **another** `interrupted` (the model asks for the next action — a new `interrupt.id`). Keep handling `interrupt` (show the card, resume with its `id`) until the turn ends with `success`.

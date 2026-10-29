@@ -25,5 +25,6 @@ export async function freshSession(
   const valid = !!s.accessToken && (s.accessTokenExp ?? 0) > Date.now() / 1000 + SKEW_S;
   if (valid && !force) return { session: s, changed: false };
   if (!s.refreshToken) throw new OidcError('invalid_grant', 'access token expired and no refresh token');
-  return { session: withTokens(s, await refreshTokens(cfg, s.refreshToken)), changed: true };
+  const rejected = force ? s.accessToken : undefined; // forced = the agent just refused this access token
+  return { session: withTokens(s, await refreshTokens(cfg, s.refreshToken, rejected)), changed: true };
 }
