@@ -102,8 +102,10 @@ src/frontend/
 ```bash
 make dev        # backend :8080
 make fe-dev     # Expo; open with Expo Go / simulator
-cd src/frontend && npx tsc --noEmit
+make fe-test    # tsc + unit tests (below)
 ```
+
+**Tests.** The platform-neutral logic — the conversation reducer (`chatState.ts`: turns, interrupts, 409 re-sync, session-id rotation), the request / response contract, the SSE parser, link detection — is the same four files as in the web app, with the same four test files (`tests/`, vitest pinned by `setup_frontend.sh`), and skills CI fails when either side differs by one byte: a fix is tested in both apps. Run in the Expo project by `make fe-test` and by the project CI's `mobile` job. **Not covered**: the React Native screens, `expo-auth-session` sign-in and `expo/fetch` streaming — they need a device or simulator; check them by hand (list below). The app is English only (the web app has English and Vietnamese: `/agentbase-build-web`).
 
 Links: `MessageBubble` makes `https://` URLs tappable and opens them in the in-app browser (`WebBrowser.openBrowserAsync`) — only https; trailing punctuation, unbalanced brackets (`[x](https://…)`), backticks and *paired* markdown emphasis are not part of the link, while `…/Foo_(bar)` and a trailing `_` inside the URL are kept. E.g. the `AUTHORIZATION_REQUIRED` consent link from `/agentbase-build-identity`: the user opens it, consents, comes back and sends the request again.
 

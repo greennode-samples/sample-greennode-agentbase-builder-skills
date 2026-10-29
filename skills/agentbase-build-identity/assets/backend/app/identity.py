@@ -22,8 +22,11 @@ Rules:
 
 from __future__ import annotations
 
+import base64
 import functools
+import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any, TypeVar
@@ -145,7 +148,27 @@ def _injecting(fetch: Callable[[], Awaitable[str]], into: str) -> Callable:
     return decorator
 
 
+# (provider, scopes) → (reusable until, token). Agent-wide credentials only: the same for every user, so sharing it
+# across requests leaks nothing; per-user (3LO / delegated) credentials are never cached here.
+_m2m_cache: dict[tuple[str, tuple[str, ...]], tuple[float, str]] = {}
+_EXP_MARGIN_S = 30.0  # a token is not reused in the last seconds of its life
+
+
+def _jwt_exp(token: str) -> float | None:
+    """`exp` of a JWT access token (unverified — only to know how long it may be reused), None when opaque."""
+    try:
+        payload = token.split(".")[1]
+        exp = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))).get("exp")
+        return float(exp) if isinstance(exp, int | float) else None
+    except (IndexError, ValueError):
+        return None
+
+
 async def _m2m_token(provider_name: str, scopes: list[str]) -> str:
+    ttl = get_settings().identity_m2m_cache_s
+    key = (provider_name, tuple(sorted(scopes)))
+    if ttl > 0 and (hit := _m2m_cache.get(key)) and hit[0] > time.monotonic():
+        return hit[1]
     response = await _client().get_m2m_token_async(
         provider_name=provider_name,
         agent_identity_name=_require_agent_identity(),
@@ -153,7 +176,15 @@ async def _m2m_token(provider_name: str, scopes: list[str]) -> str:
     )
     if not response.access_token:
         raise ValueError(f"Identity provider '{provider_name}' returned no access token")
-    return response.access_token
+    token = response.access_token
+    if ttl > 0:
+        exp = _jwt_exp(token)
+        valid_for = ttl if exp is None else min(ttl, exp - time.time() - _EXP_MARGIN_S)
+        if valid_for > 0:
+            _m2m_cache[key] = (time.monotonic() + valid_for, token)
+        else:
+            _m2m_cache.pop(key, None)
+    return token
 
 
 async def _3lo_token(provider_name: str, scopes: list[str]) -> str:

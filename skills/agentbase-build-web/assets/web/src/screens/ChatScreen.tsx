@@ -5,12 +5,15 @@ import React, { useEffect, useRef } from 'react';
 import { useAuth } from '../auth/AuthProvider';
 import { useConversation } from '../chat/ConversationProvider';
 import { ApprovalCard } from '../components/ApprovalCard';
+import { announcement } from '../components/announce';
 import { MessageBubble } from '../components/MessageBubble';
+import { useStrings } from '../lib/LocaleProvider';
 
 export function ChatScreen() {
   const { userName, userId } = useAuth();
   const c = useConversation();
   const { state, busy } = c;
+  const t = useStrings();
   const end = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -23,13 +26,14 @@ export function ChatScreen() {
         <strong className="grow">__PROJECT_NAME__</strong>
         <span className="small muted">{userName ?? userId}</span>
         <button type="button" onClick={c.newConversation}>
-          New
+          {t.newConversation}
         </button>
         <button type="button" onClick={c.signOut}>
-          Sign out
+          {t.signOut}
         </button>
       </header>
-      <main className="messages" aria-live="polite">
+      {/* Not live (an answer changes on every token): the finished answer is announced once, below */}
+      <main className="messages" role="log" aria-live="off" aria-label={t.conversation}>
         {state.messages.map((m) => (
           <MessageBubble key={m.id} message={m} onFeedback={(score) => c.feedback(m, score)} />
         ))}
@@ -44,19 +48,22 @@ export function ChatScreen() {
         )}
         <div ref={end} />
       </main>
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement(state, t)}
+      </div>
       {state.notice && (
         <div className="row notice" role="status">
           <span className="grow">{state.notice.text}</span>
           {state.notice.action === 'retry' ? (
             <button type="button" onClick={c.retry} disabled={busy}>
-              Retry
+              {t.retry}
             </button>
           ) : (
             <button type="button" onClick={c.newConversation}>
-              Start new conversation
+              {t.startNew}
             </button>
           )}
-          <button type="button" aria-label="Dismiss" onClick={c.dismissNotice}>
+          <button type="button" aria-label={t.dismiss} onClick={c.dismissNotice}>
             ✕
           </button>
         </div>
@@ -70,8 +77,8 @@ export function ChatScreen() {
       >
         <textarea
           className="grow"
-          aria-label="Message"
-          placeholder={state.pending ? 'Answer the approval above first' : 'Message'}
+          aria-label={t.message}
+          placeholder={state.pending ? t.answerApprovalFirst : t.message}
           value={c.input}
           rows={2}
           onChange={(e) => c.setInput(e.target.value)}
@@ -84,11 +91,11 @@ export function ChatScreen() {
         />
         {busy ? (
           <button type="button" onClick={c.stop}>
-            Stop
+            {t.stop}
           </button>
         ) : (
           <button type="submit" className="primary" disabled={!c.input.trim() || !!state.pending}>
-            Send
+            {t.send}
           </button>
         )}
       </form>

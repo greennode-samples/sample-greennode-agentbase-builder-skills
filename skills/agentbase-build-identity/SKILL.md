@@ -138,6 +138,10 @@ turn 2: same tool → SDK → platform returns the user's token immediately → 
 | 404 provider | Provider name typo / other identity | `list` providers via `/agentbase-identity` |
 | 3LO redirect error at the IdP | Provider `callbackUrl` not registered in the OAuth app, or `IDENTITY_CALLBACK_URL` not in `allowedReturnUrls` | Register both |
 
+## Reuse of the agent-wide token
+
+`agent_access_token` (client credentials, the same for every user) is reused for `IDENTITY_M2M_CACHE_S` seconds (default 60; capped by the token's own `exp` minus 30 s when it is a JWT) instead of one Identity round trip per tool call. **Per-user credentials (`user_access_token`, `user_api_key`) and static keys are never cached by the helpers**: consent can be given or revoked at any moment. A rotated provider secret is picked up within the TTL; `0` fetches every time.
+
 ## Official docs
 
 - [access-control](https://docs.greennode.ai/ai-stack/agent-base/access-control) — identities, Static / Delegated API Key and OAuth2 providers (Portal, REST, SDK), retrieving credentials at runtime, troubleshooting

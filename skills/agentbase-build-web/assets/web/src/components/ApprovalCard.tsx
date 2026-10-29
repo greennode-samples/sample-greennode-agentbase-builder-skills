@@ -5,6 +5,7 @@
 import React, { useState } from 'react';
 
 import type { Decision, Interrupt, PendingToolCall } from '../api/contract';
+import { useStrings } from '../lib/LocaleProvider';
 import { type Action, parseArgs, pretty, toDecision } from './approval';
 
 type Props = {
@@ -15,9 +16,9 @@ type Props = {
   note?: string | null;
 };
 
-const LABEL: Record<Action, string> = { approve: 'Approve', edit: 'Edit', reject: 'Reject' };
-
 export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
+  const t = useStrings();
+  const label: Record<Action, string> = { approve: t.approve, edit: t.edit, reject: t.reject };
   const [choice, setChoice] = useState<Record<string, Action>>({});
   const [edited, setEdited] = useState<Record<string, string>>({});
   const [reasons, setReasons] = useState<Record<string, string>>({});
@@ -28,8 +29,8 @@ export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
   const disabled = !complete || !!busy;
 
   return (
-    <section className="approval" aria-label="Approval needed">
-      <h2>Your confirmation is needed</h2>
+    <section className="approval" aria-label={t.approvalRegion}>
+      <h2>{t.approvalTitle}</h2>
       {!!interrupt.message && <p className="approval-msg">{interrupt.message}</p>}
       {!!note && <p className="approval-note">{note}</p>}
       {interrupt.tool_calls.map((tc) => {
@@ -38,7 +39,7 @@ export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
           <div key={tc.id} className="approval-call">
             <div className="mono strong">{tc.name}</div>
             {choice[tc.id] !== 'edit' && <pre className="mono small">{pretty(tc.args)}</pre>}
-            <div role="radiogroup" aria-label={`Decision for ${tc.name}`} className="row">
+            <div role="radiogroup" aria-label={t.decisionFor(tc.name)} className="row">
               {(['approve', 'edit', 'reject'] as const).map((a) => (
                 <button
                   key={a}
@@ -49,7 +50,7 @@ export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
                   className={`choice ${choice[tc.id] === a ? `selected ${a}` : ''}`}
                   onClick={() => setChoice((c) => ({ ...c, [tc.id]: a }))}
                 >
-                  {LABEL[a]}
+                  {label[a]}
                 </button>
               ))}
             </div>
@@ -57,7 +58,7 @@ export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
               <>
                 <textarea
                   className={`mono small json ${err ? 'invalid' : ''}`}
-                  aria-label={`Arguments for ${tc.name} (JSON)`}
+                  aria-label={t.argumentsFor(tc.name)}
                   value={editText(tc)}
                   onChange={(e) => setEdited((x) => ({ ...x, [tc.id]: e.target.value }))}
                   spellCheck={false}
@@ -68,8 +69,8 @@ export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
             )}
             {choice[tc.id] === 'reject' && (
               <input
-                aria-label={`Reason for rejecting ${tc.name}`}
-                placeholder="Reason for rejecting (optional)"
+                aria-label={t.reasonFor(tc.name)}
+                placeholder={t.reasonPlaceholder}
                 value={reasons[tc.id] ?? ''}
                 maxLength={1000}
                 onChange={(e) => setReasons((r) => ({ ...r, [tc.id]: e.target.value }))}
@@ -85,7 +86,7 @@ export function ApprovalCard({ interrupt, onSubmit, busy, note }: Props) {
         disabled={disabled}
         onClick={() => onSubmit(interrupt.tool_calls.map((tc) => toDecision(tc, choice[tc.id], edited[tc.id], reasons[tc.id])))}
       >
-        Submit decision
+        {t.submitDecision}
       </button>
     </section>
   );

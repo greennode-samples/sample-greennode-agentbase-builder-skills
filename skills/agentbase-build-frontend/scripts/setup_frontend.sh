@@ -8,12 +8,14 @@
 # Environment overrides (defaults = the combination this skill is tested with, see SKILL.md):
 #   EXPO_SDK=57                 template blank-typescript@sdk-<EXPO_SDK>
 #   CREATE_EXPO_VERSION=5.0.1   create-expo CLI version
+#   VITEST_VERSION=4.1.12       unit test runner for the shared chat logic (devDependency, exact version)
 #   APP_ID=<reverse-domain id>  ios.bundleIdentifier + android.package (default com.example.<name without '-'>)
 set -euo pipefail
 
 TESTED_SDK=57
 EXPO_SDK="${EXPO_SDK:-$TESTED_SDK}"
 CREATE_EXPO_VERSION="${CREATE_EXPO_VERSION:-5.0.1}"
+VITEST_VERSION="${VITEST_VERSION:-4.1.12}"
 INSTALL_PKGS=(expo-auth-session expo-web-browser expo-crypto expo-secure-store expo-constants)
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +38,7 @@ if [[ ! "$APP_ID" =~ ^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)+$ ]]; then
   echo "APP_ID must be a reverse-domain id valid on iOS and Android, e.g. vn.example.myagent (got '$APP_ID')" >&2; exit 2
 fi
 [[ "$EXPO_SDK" =~ ^[0-9]+$ ]] || { echo "EXPO_SDK must be a number (got '$EXPO_SDK')" >&2; exit 2; }
+[[ "$VITEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VITEST_VERSION must be an exact version x.y.z (got '$VITEST_VERSION')" >&2; exit 2; }
 
 check_node() {
   command -v node >/dev/null && command -v npx >/dev/null || { echo "Node.js (with npx) is required" >&2; exit 1; }
@@ -141,13 +144,23 @@ if [[ -f "$DIR/app.json" ]]; then
     echo "⚠ app.json uses a com.example.* app id — put your own reverse-domain id in ios.bundleIdentifier / android.package (or create the app with APP_ID=…) BEFORE the first store build: it cannot change after publishing." >&2
   fi
 fi
+# package.json: test / typecheck scripts (values already set in an existing app are kept)
+node -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  const j = JSON.parse(fs.readFileSync(p, "utf8"));
+  j.scripts = j.scripts || {};
+  j.scripts.test = j.scripts.test || "vitest run";
+  j.scripts.typecheck = j.scripts.typecheck || "tsc --noEmit";
+  fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+' "$DIR/package.json"
 rm -f "$PENDING" # the template is in place — from now on a re-run treats the app as existing
 
 if [[ $INSTALL -eq 0 ]]; then
   echo "⚠ --no-install: required packages are NOT installed yet. Run when online: make fe-setup" >&2
-  echo "  (= cd $DIR && npm install && npx expo install ${INSTALL_PKGS[*]})" >&2
+  echo "  (= cd $DIR && npm install && npx expo install ${INSTALL_PKGS[*]} && npm install --save-dev --save-exact vitest@$VITEST_VERSION)" >&2
 else
   check_node
-  (cd "$DIR" && npm install && npx expo install "${INSTALL_PKGS[@]}")
+  (cd "$DIR" && npm install && npx expo install "${INSTALL_PKGS[@]}" && npm install --save-dev --save-exact "vitest@$VITEST_VERSION")
 fi
 echo "✔ Frontend at $DIR (Expo SDK $EXPO_SDK) — edit $DIR/.env then 'npx expo start'"

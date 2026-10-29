@@ -96,6 +96,7 @@ def api(monkeypatch, tmp_path):
     fake = FakeIdentityAPI()
     monkeypatch.setattr(sdk_auth, "IdentityClient", fake.client)
     monkeypatch.setattr(identity, "_shared_client", None)  # rebuilt from the fake on first use
+    identity._m2m_cache.clear()
     # Local dev as the skill prescribes: IAM pair + agent identity live in .greennode.json (not env vars)
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".greennode.json").write_text(
@@ -280,8 +281,12 @@ async def test_asserted_user_needs_the_explicit_opt_in(api, monkeypatch):
     assert await _events("fri") == "fri:tok-alice"
 
 
-async def test_one_identity_client_for_every_call(api):
+async def test_one_identity_client_for_every_call(api, monkeypatch):
     """requires_access_token built 2 new IdentityClients (2 IAM token requests) per call; the helpers share one."""
+    monkeypatch.setenv(
+        "IDENTITY_M2M_CACHE_S", "0"
+    )  # this test counts every call to the Identity API
+    get_settings.cache_clear()
     api.consented.add(("google", "alice"))
     as_user("alice")
     for _ in range(3):
@@ -291,3 +296,67 @@ async def test_one_identity_client_for_every_call(api):
     assert api.clients == 1
     # OAuth2 helpers call the Identity API directly — no workload-token round trip per call
     assert [m for m, _, _ in api.calls if m != "workload"] == ["m2m", "3lo", "static"] * 3
+
+
+# ----------------------------------------------------------------------------- the agent-wide token is reused
+async def test_m2m_token_is_reused_within_the_ttl_and_never_shared_with_per_user_credentials(
+    api, monkeypatch
+):
+    assert [await _crm() for _ in range(3)] == ["m2m-crm"] * 3
+    assert [m for m, _, _ in api.calls if m == "m2m"] == ["m2m"]  # one fetch, three uses
+    api.consented.add(("google", "alice"))
+    as_user("alice")
+    for _ in range(2):
+        assert await _events("sat") == "sat:tok-alice"
+    assert [m for m, _, _ in api.calls if m == "3lo"] == [
+        "3lo",
+        "3lo",
+    ]  # per-user: asked every time
+    monkeypatch.setenv("IDENTITY_M2M_CACHE_S", "0")
+    get_settings.cache_clear()
+    await _crm()
+    await _crm()
+    assert [m for m, _, _ in api.calls if m == "m2m"] == ["m2m"] * 3  # 0 = fetch every time
+
+
+async def test_m2m_token_is_refetched_after_the_ttl_and_not_kept_past_its_own_exp(api, monkeypatch):
+    import base64
+    import json
+
+    clock = [100.0]
+    monkeypatch.setattr(identity.time, "monotonic", lambda: clock[0])
+    await _crm()
+    clock[0] += 61  # past the 60 s default
+    await _crm()
+    assert [m for m, _, _ in api.calls if m == "m2m"] == ["m2m", "m2m"]
+
+    def jwt_expiring_in(seconds: float) -> str:
+        body = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + seconds}).encode()).rstrip(
+            b"="
+        )
+        return f"h.{body.decode()}.s"
+
+    assert identity._jwt_exp("opaque-token") is None and identity._jwt_exp("a.b.c") is None
+    assert abs(identity._jwt_exp(jwt_expiring_in(100)) - (time.time() + 100)) < 2
+    identity._m2m_cache.clear()
+    api.calls.clear()
+    short = jwt_expiring_in(20)  # inside the 30 s margin: never reused
+    original = api.client
+
+    def client(*a, **k):
+        c = original(*a, **k)
+
+        async def m2m(provider_name, agent_identity_name, request):
+            api.calls.append(("m2m", provider_name, None))
+            return SimpleNamespace(access_token=short)
+
+        c.get_m2m_token_async = m2m
+        return c
+
+    monkeypatch.setattr(identity, "_shared_client", None)
+    import greennode_agentbase.identity.auth as sdk_auth
+
+    monkeypatch.setattr(sdk_auth, "IdentityClient", client)
+    await identity._m2m_token("crm", ["read"])
+    await identity._m2m_token("crm", ["read"])
+    assert [m for m, _, _ in api.calls if m == "m2m"] == ["m2m", "m2m"]

@@ -41,6 +41,19 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 13. `runtime.sh --env-file` (and `docker run --env-file`) read `KEY=VALUE` literally — quotes, inline comments and `export` end up in keys/values, unlike python-dotenv ⇒ `make check-env` (`deploy/env_file.py`).
 14. The platform docs roll back by pointing the DEFAULT endpoint at an older version; the platform skill reports 400 for DEFAULT ⇒ roll back with an update to the previous image + config.
 
+## Known limits of the templates (found by review; why they are not fixed here)
+
+| Limit | Why it stays | What to do |
+|---|---|---|
+| Rate limit / concurrency / quota are **per replica** (`app/limits.py`); no global per-tenant quota, no spend cap | A global counter needs shared state (a cache or database) the template does not own; one more required service for every agent | Strict or paid-tier quotas: an API gateway in front of the runtime. Spend per user and tenant is already in Langfuse (user id, tag `tenant:<id>`). LLM key Rate Limit on the platform (S10 MANUAL) |
+| The **CI deploy refuses a runtime with VPC, IP Access Control or Inbound Auth** (so the BFF's `iam` mode cannot be deployed from CI) | `grn agentbase runtime update` (v1.13.0) has no `networkConfig` / `allowedCidrs` / `inboundAuth` in its body: an update would silently reset them to Public / none | Update those runtimes outside CI (`/agentbase-deploy`, Console), then check the new version kept the settings. Revisit when `grn` can carry them |
+| Short-term memory writes **~23 events per turn** (the bridge writes every graph step) | Behavior of `greennode-agent-bridge` / the Memory API, not of the template | Mitigated: session rotation (`SESSION_MAX_TURNS`) bounds the reads, `EXECUTOR_THREADS` keeps authentication from queuing behind them. A fix is a bridge change |
+| MCP servers with `auth: user_jwt` **list their tools on every request** | The adapter binds each tool to the connection that listed it, including the user's token: a cached tool would send an old, possibly expired JWT | Use `iam` (cached tool list, `inject_args` for identity) unless the server must see the user's own token |
+| The graph is compiled per request (~4 ms of CPU) | The tools differ per request (roles, `user_jwt`, MCP errors); caching a compiled graph risks sending a user another user's tool set. Negligible next to one LLM call | — |
+| No SBOM or build provenance attached to the image | Whether the AgentBase Container Registry accepts attestation manifests is not verified; a push that fails at release time is worse | Trivy scans the new image before the push (fixable CRITICAL); Dependabot moves the digests. Add `--sbom` / `--provenance` once the registry is confirmed to accept them |
+| npm lockfiles of `src/web` and `src/frontend` are not shipped | The apps are created by `create-next-app` / `create-expo`; the lock appears at the first `npm install` | Commit it; CI uses `npm ci` and fails without it |
+| The React Native screens, `expo-auth-session` sign-in and streaming are not tested automatically | They need a device or simulator | The shared chat logic is tested in both apps (`make fe-test`); check the screens by hand (`/agentbase-build-frontend` → Run & verify) |
+
 ## Open items (need the user's environment/decisions)
 
 - Grant a Policy Group to the runtime's principal so the agent can use real MCP tools.
