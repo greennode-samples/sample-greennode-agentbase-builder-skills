@@ -1,5 +1,7 @@
 # Security & guardrails for AgentBase agents
 
+This file describes the template's defenses. To check that a project still has them — quick pre-deploy scan or a full source audit with Cloudflare's `security-audit` skill — use `/agentbase-build-security-audit`.
+
 ## Attack surface and corresponding defenses
 
 | Risk | Defense in the template |
@@ -62,12 +64,13 @@ Afterwards review the provider's usage / audit logs over the exposure window.
 
 The Memory API deletes **one event / one record per call** (no delete-by-actor), so erasure is an enumeration. Run it per environment (each has its own memory store) with `/agentbase-memory` (cwd `src/backend`), or wrap it in an admin script/endpoint if the product promises this right. Log who/when, never the data.
 
-1. **Resolve the ids.** Memory `actorId` = the agent's `user_id`: the JWT `sub`, or `u-<sha256(iss|sub)[:40]>` when the `sub` is not path-safe (`app/auth/inbound.py::user_id_from_subject`). Langfuse user id = `tracing.trace_user_id(user_id)` (email-shaped ids are hashed when `TRACE_MASK_PII`).
-2. **Short-term memory (events, incl. HITL state):** `GET /memories/{id}/actors/{actorId}/sessions` (all pages) → for each session `GET …/sessions/{sessionId}/events` (all pages) → `DELETE …/sessions/{sessionId}/events/{eventId}` for each event.
+1. **Resolve the ids** — compute them, never hand-hash: `uv run python -c "from app.auth.inbound import user_id_from_subject as f; print(f('<sub>', '<iss>', '<tenant or empty>' or None))"` (cwd `src/backend`). Memory `actorId` = the agent's `user_id`: without tenants the JWT `sub`, or `u-<sha256(iss|sub)[:40]>` when the `sub` is not path-safe; **with `AUTH_TENANT_CLAIM` set it is always `u-<sha256(json([iss, tenant, sub]))[:40]>`, one id per tenant** — a person in two tenants is two users: erase each tenant the request covers. Langfuse user id = `tracing.trace_user_id(user_id)` (email-shaped ids are hashed when `TRACE_MASK_PII`).
+2. **Short-term memory (events, incl. HITL state):** `GET /memories/{id}/actors/{actorId}/sessions` (all pages — a long conversation spans several sessions, `SESSION_MAX_TURNS` rotation) → for each session `GET …/sessions/{sessionId}/events` (all pages) → `DELETE …/sessions/{sessionId}/events/{eventId}` for each event.
 3. **Long-term records:** for **every** strategy of the store (`GET /memories/{id}/long-term-memory-strategies`, not only `MEMORY_STRATEGY_ID`): browse `GET /memories/{id}/memory-records?namespace=/strategies/{strategyId}/actors/{actorId}` (all pages) → `DELETE /memories/{id}/memory-records/{recordId}` each. Re-run after a few minutes: automatic extraction from events deleted in step 2 may still have been in flight.
 4. **Langfuse:** filter traces by that user id (UI or public API), delete them, plus scores and dataset items copied from them (`make eval-push` datasets).
 5. **A2A tasks:** `InMemoryTaskStore` loses them on restart; with a `DatabaseTaskStore`, delete the user's rows.
-6. **Outbound credentials:** per-user OAuth tokens / delegated keys held by AgentBase Identity for this user — remove them with `/agentbase-identity` if the product stores any.
-7. **Verify:** sessions and records for the actor list empty; a `recall_memory` as that user returns nothing.
+6. **Self-built MCP servers** (`/agentbase-build-mcp-server`): per-user data in their store (`store.py`, keyed by the caller's user id) — delete the user's rows there.
+7. **Outbound credentials:** per-user OAuth tokens / delegated keys held by AgentBase Identity for this user — remove them with `/agentbase-identity` if the product stores any.
+8. **Verify:** sessions and records for the actor list empty; a `recall_memory` as that user returns nothing.
 
 Retention: set `eventExpiryDuration` on the memory store (Spec §6) so conversation events expire on their own; long-term records are separate resources — don't assume they expire with the events: plan step 3 (or a periodic cleanup) for them.

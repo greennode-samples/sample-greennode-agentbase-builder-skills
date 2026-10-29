@@ -6,7 +6,7 @@ URL ?= http://localhost:$(or $(PORT),8080)/mcp
 # A variable given on the make command line only (NAME, LIST… may also exist in the environment, e.g. WSL sets NAME)
 cli = $(if $(filter command line,$(origin $(1))),$($(1)))
 
-.PHONY: setup set-secret dev test lint fmt lock tools call inspector docker-build docker-run
+.PHONY: setup set-secret dev test lint fmt lock tools call inspector docker-build docker-run docker-smoke
 
 setup:            ## Install deps and create .env (local, MCP_AUTH_MODE=none) if missing
 	uv sync
@@ -42,6 +42,9 @@ inspector:        ## Interactive UI — connect with Streamable HTTP to $(URL)
 
 docker-build:     ## Build a linux/amd64 image for AgentBase Runtime
 	docker build --platform linux/amd64 -t $(IMAGE):$(TAG) .
+
+docker-smoke:     ## Check the built image: refuses to start without auth, 401 without a token (needs Docker)
+	bash scripts/smoke_image.sh $(IMAGE):$(TAG)
 
 docker-run:       ## Run the image locally with .env, published on this machine's loopback only
 	docker run --rm -p 127.0.0.1:$(or $(PORT),8080):8080 --env-file .env -e MCP_HOST=0.0.0.0 -e MCP_DB_PATH=/tmp/mcp.db $(IMAGE):$(TAG)

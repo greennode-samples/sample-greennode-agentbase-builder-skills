@@ -318,6 +318,12 @@ def _mask_status(message: Any) -> str | None:
     return None if message is None else _mask_text(str(message))
 
 
+def mask_text(text: str) -> str:
+    """The masking the traces get (secrets, bearer tokens, URL credentials, emails, VN phone / ID numbers) for any
+    other text that leaves the process — the JSON log lines (app/logging_setup.py)."""
+    return _mask_text(text)
+
+
 def _mask_otel_spans(*, params: Any) -> Any:
     """Export-stage hook (Langfuse(mask_otel_spans=…)): mask status_message on EVERY span, including the ones
     the LangChain CallbackHandler sets from LLM/tool/chain errors. Must never raise (⇒ whole batch dropped)."""

@@ -279,6 +279,7 @@ class _Seen(list):
     def __init__(self) -> None:
         super().__init__()
         self.auth: list[tuple[str, str | None]] = []
+        self.calls: list[dict] = []  # params of every tools/call
 
 
 @contextlib.contextmanager
@@ -289,6 +290,7 @@ def _fake_gateway(
     call_headers: dict[str, str] | None = None,
     tools: tuple[str, ...] = ("tavily_search", "tavily_extract"),
     call_result=None,  # (tool name) -> MCP CallToolResult dict, e.g. {"content": [...], "isError": True}
+    schema: dict | None = None,  # inputSchema of every tool
 ):
     methods = _Seen()
 
@@ -310,11 +312,12 @@ def _fake_gateway(
         elif method == "tools/list":
             if list_status != 200:
                 return JSONResponse({"message": "upstream failed"}, status_code=list_status)
-            schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+            input_schema = schema or {"type": "object", "properties": {"query": {"type": "string"}}}
             result = {
-                "tools": [{"name": n, "description": n, "inputSchema": schema} for n in tools]
+                "tools": [{"name": n, "description": n, "inputSchema": input_schema} for n in tools]
             }
         elif method == "tools/call":
+            methods.calls.append(msg["params"])
             if call_status != 200:
                 body = {"message": "No policy allows this request"}
                 return JSONResponse(body, status_code=call_status, headers=call_headers)
@@ -758,3 +761,81 @@ async def test_log_iam_principal_never_fails_startup(monkeypatch, tmp_path, capl
     monkeypatch.setattr(mcp_mod, "_iam_auth", mcp_mod.IAMBearerAuth())
     await mcp_mod.log_iam_principal(settings)
     assert "no IAM credentials are configured" in caplog.text
+
+
+# --------------------------------------------------------------------------- inject_args: identity the model cannot set
+_OWNER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string"},
+        "owner_id": {"type": "string"},
+        "org": {"type": "string"},
+    },
+    "required": ["query", "owner_id"],
+}
+
+
+async def test_inject_args_are_set_from_the_verified_caller_and_hidden_from_the_model(
+    monkeypatch, tmp_path
+):
+    import app.tools.mcp as mcp_mod
+    from app.auth.inbound import Principal
+
+    with _fake_gateway(tools=("crm_find",), schema=_OWNER_SCHEMA) as (base, seen):
+        servers = {
+            "crm": {
+                "url": f"{base}/crm",
+                "auth": "none",
+                "inject_args": {"owner_id": "user_id", "org": "tenant_id"},
+            }
+        }
+        settings = _use_config(monkeypatch, tmp_path, servers)
+        alice = Principal(user_id="u-alice", tenant_id="acme")
+        [tool] = await mcp_mod.get_mcp_tools(settings, alice)
+        schema = tool.tool_call_schema  # what the model sees
+        assert set(schema["properties"]) == {"query"} and schema["required"] == ["query"]
+        # the model tries to act for someone else: its values are overwritten, not honored
+        await tool.ainvoke({"query": "acme deals", "owner_id": "u-bob", "org": "globex"})
+        assert seen.calls[-1]["arguments"] == {
+            "query": "acme deals",
+            "owner_id": "u-alice",
+            "org": "acme",
+        }
+        # the cached tool list is shared: another caller gets their own values, not alice's
+        [tool_b] = await mcp_mod.get_mcp_tools(
+            settings, Principal(user_id="u-bob", tenant_id="globex")
+        )
+        await tool_b.ainvoke({"query": "x"})
+        assert seen.calls[-1]["arguments"] == {"query": "x", "owner_id": "u-bob", "org": "globex"}
+        assert mcp_mod._static_tools["crm"][1][0].args_schema["properties"].keys() >= {"owner_id"}
+
+
+async def test_inject_args_fail_closed_without_the_value(monkeypatch, tmp_path):
+    import app.tools.mcp as mcp_mod
+    from app.auth.inbound import Principal
+
+    with _fake_gateway(tools=("crm_find",), schema=_OWNER_SCHEMA) as (base, seen):
+        servers = {
+            "crm": {"url": f"{base}/crm", "auth": "none", "inject_args": {"org": "tenant_id"}}
+        }
+        settings = _use_config(monkeypatch, tmp_path, servers)
+        [tool] = await mcp_mod.get_mcp_tools(
+            settings, Principal(user_id="u-alice")
+        )  # no tenant claim
+        out = await tool.ainvoke({"query": "x", "owner_id": "u-alice", "org": "globex"})
+        assert "needs the caller's tenant_id" in str(out)
+        assert seen.calls == []  # nothing was sent, in particular not the model's "globex"
+
+
+def test_inject_args_must_name_a_verified_source(monkeypatch, tmp_path, caplog):
+    from app.tools.mcp import mcp_config_error
+
+    base = {"url": "https://x.example/crm", "auth": "none"}
+    for bad in ({"owner_id": "email"}, ["owner_id"], {"owner_id": ""}, {"owner_id": None}):
+        assert "inject_args" in mcp_config_error({**base, "inject_args": bad})
+    assert mcp_config_error({**base, "inject_args": {"a": "user_id", "b": "tenant_id"}}) is None
+    servers = {"crm": {**base, "inject_args": {"owner_id": "email"}}}
+    assert "crm" not in _load(
+        monkeypatch, tmp_path, servers
+    )  # an invalid entry is skipped, never half-applied
+    assert "inject_args" in caplog.text

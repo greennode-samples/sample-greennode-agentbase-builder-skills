@@ -16,11 +16,15 @@ Headers:
 
 Response non-stream:
   {"status": "success",     "response", "tools_used", "session_id", "trace_id", "feedback_token"}
+  `session_id` may differ from the one sent: a session past SESSION_MAX_TURNS is rotated (summary + recent messages
+  carried over) — the client MUST use the returned id from then on (also in `interrupt` / `done` events).
   {"status": "interrupted", "interrupt": {"id","type","tool_calls","message"}, "session_id", "trace_id",
    "feedback_token"}
   A resume may be answered with ANOTHER `interrupted` (new interrupt id) — handle `interrupt` until `success`.
 Errors: HTTP status + {"error", "error_type", "details"}. 409 while an approval is pending (chat, or a resume
   whose decisions/interrupt_id belong to an earlier card): details.interrupt = the pending approval ⇒ show it.
+  409 also when another request of the session is still running past REQUEST_TIMEOUT_S. 429 = rate limit
+  (details.retry_after_s), 413 = body too large, 503 = overloaded (Retry-After) — app/limits.py.
 Response stream (SSE, one `data: {...}` per line):
   token | tool_start | tool_end | reset {reason: self_eval_retry | llm_fallback} (clear the shown text) |
   status {phase: thinking | tool | checking, label, tools?} (progress line until the next token; ignore unknown
@@ -37,6 +41,7 @@ import hmac
 import logging
 import re
 import time
+import uuid
 import weakref
 from collections.abc import AsyncIterator
 from typing import Any
@@ -48,6 +53,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
+from app import health
 from app.auth.inbound import (
     Principal,
     authenticate_async,
@@ -63,10 +69,13 @@ from app.hitl import (
     interrupt_payload,
     is_placeholder_tool_message,
     is_rejected_tool_message,
+    outcome_unknown_messages,
     pending_approval,
     stale_decision_ids,
+    unfinished_tool_calls,
     validate_decisions,
 )
+from app.limits import rate_limit_wait
 from app.llm import TIERS, fallbacks_for, model_for
 from app.memory.short_term import get_checkpointer, thread_config
 from app.observability import tracing
@@ -78,6 +87,7 @@ from app.tools.mcp import reset_policy_denials
 log = logging.getLogger(__name__)
 MAX_MESSAGE_CHARS = 16_000
 MAX_TRACE_ID_CHARS = 128
+MAX_COMMENT_CHARS = 2000  # a user's free-text feedback; it is stored and forwarded to Langfuse
 
 
 class _ClientError(GreenNodeRequestError):
@@ -107,6 +117,11 @@ async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
     if not context.session_id:
         raise _error("Header X-GreenNode-AgentBase-Session-Id is required")
     validate_session_id(context.session_id)  # prevents path traversal into another user's session
+    # Per VERIFIED user / tenant (app/limits.py): one caller can't spend the account's shared LLM / Memory quota
+    if wait := rate_limit_wait(principal.user_id, principal.tenant_id, get_settings()):
+        raise _error(
+            f"Too many requests — try again in {wait}s", 429, details={"retry_after_s": wait}
+        )
 
     if kind == "chat":
         raw = payload.get("message")
@@ -137,6 +152,7 @@ async def handle(payload: dict[str, Any], context: RequestContext) -> Any:
         graph_input,
         trace_input,
         interrupt_id=payload.get("interrupt_id"),
+        rotate=True,
     )
     if payload.get("stream"):
         return run.stream()
@@ -216,6 +232,9 @@ def _handle_feedback(payload: dict[str, Any], principal: Principal) -> dict:
     valid_trace = isinstance(trace_id, str) and 0 < len(trace_id) <= MAX_TRACE_ID_CHARS
     if not valid_trace or isinstance(score, bool) or score not in (-1, 0, 1):
         raise _error("feedback requires trace_id and score in {-1, 0, 1}")
+    comment = payload.get("comment")
+    if comment is not None and (not isinstance(comment, str) or len(comment) > MAX_COMMENT_CHARS):
+        raise _error(f"`comment` must be a string of at most {MAX_COMMENT_CHARS} chars")
     token = payload.get("feedback_token")
     token = token if isinstance(token, str) else ""
     # bytes: compare_digest on str raises TypeError for non-ASCII input (a 500 instead of a 403)
@@ -226,7 +245,7 @@ def _handle_feedback(payload: dict[str, Any], principal: Principal) -> dict:
     ok = tracing.record_feedback(
         trace_id=trace_id,
         value=float(score),
-        comment=payload.get("comment"),
+        comment=comment,
         user_id=principal.user_id,
     )
     return {"status": "success" if ok else "ignored"}
@@ -254,6 +273,8 @@ def _trace_auth(principal: Principal) -> None:
         "auth",
         output={
             "user_id": principal.user_id,
+            "tenant_id": principal.tenant_id,
+            "roles": sorted(principal.roles),
             "mode": get_settings().auth_mode,
             "iss": claims.get("iss"),
             "aud": claims.get("aud"),
@@ -288,7 +309,8 @@ def _tools_used(messages: list) -> list[str]:
 
 
 # A (user, session) runs only 1 request at a time within the process: blocks double-tap resume
-# (approved tool running twice) and 2 parallel chats overwriting the checkpoint. Across replicas: see interrupt_id.
+# (approved tool running twice) and 2 parallel chats overwriting the checkpoint. Across replicas: see interrupt_id and
+# hitl.idempotency_key.
 _SESSION_LOCKS: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
@@ -303,6 +325,36 @@ def _session_lock(user_id: str, session_id: str) -> asyncio.Lock:
     return lock
 
 
+async def _acquire(lock: asyncio.Lock, wait_s: float) -> bool:
+    """Wait at most `wait_s` for the session lock (the wait used to be unbounded: retries of a slow turn queued up
+    forever). Never leaves the lock held when giving up or when the caller is cancelled."""
+    waiter = asyncio.ensure_future(lock.acquire())
+    try:
+        done, _ = await asyncio.wait({waiter}, timeout=wait_s)
+    except BaseException:
+        _abandon(waiter, lock)
+        raise
+    if done:
+        return True
+    _abandon(waiter, lock)
+    return False
+
+
+def _abandon(waiter: asyncio.Future, lock: asyncio.Lock) -> None:
+    def release_if_acquired(w: asyncio.Future) -> None:
+        if not w.cancelled() and w.exception() is None:
+            lock.release()
+
+    if waiter.done():
+        release_if_acquired(waiter)
+    else:
+        waiter.cancel()
+        waiter.add_done_callback(release_if_acquired)
+
+
+_SESSION_BUSY = "Another request of this session is still running — try again when it ends"
+
+
 def _user_error(e: BaseException) -> dict:
     """The error the caller receives (HTTP error / SSE `error` event) — the root trace output of a failed turn.
     `invoke` raises the already-mapped error (a _ClientError, kept as is by _map_error)."""
@@ -315,12 +367,15 @@ _MAPPED_ERRORS = (GreenNodeRequestError, GraphRecursionError, openai.APIError, T
 
 
 def _mapped(e: BaseException) -> GreenNodeRequestError:
-    """_map_error + log what the caller won't see (the SDK's / LLM provider's own message)."""
+    """_map_error + log what the caller won't see (the SDK's / LLM provider's own message) + what `GET /ready`
+    reports (app.health): a rejected LLM key or a refused Memory call shows as `degraded`, not only in a user's 502."""
     mapped = _map_error(e)
     if isinstance(e, GreenNodeRequestError) and mapped is not e:
         log.warning("backing service error (HTTP %s): %s", e.status_code, e.message)
+        health.record("backing_service", False, f"HTTP {getattr(e, 'status_code', '?')}")
     elif isinstance(e, openai.APIError):
         log.warning("LLM error %s: %s", getattr(e, "status_code", type(e).__name__), e.message)
+        health.record("llm", False, f"HTTP {getattr(e, 'status_code', None) or type(e).__name__}")
     return mapped
 
 
@@ -363,8 +418,11 @@ class _Run:
         graph_input,
         trace_input,
         interrupt_id: str | None = None,
+        rotate: bool = False,
     ):
         self.interrupt_id = interrupt_id
+        # SESSION_MAX_TURNS rotation: HTTP chats only (clients adopt the returned session_id; A2A / eval keep theirs)
+        self.rotate = rotate
         self.root: Any = None  # root observation of this request (set by invoke/stream), None when tracing is off
         self.settings = get_settings()
         self.principal = principal
@@ -382,7 +440,11 @@ class _Run:
             session_id=self.session_id,
             input=self.trace_input,
             metadata=_trace_meta(self.kind),
-            tags=[f"type:{self.kind}", *tags],
+            tags=[
+                f"type:{self.kind}",
+                *tags,
+                *([f"tenant:{t}"] if (t := self.principal.tenant_id) else []),
+            ],
             error_output=_user_error,
         )
 
@@ -409,6 +471,9 @@ class _Run:
             # only allowlisted claims — tools read them via config["configurable"]["user_claims"]
             user_claims={k: claims[k] for k in self.settings.auth_forward_claims if k in claims},
         )
+        # tenant / roles from the verified token (multi-tenant agents) — tools read them, never a tool parameter
+        config["configurable"]["tenant_id"] = self.principal.tenant_id
+        config["configurable"]["roles"] = sorted(self.principal.roles)
         config["callbacks"] = tracing.langchain_callbacks()
         config["recursion_limit"] = recursion_limit(self.settings)
         config["run_name"] = "agent.graph"
@@ -430,6 +495,22 @@ class _Run:
                     "interrupts": len(getattr(snapshot, "interrupts", None) or ()),
                 }
             )
+        if unfinished := unfinished_tool_calls(snapshot):
+            # The previous request ended INSIDE the tools node: close those calls as "outcome unknown" (they may have
+            # run) — never leave them dangling for the bridge's "interrupted" placeholder, which models retried.
+            values = snapshot.values or {}
+            rejected = values.get("hitl_rejected") or {}
+            await graph.aupdate_state(
+                config,
+                {"messages": outcome_unknown_messages(unfinished, rejected), "hitl_rejected": {}},
+                as_node="tools",
+            )
+            tracing.event(
+                "hitl.outcome_unknown",
+                level="WARNING",
+                metadata={"tools": [tc["name"] for tc in unfinished if tc["id"] not in rejected]},
+            )
+            snapshot = await graph.aget_state(config)
         pending = pending_approval(snapshot, self.settings)
         if self.kind == "chat" and pending:
             # details.interrupt = the pending card (same object as the interrupted response) ⇒ client re-shows it
@@ -463,7 +544,32 @@ class _Run:
                     409,
                     details={"interrupt": pending},
                 )
+        max_turns = self.settings.session_max_turns
+        turns = (snapshot.values or {}).get("turns", 0)
+        if self.kind == "chat" and self.rotate and max_turns and turns >= max_turns:
+            config = await self._rotate(graph, config, snapshot.values or {}, turns)
         return graph, config
+
+    async def _rotate(self, graph, config: dict, values: dict, turns: int) -> dict:
+        """Continue this conversation in a NEW stored session, seeded with the summary and the (already compressed)
+        messages: the bridge reads every event of a session each turn, so reads would keep growing. The client gets
+        the new id in `session_id`. The old session is no longer written (its events expire with eventExpiryDuration)."""
+        new_id = str(uuid.uuid4())
+        fresh = thread_config(self.settings, session_id=new_id, user_id=self.principal.user_id)
+        config = {**config, "configurable": {**config["configurable"], **fresh["configurable"]}}
+        seed = {
+            "messages": values.get("messages", []),
+            "summary": values.get("summary", ""),
+            "turns": 0,
+        }
+        with tracing.step(
+            "memory.session_rotated",
+            metadata={"from": self.session_id, "to": new_id, "turns": turns},
+        ) as st:
+            await graph.aupdate_state(config, seed, as_node="__start__")
+            st.set(output={"messages_carried": len(seed["messages"])})
+        self.session_id = new_id
+        return config
 
     def _fb(self, trace_id: str | None) -> str | None:
         return feedback_token(self.principal.user_id, trace_id) if trace_id else None
@@ -473,6 +579,8 @@ class _Run:
         trace: a background self-eval started here lands in the same trace, after the response went out."""
         messages = state.get("messages", [])
         trace_id = tracing.current_trace_id()
+        health.record("llm", True)  # a whole turn ran: the model and the stores answered
+        health.record("backing_service", True)
         if interrupt := interrupt_payload(interrupts):
             if root is not None:
                 # readable in the session view; the raw payload stays in metadata
@@ -500,8 +608,36 @@ class _Run:
             "feedback_token": self._fb(trace_id),
         }
 
+    def _log_request(
+        self, started: float, status: int, *, stream: bool, result: dict | None = None
+    ) -> None:
+        """One structured line per request (message "request"): status, duration, ids — never the message, the answer
+        or a tool argument. The fields a log-based dashboard or alert needs; the full story is the Langfuse trace."""
+        fields: dict[str, Any] = {
+            "type": self.kind,
+            "status": status,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "stream": stream,
+            "session_id": self.session_id,
+            "user": hashlib.sha256(self.principal.user_id.encode()).hexdigest()[:12],
+        }
+        if self.principal.tenant_id:
+            fields["tenant_id"] = self.principal.tenant_id
+        if result:
+            fields.update(
+                outcome=result["status"],
+                trace_id=result.get("trace_id"),
+                tools=len(result.get("tools_used") or []),
+            )
+        log.info("request", extra={"fields": fields})
+
     async def invoke(self) -> dict:
-        async with _session_lock(self.principal.user_id, self.session_id):
+        started, status, result = time.monotonic(), 500, None
+        lock = _session_lock(self.principal.user_id, self.session_id)
+        if not await _acquire(lock, self.settings.request_timeout_s):
+            self._log_request(started, 409, stream=False)
+            raise _error(_SESSION_BUSY, 409)
+        try:
             with self._trace([]) as root:
                 try:
                     async with asyncio.timeout(self.settings.request_timeout_s):
@@ -513,11 +649,25 @@ class _Run:
                     if mapped is e:
                         raise
                     raise mapped from e
-                return await self._result(root, out, out.get("__interrupt__"))
+                result = await self._result(root, out, out.get("__interrupt__"))
+                status = 200
+                return result
+        except BaseException as e:
+            status = (
+                499 if isinstance(e, asyncio.CancelledError) else getattr(e, "status_code", 500)
+            )
+            raise
+        finally:
+            lock.release()
+            self._log_request(started, status, stream=False, result=result)
 
     async def stream(self) -> AsyncIterator[dict]:
+        started, status, result = time.monotonic(), 500, None
         lock = _session_lock(self.principal.user_id, self.session_id)
-        await lock.acquire()
+        if not await _acquire(lock, self.settings.request_timeout_s):
+            self._log_request(started, 409, stream=True)
+            yield {"event": "error", "message": _SESSION_BUSY, "status": 409}
+            return
         it = None
         try:
             with (
@@ -553,16 +703,21 @@ class _Run:
                     for event in _stream_events(mode, data, streaming, status):
                         yield event
                 result = await self._result(root, final or {}, interrupts)
+                status = 200
                 if result["status"] == "interrupted":
                     yield {"event": "interrupt", **result}
                 else:
                     yield {"event": "done", **result}
         except _MAPPED_ERRORS as e:
             mapped = _mapped(e)
+            status = mapped.status_code
             event = {"event": "error", "message": mapped.message, "status": mapped.status_code}
             if interrupt := (mapped.details or {}).get("interrupt"):
                 event["interrupt"] = interrupt  # same as the non-stream 409's details.interrupt
             yield event
+        except GeneratorExit:  # the client closed the stream (Stop, closed tab)
+            status = 499
+            raise
         except Exception:  # noqa: BLE001 — stream already open, must return the error as an event
             log.exception("stream failed")
             yield {
@@ -575,6 +730,7 @@ class _Run:
                 with contextlib.suppress(Exception):
                     await it.aclose()
             lock.release()
+            self._log_request(started, status, stream=True, result=result)
 
 
 @contextlib.contextmanager

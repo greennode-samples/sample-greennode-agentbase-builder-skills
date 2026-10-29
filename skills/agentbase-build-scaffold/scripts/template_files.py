@@ -40,17 +40,22 @@ STATE = ".agentbase-state.json"
 MANIFEST = ".agentbase-template.json"
 SIDECAR = ".agentbase-new"  # suffix of the new template written next to a file upgrade.py did not merge
 FRONTEND = "src/frontend"
+WEB = "src/web"  # Next.js app (agentbase-build-web): its own setup_web.sh --update (hash manifest), never upgrade.py
 USAGE = "Usage: template_files.py record <project-dir> <name> <standard-version> <scaffold-version> <0|1> <file>..."
 
 # Created once, then the developer's. Why each one is not merged:
 SEEDS = {
     "README.md": "the project's own README; teams rewrite it",
+    "AGENTS.md": "instructions for coding agents; teams add their own rules",
+    "CLAUDE.md": "Claude Code entry point (imports AGENTS.md); teams add their own rules",
     "src/backend/app/prompts/system.md": "the domain prompt; conflict markers would reach the LLM. Template changes"
     " to its standard sections (Dates & time, Memory) are reported for review",
     "src/backend/app/knowledge/*": "your documents for search_knowledge",
     "src/backend/evals/datasets/*": "your eval items; template sample rows would change your pass rate",
     "src/backend/mcp_servers.json": "your connectors and URLs; a text merge can leave invalid JSON",
     "src/backend/a2a_agents.json": "your A2A peers; a text merge can leave invalid JSON",
+    "src/backend/app/tools/custom.py": "your local tools: the one file the recipe adds them to",
+    ".github/dependabot.yml": "your update schedule, groups and reviewers",
 }
 
 # create-expo output in src/frontend (only the template overlay of agentbase-build-frontend is managed)
@@ -79,6 +84,7 @@ NEVER_TOUCH_DOC = [
     "deploy/agent.yaml, deploy/runtime.yaml (rendered, contain secrets)",
     ".git/, .venv/, node_modules/, caches",
     "src/frontend files created by create-expo (package.json, app.json, tsconfig.json, index.ts, assets/, …)",
+    "src/web/ (Next.js web app: bring its template files up to date with agentbase-build-web's `setup_web.sh <name> src/web --update`)",
 ]
 
 
@@ -91,6 +97,8 @@ def never_touch(rel: str) -> bool:
     if name == ".env" or (name.startswith(".env.") and not name.endswith(".example")):
         return True
     if name.endswith(".credentials.json"):
+        return True
+    if rel.startswith(WEB + "/"):
         return True
     if rel.startswith(FRONTEND + "/"):
         sub = rel[len(FRONTEND) + 1 :]

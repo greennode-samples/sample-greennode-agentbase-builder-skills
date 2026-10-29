@@ -13,6 +13,7 @@ EXTERNAL_ENV: dict[str, str] = {
     "LANGFUSE_SAMPLE_RATE": "read by the Langfuse SDK itself (Langfuse() constructor default)",
     "LANGFUSE_DEBUG": "read by the Langfuse SDK itself (troubleshooting, tracing SKILL.md)",
     "LANGFUSE_MEDIA_UPLOAD_ENABLED": "read by the Langfuse SDK itself (masking notes in trace-schema.md)",
+    "NEXT_TELEMETRY_DISABLED": "read by Next.js itself: no anonymous telemetry from the web app's image (its Dockerfile)",
 }
 EXTERNAL_ENV_PATTERNS: dict[str, str] = {
     "LANGFUSE_INIT_*": "headless init of a self-hosted Langfuse server (docker-compose), tracing SKILL.md Step 1b",
@@ -62,6 +63,7 @@ NON_TEMPLATE_PATHS: dict[str, str] = {
     ".greennode.json": "created by the user from .greennode.json.example (git-ignored)",
     "deploy/agent.yaml": "rendered from deploy/agent.yaml.tpl in CI (temp dir, never committed)",
     "deploy/runtime.yaml": "rendered by deploy/render_runtime_spec.py in CI (temp dir, never committed)",
+    "src/web/.agentbase-web.json": "written by setup_web.sh (scripts/sync_template.mjs record) into the generated web app; commit it",
     "src/app": "Expo Router's directory, named in the frontend SKILL only to say this template does not use it",
 }
 NON_TEMPLATE_PATH_PATTERNS: dict[str, str] = {

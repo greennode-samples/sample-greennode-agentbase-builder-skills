@@ -40,7 +40,7 @@ on:
         options: [none, dev, staging, prod]
         default: none
       image_tag:
-        description: "Redeploy this EXISTING image tag without rebuilding (rollback: the previous release's tag). Empty = build this commit"
+        description: "Rollback: redeploy this EXISTING image tag (a previous release) — no rebuild, no eval re-run. Empty = this commit"
         type: string
         default: ""
 
@@ -74,10 +74,55 @@ jobs:
           shopt -s nullglob
           files=(.env.*.example)
           if [ ${#files[@]} -gt 0 ]; then uv run python ../../deploy/env_file.py check "${files[@]}"; fi
+      - name: Security quick scan (blocking checks gate every deploy — /agentbase-build-security-audit)
+        run: uv run python -m scripts.security_scan
+
+  # The web app (src/web, when the project has one): type-check + unit tests, the production build, known vulnerabilities
+  # of its runtime dependencies and the container image. It is not deployed from here — AgentBase Runtime hosts agents,
+  # not web apps: publish the image where your web app runs (agentbase-build-web, references/bff.md → Deploying).
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: app
+        run: echo "present=$([ -f src/web/package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.app.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/web/package-lock.json
+      - name: Install exactly package-lock.json (fails when it is stale or missing — commit it)
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npm ci --no-fund
+      - name: Type-check and unit tests
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npx tsc --noEmit && npm test
+      - name: Production build
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npm run build
+      - name: Known vulnerabilities in the runtime dependencies (high and critical)
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npm audit --omit=dev --audit-level=high
+      - name: Container image builds and answers /api/health
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: |
+          docker build --platform linux/amd64 -t web-ci .
+          docker run -d --name web-ci -p 127.0.0.1:3000:3000 web-ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:3000/api/health
+          docker rm -f web-ci
 
   eval:
     needs: test
-    if: github.event_name != 'pull_request'
+    # Not for a rollback (image_tag set): that image passed the gate when it was released, and a rollback must work
+    # while the LLM is down or rate-limited — the usual reason to roll back.
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '')
     runs-on: ubuntu-24.04
     outputs:
       gate: ${{ steps.gate.outputs.gate }}
@@ -121,13 +166,17 @@ jobs:
             echo "gate=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          uv run python -m evals.run_eval --data evals/datasets/smoke.jsonl \
+          # every dataset in evals/datasets/ (ltm.jsonl with LTM on; evals/datasets/live/ is run by hand)
+          uv run python -m evals.run_eval --data evals/datasets \
             --min-pass-rate "$MIN_PASS_RATE" --concurrency 1
           echo "gate=passed" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: [test, eval]
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy_env != 'none'
+    # !cancelled(): runs when eval was SKIPPED (rollback) — test must still pass; eval must pass or be skipped
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && inputs.deploy_env != 'none'
+      && needs.test.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.eval.result)
     runs-on: ubuntu-24.04
     environment: ${{ inputs.deploy_env }}
     concurrency:
@@ -143,11 +192,19 @@ jobs:
       AGENT_ENDPOINT: ${{ vars.AGENT_ENDPOINT }}
       GRN_DEFAULT_REGION: ${{ vars.GRN_DEFAULT_REGION || 'HCM-3' }}
     steps:
-      - name: Require the eval gate outside dev
-        if: needs.eval.outputs.gate != 'passed' && inputs.deploy_env != 'dev'
+      - name: Require the eval gate outside dev (a rollback skips it — its image passed the gate when released)
+        if: inputs.image_tag == '' && needs.eval.outputs.gate != 'passed' && inputs.deploy_env != 'dev'
         run: |
           echo "::error::The eval gate did not run (EVAL_LLM_API_KEY / model missing) — refusing to deploy to $APP_ENV"
           exit 1
+
+      - name: Staging / prod only from main or a release tag
+        if: inputs.deploy_env != 'dev'
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/main | refs/tags/*) ;;
+            *) echo "::error::$APP_ENV deploys only from main or a release tag (dispatched from $GITHUB_REF)"; exit 1 ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -180,17 +237,31 @@ jobs:
           VCR_PASSWORD: ${{ secrets.VCR_PASSWORD }}
         run: echo "$VCR_PASSWORD" | docker login "$VCR_REGISTRY" -u "$VCR_USERNAME" --password-stdin
 
-      - name: Build and push the image (linux/amd64)
+      # Build once per commit, then promote THAT image: a tag is never rebuilt or overwritten. Rebuilding per
+      # environment shipped bits nobody tested to prod (newer base image, re-resolved layers) and re-pointed the tag
+      # under running replicas, which pull it again on scale-out.
+      - name: Build and push the image once per commit (linux/amd64)
         if: inputs.image_tag == ''
         run: |
-          docker build --platform linux/amd64 --build-arg "AGENT_VERSION=$AGENT_VERSION" -t "$IMAGE" src/backend
-          docker push "$IMAGE"
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "::notice::$IMAGE already exists (built by an earlier deploy of this commit) — promoting it, no rebuild"
+          else
+            docker build --platform linux/amd64 --build-arg "AGENT_VERSION=$AGENT_VERSION" -t "$IMAGE" src/backend
+            docker push "$IMAGE"
+          fi
 
       - name: Check that the image to redeploy exists (no rebuild)
         if: inputs.image_tag != ''
         run: |
-          docker manifest inspect "$IMAGE" > /dev/null || { echo "::error::$IMAGE not found in the registry"; exit 1; }
-          echo "::notice::Redeploying $IMAGE with the config of $GITHUB_REF_NAME (src/backend/.env.$APP_ENV.example) — dispatch from the release's ref to roll back config too"
+          docker buildx imagetools inspect "$IMAGE" > /dev/null || { echo "::error::$IMAGE not found in the registry"; exit 1; }
+          echo "::notice::Redeploying $IMAGE with the config of $GITHUB_REF_NAME (src/backend/.env.$APP_ENV.example) — dispatch from the release's tag to roll back config too"
+
+      - name: Record the image digest (what this environment runs — compare it across environments)
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve the digest of $IMAGE"; exit 1; }
+          echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_ENV"
+          echo "### $APP_ENV ← \`$IMAGE\`  \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Render the manifest and runtime spec (secrets stay in the CI secret store; files never committed)
         env:
@@ -263,6 +334,7 @@ jobs:
             RUNTIME_ID=$(jq -er --arg n "$RUNTIME_NAME" '[.[] | select(.name == $n) | .id][0]' <<< "$RUNTIMES")
           else
             PREV=$(latest_version "$RUNTIME_ID")
+            echo "PREV_IMAGE=$(jq -r .image <<< "$PREV")" >> "$GITHUB_ENV" # for the rollback hint below
             problems=$(jq -r '[
                 (select(.mode != "PUBLIC") | "network mode \(.mode) (an update without networkConfig switches it to PUBLIC)"),
                 (select(.allowedCidrs | length > 0) | "IP Access Control (\(.allowedCidrs | length) allowed CIDRs)"),
@@ -288,12 +360,34 @@ jobs:
             echo "::error::The latest version of $RUNTIME_ID does not run $IMAGE — the deploy did not ship"
             exit 1
           fi
-          echo "Runtime $RUNTIME_ID serves v$(jq -r .version <<< "$NEW") = $IMAGE (mode $(jq -r .mode <<< "$NEW"), inbound $(jq -r .inbound <<< "$NEW"))"
+          # The tag must still be the image recorded above (nobody re-pushed it during the deploy)
+          now=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
+          if [ "$now" != "$IMAGE_DIGEST" ]; then
+            echo "::error::$IMAGE was re-pushed during the deploy ($IMAGE_DIGEST → $now) — tags must be immutable; investigate"
+            exit 1
+          fi
+          echo "Runtime $RUNTIME_ID serves v$(jq -r .version <<< "$NEW") = $IMAGE@$IMAGE_DIGEST (mode $(jq -r .mode <<< "$NEW"), inbound $(jq -r .inbound <<< "$NEW"))"
           grn agentbase deploy status "$RUNTIME_NAME"
 
-      - name: Smoke test
+      # /ready (not /health): 503 when this replica cannot authenticate users (JWKS unreachable). A release from before
+      # /ready existed answers 404 — a rollback to it is checked on /health. The response names failing components only.
+      - name: Smoke test (GET /ready)
         if: vars.AGENT_ENDPOINT != ''
-        run: curl -fsS --retry 5 --retry-delay 10 "$AGENT_ENDPOINT/health"
+        run: |
+          for i in $(seq 1 6); do
+            code=$(curl -sS -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' "$AGENT_ENDPOINT/ready" || true)
+            [ "$code" = 200 ] && break
+            [ "$code" = 404 ] && { curl -fsS "$AGENT_ENDPOINT/health" && exit 0; }
+            sleep 10
+          done
+          cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
+          [ "$code" = 200 ] || { echo "::error::$AGENT_ENDPOINT/ready answered HTTP ${code:-none}"; exit 1; }
+
+      # No automatic rollback: a half-applied rollback is worse than a failed deploy. Say exactly how to do it.
+      - name: How to roll back
+        if: failure() && env.PREV_IMAGE != ''
+        run: |
+          echo "::error::This deploy to $APP_ENV failed. The runtime ran $PREV_IMAGE before. Roll back: run this workflow from that release's tag with deploy_env=$APP_ENV and image_tag=${PREV_IMAGE##*:} (no rebuild, no eval)."
 
       - name: Remove the rendered files
         if: always()

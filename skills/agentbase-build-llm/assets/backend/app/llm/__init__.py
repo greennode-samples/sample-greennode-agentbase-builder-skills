@@ -354,7 +354,7 @@ def _chat(model: str, tier: Tier, role: str) -> ChatOpenAI:
         base_url=s.llm_base_url,
         api_key=s.llm_api_key,
         temperature=s.llm_temperature if tier != "small" else 0,
-        max_tokens=s.llm_max_tokens,
+        max_tokens=s.llm_max_tokens or None,  # 0 ⇒ no cap
         timeout=_timeout_s(tier),  # reasoning models run longer
         # With fallbacks the PRIMARY doesn't retry (switch fast); fallbacks keep retries so a 429 still gets the
         # SDK's backoff — the MaaS rate limit is per account, shared by every model in the chain.

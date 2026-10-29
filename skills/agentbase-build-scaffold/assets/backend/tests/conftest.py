@@ -77,9 +77,11 @@ def _fresh_settings():
     get_settings.cache_clear()
     import app.memory.long_term as lt
     import app.memory.short_term as st
+    from app.limits import reset_rate_limits
 
     st._checkpointer = None
     lt._ltm = None
+    reset_rate_limits()  # per-user counters are process-wide: one test's requests must not 429 the next
     yield
     get_settings.cache_clear()
 

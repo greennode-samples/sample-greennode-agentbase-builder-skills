@@ -5,7 +5,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 ## Structure & env
 - [B] `src/backend/pyproject.toml` + `uv.lock` + `.python-version` (3.13) exist; `requires-python = ">=3.13,<3.14"`; no `requirements.txt`; `uv sync --locked` works (lock matches `pyproject.toml`); `uv run python --version` prints 3.13.x.
 - [B] `app/` structure follows the standard; no second graph/LLM factory (`grep -rn "ChatOpenAI(" app | grep -v app/llm` is empty).
-- [B] No `os.environ`/`os.getenv` reads outside `app/config.py` and the allowed exceptions (HARD RULE 2: `app/prompts`, `app/observability`, the `${VAR}` expansion in `app/tools/mcp.py` / `app/a2a/client.py`). Must print nothing: `grep -rn "os.getenv\|os.environ" app | grep -v -e '^app/config.py:' -e '^app/prompts/' -e '^app/observability/' -e '^app/tools/mcp.py:.*environ.get(m.group(1))' -e '^app/a2a/client.py:.*environ.get(m.group(1))'`.
+- [B] No `os.environ`/`os.getenv` reads outside `app/config.py` and the allowed exceptions (HARD RULE 2: `app/prompts`, `app/observability`, the `${VAR}` expansion in `app/tools/mcp.py` / `app/a2a/client.py`). Must print nothing: `grep -rn "os.getenv\|os.environ" app | grep -v -e '^app/config.py:' -e '^app/prompts/' -e '^app/observability/' -e '^app/tools/mcp.py:.*environ.get(\(m.group(1)\|v\))' -e '^app/a2a/client.py:.*environ.get(m.group(1))'` (mcp.py also reads the `${VAR}` values to know when to re-parse its cached config).
 - [B] `.env`, `.greennode.json` are in `.gitignore` and `.dockerignore`.
 - [B] `make check-creds` prints OK for IAM and LLM — the user entered the secrets themselves (`make set-secret` in their own terminal; never pasted into chat or printed); any secret that did reach a chat, commit or log has been rotated (`references/security.md` → *Secret pasted into a chat*).
 - Every variable in `Settings` is in `.env.example`.
@@ -27,6 +27,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Tools / MCP
 - [B] Side-effect tools are in `HITL_TOOLS` (or the user confirmed in writing that it is not needed).
+- [B] Each local side-effect tool passes `idempotency_key(config, tool_call_id)` to the system it changes (or that system dedupes on a business key) — HITL alone does not stop a double run across replicas (`/agentbase-build-hitl`).
 - Prod MCP goes through the MCP Gateway, inbound `IAM` or `JWT`; secrets live in Identity (Secret Provider).
 - [B] The Gateway has a **Policy Group** attached (none attached ⇒ every tools/call returns 403); there is an ALLOW policy with the exact action `<connector>__<tool>` for each principal that calls it: the developer's `iam:<sub>` (`make check-creds`, local runs) and **each environment's runtime** `iam:<sub>` (runtime logs `IAM principal …`, logged at startup by `log_iam_principal()` — only when an enabled `auth: "iam"` MCP server is configured — `/agentbase-build` Step 9b). Dev and prod use separate gateways/groups (≤ 10 policies per group).
 - [B] `mcp_servers.json` points to **each connector's connectUrl** (`<gateway endpoint>/<connector>`), not the gateway root, and every entry declares `auth` explicitly.
@@ -73,14 +74,21 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Frontend (if any)
 - No secrets in `EXPO_PUBLIC_*`; OIDC uses PKCE; tokens in SecureStore.
-- All SSE events handled (`token`, `reset`, `interrupt`, `done`, `error`).
+- All SSE events handled (`token`, `reset`, `interrupt`, `done`, `error`); the client adopts the `session_id` returned in `done` / `interrupt` / the response (session rotation).
 
 ## Deploy
 - [B] `make check-env ENV_FILE=src/backend/.env.<env>` (or the `.example` CI uses) passes: strict KEY=VALUE, no quotes / inline comments / `export`, no `GREENNODE_*` (injected / reserved), no `AGENT_VERSION` (= image tag).
 - [B] The deploy env file sets `APP_ENV` (dev/staging/prod) — `local` is refused on the Runtime.
+- [B] `GET <endpoint>/ready` answers 200 (the CI smoke test does this; 503 names `jwks`: the IdP's JWKS cannot be fetched). Logs are JSON lines with `request_id` / `trace_id` and one `request` line per request.
 - After deploy: health OK, the latest version's `imageUrl` is the new tag, 1 real request has a trace in Langfuse with `release` = that tag, clean logs (`/agentbase-monitor`).
 - [B] After every update the new version keeps the previous network mode (VPC: same VPC/subnet/route CIDRs), IP Access Control and Inbound Auth (`/agentbase-build-deploy` Step 4).
 - [B] `.agentbase-state.json` → `environments.<env>` records `runtime_id`, `endpoint`, `image`, `network_mode`, `allowed_cidrs`, `inbound_auth`, `identity`, `memory_id`, `memory_strategy_id`, `llm_key_name`, `mcp_gateway`, `policy_group`, `principal`.
 - The agent's LLM API key is dedicated to this agent + environment and has a Protect & Govern **Rate Limit** (requests and tokens per day).
+- Request limits sized for the spec's load and replica count (`RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_TENANT_PER_MIN`, `MAX_CONCURRENT_REQUESTS`, per replica); a strict global quota (paid tiers, per-tenant contracts) is enforced in front of the runtime.
+- [B] Staging/prod run an image built once and promoted: the CI job summary shows the same digest per tag in every environment; rollbacks use `image_tag` from a release tag.
 - CI deploys with a dedicated service account (never a person's credentials); secrets live in the CI secret store; the rendered manifest is not committed (`references/iam-permissions.md`).
 - Teardown follows the checklist in `/agentbase-build-deploy` (*Teardown checklist*): also gateways, Policy Groups, connectors, the **Orphaned** service account and inbound API key hashes — `/agentbase-teardown` alone does not remove them.
+
+## Security — `make security-scan` (`/agentbase-build-security-audit`; the checks live in the scan, not here)
+- [B] `make security-scan` exits 0: no blocking check FAILs (CI runs it too); each WARN fixed or explained; each MANUAL line done with the skill it names and reported.
+- Prod: a full audit (`security-audit` skill, seeded with the AgentBase threat model) has run on the deployed `source_ref`, or a scoped run covers every change since; its result is recorded in `.agentbase-state.json` → `security_audit` (S13 blocks while findings are open).

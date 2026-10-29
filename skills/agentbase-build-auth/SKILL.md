@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-auth
-description: "Authentication standard for AI agents on GreenNode AgentBase: inbound auth (verify OIDC/JWKS JWTs from frontend/service, user_id = sub, prevent User-Id header spoofing, AUTH_MODE none only in local, client allowlist for IdPs without aud), api_key mode for trusted callers, Runtime inbound auth (IAM / JWT / IP access control), runtime IAM, and the Direct vs BFF pattern. Use when adding login to an agent, protecting an endpoint, or configuring an IdP (Keycloak, Auth0, Cognito, Entra ID). Trigger: authen, auth, authentication, JWT, OIDC, login, protect agent, token, inbound auth, BFF, xác thực, đăng nhập, bảo vệ agent. DO NOT use for calling external services with API keys/OAuth from tools (use /agentbase-build-identity), creating identities/providers on the platform (use /agentbase-identity), or creating IAM service accounts (/agentbase)."
+description: "Authentication standard for AI agents on GreenNode AgentBase: inbound auth (verify OIDC/JWKS JWTs from frontend/service, user_id = sub, prevent User-Id header spoofing, AUTH_MODE none only in local, client allowlist for IdPs without aud), api_key mode for trusted callers, Runtime inbound auth (IAM / JWT / IP access control), runtime IAM, and the Direct vs BFF pattern. Use when adding login to an agent, protecting an endpoint, or configuring an IdP (Keycloak, Auth0, Cognito, Entra ID). Multi-tenant (tenant claim → per-organization isolation) and role-gated tools (TOOL_ROLES). Also for debugging 401/403 on /invocations or login broken after an IdP change. Trigger: authen, auth, authentication, JWT, OIDC, login, protect agent, token, inbound auth, BFF, xác thực, đăng nhập, bảo vệ agent. DO NOT use for calling external services with API keys/OAuth from tools (use /agentbase-build-identity), creating identities/providers on the platform (use /agentbase-identity), or creating IAM service accounts (/agentbase)."
 ---
 
 # Auth for AgentBase agents
@@ -27,6 +27,7 @@ description: "Authentication standard for AI agents on GreenNode AgentBase: inbo
 - `Principal(user_id, token, claims)` — `repr` hides `token` and `claims`; overrides `GreenNodeAgentBaseContext.set_user_id()` so Identity decorators (USER_FEDERATION) use the correct user.
 - `AUTH_MODE=none` is blocked by `Settings` when `APP_ENV != local`.
 - JWK **set** cached 1h (`PyJWKClient`, `cache_keys=False` — its per-kid cache never expires, so a key the IdP removed would stay trusted until restart); a removed key stops working when the set is refetched (≤ 1h), an unknown `kid` triggers a refetch (at most every 30s, PyJWT cooldown). 30s leeway, `exp` and `iat` required.
+- **JWKS outage is visible**: every JWKS fetch outcome is recorded (`app/health.py`), so `GET /ready` answers **503 `not_ready` with `failing: ["jwks"]`** while users cannot be authenticated (and re-fetches the JWKS itself, at most every 10 s, so it turns 200 as soon as the IdP is back); `/health` stays 200. An unknown `kid` is the token's fault (401) and counts as the JWKS being fine. Tests `tests/test_health.py`.
 - The token's `alg` must be in `AUTH_ALGORITHMS` **and** match its JWKS key (the key's `alg`, else RS256 for RSA / ES* by curve) — mismatch ⇒ 401. An IdP signing RS384/RS512/PS* whose JWKS omits `alg` therefore needs the `alg` published. `AUTH_ALGORITHMS` accepts asymmetric algorithms only (RS*/PS*/ES*/EdDSA — `Settings` refuses HS*/none: the JWKS is public).
 - Outside local, `Settings` also refuses an `AUTH_TOKEN_HEADER` / `AUTH_API_KEY_HEADER` other than `Authorization` or `X-GreenNode-AgentBase-Custom-*` — the SDK forwards no other header, so every request would be a 401.
 
@@ -48,7 +49,7 @@ The Runtime has **Security Settings** ([create-runtime](https://docs.greennode.a
   `uv run python -c "import secrets,hashlib,os,pathlib;k=secrets.token_urlsafe(32);p=pathlib.Path.home()/'.my-agent-api-key';os.write(os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),k.encode());print(hashlib.sha256(k.encode()).hexdigest())"` — then the user moves the key into the caller's secret store and deletes the file.
 - Env holds only the hash: `AUTH_API_KEY_SHA256=["<sha256>"]` (multiple hashes ⇒ zero-downtime rotation).
 - Caller sends `X-GreenNode-AgentBase-Custom-Api-Key: <key>` + **mandatory** `X-GreenNode-AgentBase-User-Id` (no shared bucket — missing ⇒ 400; the trusted caller is responsible for this value). **An api_key holder can act as ANY user** (memory, sessions, and connected accounts if `IDENTITY_TRUST_ASSERTED_USER=true`).
-- A BFF that verified the user's IdP token sends `User-Id = user_id_from_subject(sub, iss)` (`app.auth.inbound`) — the same id jwt mode derives, so switching a client between BFF and direct jwt keeps the user's memory.
+- The web template's BFF (`/agentbase-build-web`) does **not** use this mode: it forwards the user's access token (`jwt`). A BFF of your own that verified the user's IdP token and calls with an API key sends `User-Id = user_id_from_subject(sub, iss)` (`app.auth.inbound`) — the same id jwt mode derives, so switching a client between BFF and direct jwt keeps the user's memory.
 - **Never** embed the key in a mobile/web app ⇒ user-facing apps use `jwt` or go through a BFF.
 
 ## Calling the runtime endpoint: 2 patterns
@@ -68,6 +69,27 @@ Moved to **`/agentbase-build-identity`** (Access Control): Static / Delegated AP
 - The only `user_id` source is `Principal` (JWT `sub` / api_key caller's header) ⇒ `validate_user_id()` (`^[A-Za-z0-9][A-Za-z0-9._@+=-]{0,127}$`, `..` forbidden) prevents namespace injection since user_id is part of the memory path.
 - Applies to: checkpointer (session, user), LTM namespace, HITL resume (different user ⇒ 409), feedback (`feedback_token` HMAC of user+trace ⇒ different user 403), A2A task store (owner = user), MCP server (`current_user()` from token), A2A client (passes user to the target agent).
 - `tests/test_isolation.py` — rerun whenever any data path changes.
+
+## Multi-tenant and roles (B2B agents: one deployment, several customer organizations)
+
+Turn it on when the spec says users belong to organizations whose data must never mix, or when some tools are only for
+some users (admin, finance…). Single-tenant agents leave all four settings empty.
+
+| Setting | Effect |
+|---|---|
+| `AUTH_TENANT_CLAIM` (`org_id`, Entra ID `tid`, …) | Tenant read from the **verified token only**; missing or unsafe ⇒ 403. The user id becomes `u-<sha256([iss, tenant, sub])>`, so memory, history, HITL state, A2A tasks, feedback and traces are per tenant with no other change — the same person in two tenants is two users |
+| `AUTH_ALLOWED_TENANTS` | Optional allowlist (403 otherwise); requires `AUTH_TENANT_CLAIM` |
+| `AUTH_ROLES_CLAIM` (`roles`, `realm_access.roles`, `scope`) | Roles from a list or a space-separated string, dotted path for nested claims |
+| `TOOL_ROLES` (`{"delete_*": ["admin"]}`) | A tool matching a pattern needs one of its roles (every matching pattern); otherwise it is removed before the model sees it (`tools.collect.output.role_hidden`). No roles ⇒ no gated tool (fail closed) |
+
+- Tools read `config["configurable"]["tenant_id"]` / `["roles"]` (never a tool parameter — `make security-scan` S2) and
+  must scope their own backend queries by `tenant_id`; the agent's stores are already scoped by the user id.
+- Traces get the tag `tenant:<id>` and the `auth` event shows tenant and roles — filter Langfuse per customer.
+- **MCP tools** that scope by an argument: set it with `inject_args` in `mcp_servers.json` (`/agentbase-build-mcp` *User and tenant identity*) so the model cannot write another tenant's id.
+- `api_key` mode (trusted BFF): the BFF verifies the user and sends the scoped id itself,
+  `inbound.user_id_from_subject(sub, iss, tenant)`; the raw `sub` is refused when tenants are on.
+- TOOL_ROLES hides tools; it does not replace HITL (approval of an allowed write) or the Gateway Policy Group (what
+  the agent's principal may call at all). Tests: `tests/test_tenancy.py` (2-tenant isolation, allowlist, roles, gating).
 
 ## Local IAM credential trap (seen in practice)
 

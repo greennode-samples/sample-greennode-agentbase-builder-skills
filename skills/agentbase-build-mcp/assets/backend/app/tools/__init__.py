@@ -8,7 +8,7 @@ from fnmatch import fnmatch
 from langchain_core.tools import BaseTool
 
 from app.a2a.client import build_a2a_tools
-from app.auth.inbound import Principal
+from app.auth.inbound import Principal, tool_allowed
 from app.config import Settings
 from app.memory.long_term import build_memory_tools, get_ltm
 from app.observability import tracing
@@ -43,6 +43,10 @@ async def collect_tools(settings: Settings, principal: Principal) -> list[BaseTo
                 "HITL_TOOLS patterns match no tool (approval NOT enforced): %s",
                 sorted(new_unmatched),
             )
+        # TOOL_ROLES: tools the caller's roles don't allow are removed before the model sees them (after the
+        # checks above, so a HITL pattern for a role-gated tool is not reported as unmatched)
+        role_hidden = [t.name for t in tools if not tool_allowed(t.name, principal, settings)]
+        tools = [t for t in tools if t.name not in role_hidden]
         st.set(
             output={
                 "local": [t.name for t in local],
@@ -51,6 +55,7 @@ async def collect_tools(settings: Settings, principal: Principal) -> list[BaseTo
                 "a2a": [t.name for t in a2a],
                 "mcp_errors": mcp_errors,
                 "hitl_unmatched": hitl_unmatched,
+                "role_hidden": role_hidden,
             },
             metadata={"tool_count": len(tools)},
             level="WARNING" if mcp_errors or hitl_unmatched else None,

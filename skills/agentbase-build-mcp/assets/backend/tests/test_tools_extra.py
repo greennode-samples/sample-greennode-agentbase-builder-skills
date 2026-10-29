@@ -196,3 +196,36 @@ def test_get_current_time_defaults_to_app_timezone_and_rejects_unknown_zones(mon
     assert get_current_time.invoke({}).endswith("+07:00")
     assert get_current_time.invoke({"timezone": "Europe/Paris"})[-6:] in ("+01:00", "+02:00")
     assert "Unknown time zone 'Asia/Hanoi'" in get_current_time.invoke({"timezone": "Asia/Hanoi"})
+
+
+# --------------------------------------------------------------------------- app/tools/custom.py: the place to add tools
+def test_custom_tools_are_registered_next_to_the_built_in_ones(monkeypatch):
+    from langchain_core.tools import tool
+
+    import app.tools.custom as custom
+    import app.tools.local_tools as lt
+
+    @tool
+    def create_ticket(title: str) -> str:
+        """Open a ticket."""
+        return title
+
+    monkeypatch.setattr(custom, "custom_tools", lambda: [create_ticket])
+    monkeypatch.setattr(lt, "custom_tools", custom.custom_tools)
+    names = [t.name for t in lt.get_local_tools()]
+    assert "get_current_time" in names and "create_ticket" in names
+
+
+async def test_a_custom_tool_named_like_a_built_in_one_fails_collection(monkeypatch):
+    import app.tools.local_tools as lt
+    from app.auth.inbound import Principal
+    from app.tools import collect_tools
+
+    @lt.tool
+    def get_current_time() -> str:
+        """Shadows the built-in."""
+        return "now"
+
+    monkeypatch.setattr(lt, "custom_tools", lambda: [get_current_time])
+    with pytest.raises(ValueError, match="Duplicate tool names"):
+        await collect_tools(get_settings(), Principal(user_id="u"))

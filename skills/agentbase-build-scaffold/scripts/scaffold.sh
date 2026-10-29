@@ -17,29 +17,33 @@
 #   agentbase-build-hitl     : app/hitl.py, tests/test_hitl.py
 #   agentbase-build-eval     : app/reflection.py, evals/, tests/test_reflection.py, tests/test_eval.py
 #   agentbase-build-a2a      : app/a2a (A2A server + client tools), a2a_agents.json, tests/test_a2a.py
+#   agentbase-build-security-audit : scripts/security_scan.py (make security-scan), tests/test_security_scan.py
 #   agentbase-build-frontend : src/frontend (Expo React Native) — only with --with-frontend
-# Root files (agentbase-build-scaffold/assets/root): Makefile, README.md, .gitignore, .agentbase-state.json,
+#   agentbase-build-web      : src/web (Next.js web chat + BFF) — only with --with-web
+# Root files (agentbase-build-scaffold/assets/root): Makefile, README.md, AGENTS.md + CLAUDE.md, .gitignore, .agentbase-state.json,
 #   .github/workflows/ci.yml, deploy/{agent.yaml.tpl, render_runtime_spec.py, env_file.py} and
 #   src/backend/.env.{dev,staging,prod}.example (from env.deploy.example — committed non-secret config per environment).
 # .agentbase-template.json records what the template wrote; scripts/upgrade.py upgrades a project to newer skills.
 set -eEuo pipefail # -E: the ERR trap below also fires inside functions
 
-STANDARD_VERSION="0.4.0" # the agentbase-build standard (CHANGELOG.md, plugin manifests) — bump together
+STANDARD_VERSION="0.5.0" # the agentbase-build standard (CHANGELOG.md, plugin manifests) — bump together
 SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKEND_SKILLS=(agentbase-build-scaffold agentbase-build-llm agentbase-build-memory agentbase-build-tracing
-  agentbase-build-mcp agentbase-build-auth agentbase-build-identity agentbase-build-hitl agentbase-build-eval agentbase-build-a2a)
+  agentbase-build-mcp agentbase-build-auth agentbase-build-identity agentbase-build-hitl agentbase-build-eval agentbase-build-a2a
+  agentbase-build-security-audit)
 DEPLOY_ENVS=(dev staging prod)
 
-USAGE="Usage: scaffold.sh <project-name> <target-dir> [--with-frontend] [--no-sync]"
+USAGE="Usage: scaffold.sh <project-name> <target-dir> [--with-frontend] [--with-web] [--no-sync]"
 if [[ $# -lt 2 ]]; then
   echo "$USAGE" >&2; exit 2
 fi
 NAME="$1"; TARGET="$2"
 shift 2
-WITH_FE=0; SYNC=1
+WITH_FE=0; WITH_WEB=0; SYNC=1
 for a in "$@"; do
   case "$a" in
     --with-frontend) WITH_FE=1 ;;
+    --with-web) WITH_WEB=1 ;;
     --no-sync) SYNC=0 ;;
     *) echo "Unknown flag: $a" >&2; exit 2 ;;
   esac
@@ -64,6 +68,9 @@ if [[ $SYNC -eq 1 ]]; then
 fi
 if [[ $WITH_FE -eq 1 && ! -f "$TARGET/src/frontend/package.json" ]]; then
   command -v npx >/dev/null || { echo "--with-frontend needs Node.js (npx) — install it or drop the flag" >&2; exit 1; }
+fi
+if [[ $WITH_WEB -eq 1 && ! -f "$TARGET/src/web/package.json" ]]; then
+  command -v npx >/dev/null || { echo "--with-web needs Node.js (npx) — install it or drop the flag" >&2; exit 1; }
 fi
 
 # Which revision of the skills built this project (recorded in .agentbase-state.json for later reviews/upgrades)
@@ -118,9 +125,12 @@ elif [[ ! -f "$TARGET/Makefile" ]]; then
   CREATED+=("$TARGET/Makefile")
 fi
 copy_new "$ROOT_TPL/README.md" "$TARGET/README.md"
+copy_new "$ROOT_TPL/AGENTS.md" "$TARGET/AGENTS.md"
+copy_new "$ROOT_TPL/CLAUDE.md" "$TARGET/CLAUDE.md"
 copy_new "$ROOT_TPL/gitignore" "$TARGET/.gitignore"
 copy_new "$ROOT_TPL/agentbase-state.json" "$TARGET/.agentbase-state.json"
 copy_new "$ROOT_TPL/ci.yml" "$TARGET/.github/workflows/ci.yml"
+copy_new "$ROOT_TPL/dependabot.yml" "$TARGET/.github/dependabot.yml"
 copy_new "$ROOT_TPL/agent.yaml.tpl" "$TARGET/deploy/agent.yaml.tpl"
 copy_new "$ROOT_TPL/render_runtime_spec.py" "$TARGET/deploy/render_runtime_spec.py"
 copy_new "$ROOT_TPL/env_file.py" "$TARGET/deploy/env_file.py"
@@ -139,6 +149,46 @@ if [[ $WITH_FE -eq 1 ]]; then
   # setup_frontend.sh replaces the placeholder in the files it overlays itself
   bash "$SKILLS_DIR/agentbase-build-frontend/scripts/setup_frontend.sh" "$NAME" "$TARGET/src/frontend" \
     $([[ $SYNC -eq 0 ]] && echo --no-install)
+fi
+if [[ $WITH_WEB -eq 1 ]]; then
+  # setup_web.sh replaces the placeholder itself; src/web is not upgraded by upgrade.py (see template_files.py)
+  bash "$SKILLS_DIR/agentbase-build-web/scripts/setup_web.sh" "$NAME" "$TARGET/src/web" \
+    $([[ $SYNC -eq 0 ]] && echo --no-install)
+fi
+
+# Dependabot for the UI apps that exist (npm), appended to the file THIS run created. Major updates are left out: Expo
+# SDK packages move together with `npx expo install --fix`, and Next.js / React majors are a deliberate migration.
+DEPENDABOT="$TARGET/.github/dependabot.yml"
+if [[ " ${CREATED[*]-} " == *" $DEPENDABOT "* ]]; then
+  for app in "src/web:$WITH_WEB" "src/frontend:$WITH_FE"; do
+    if [[ "${app##*:}" -eq 1 ]]; then
+      cat >> "$DEPENDABOT" <<YAML
+  - package-ecosystem: "npm"
+    directory: "/${app%%:*}"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 5
+YAML
+    fi
+  done
+  if [[ $WITH_WEB -eq 1 ]]; then
+    cat >> "$DEPENDABOT" <<'YAML'
+  # The node image of src/web/Dockerfile is pinned by digest
+  - package-ecosystem: "docker"
+    directory: "/src/web"
+    schedule:
+      interval: "weekly"
+    groups:
+      web-base-images:
+        patterns: ["*"]
+YAML
+  fi
 fi
 
 # Replace the placeholders — only in files created above that contain them (untouched files keep inode & mtime)
@@ -164,7 +214,7 @@ fi
 if [[ $SYNC -eq 1 ]]; then
   cd "$TARGET/src/backend" # no subshell: bash 3.2 (macOS) does not run the ERR trap for a failed ( … )
   PHASE="uv sync"
-  uv sync
+  uv sync --locked # the uv.lock the skills ship = the dependency set their tests ran against (scripts/relock.sh)
   PHASE="uv run pytest"
   uv run pytest -q -p no:warnings
   cd - >/dev/null
@@ -173,7 +223,7 @@ trap - ERR
 
 echo "✔ Scaffolded '$NAME' at $TARGET (standard $STANDARD_VERSION, skills $SCAFFOLD_VERSION)"
 if [[ $SYNC -eq 0 ]]; then
-  echo "  ⚠ --no-sync: no uv.lock yet — run 'cd src/backend && uv lock && uv sync' before make test / docker-build."
+  echo "  ⚠ --no-sync: nothing installed yet — run 'cd src/backend && uv sync --locked' (uv.lock is the tested one) before make test."
 fi
 echo "  Next: in YOUR own terminal (a coding agent cannot type into it), run: make set-secret — hidden prompt for"
 echo "        the IAM client_id/secret (→ src/backend/.greennode.json) and LLM_API_KEY (→ src/backend/.env)."

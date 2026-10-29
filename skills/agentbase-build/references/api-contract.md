@@ -32,8 +32,8 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
 
 // Feedback on 1 answer (records a user_feedback score on the Langfuse trace)
 {"type": "feedback", "trace_id": "…", "feedback_token": "…", "score": 1, "comment": "spot on"}
-// score ∈ {-1, 0, 1}; trace_id string ≤ 128; feedback_token comes from the response (HMAC of user+trace) — used by
-// another user ⇒ 403
+// score ∈ {-1, 0, 1}; trace_id string ≤ 128; comment: text of at most 2000 chars (else 400); feedback_token comes
+// from the response (HMAC of user+trace) — used by another user ⇒ 403
 ```
 
 **HITL loop**: a `resume` can be answered by **another** `interrupted` (the model asks for the next action — a new `interrupt.id`). Keep handling `interrupt` (show the card, resume with its `id`) until the turn ends with `success`.
@@ -49,7 +49,12 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
                "tool_calls": [{"id": "call_1", "name": "gateway_create_ticket", "args": {…}}]}}
 ```
 
-Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` invalid payload · `401` missing/invalid token (only the agent's own auth — never a backing service's 401/403) · `403` spoofed user header / feedback token of another user · `409` invalid HITL state — a second request of the same session on the same replica **waits** for the first (per-session lock), it is not rejected · `422` exceeded `MAX_TOOL_ROUNDS` · `502` LLM provider error after all fallbacks, "LLM configuration error (HTTP 401/402/403/404)" (key rejected / plan expired / model not enabled or wrong id — fix the config, retrying won't help), or a backing service (Memory / Identity) rejected the request (provider/SDK details only in the server log) · `503` MaaS/Memory overloaded, IdP/JWKS unreachable or slow (client retries with backoff) · `504` exceeded `REQUEST_TIMEOUT_S` · `500` other errors.
+**`session_id` in a response (and in SSE `done` / `interrupt`) may differ from the one sent**: a session past
+`SESSION_MAX_TURNS` (default 50) is rotated by the server — summary and recent messages carried over — so that each
+turn's Memory reads stay bounded. The client **must** send the returned id from then on (the web and mobile templates
+do, in `chatState`). A client that keeps the old id gets a fresh rotation each turn and loses the turns in between.
+
+Errors: HTTP status + `{"error", "error_type", "details"}` (SDK format). `400` invalid payload · `401` missing/invalid token (only the agent's own auth — never a backing service's 401/403) · `403` spoofed user header / feedback token of another user · `409` invalid HITL state, or another request of the same session still running after `REQUEST_TIMEOUT_S` (a second request on the same replica **waits** for the first, per-session lock, up to that limit) · `413` body over `MAX_REQUEST_BYTES` · `429` more than `RATE_LIMIT_USER_PER_MIN` / `RATE_LIMIT_TENANT_PER_MIN` chat/resume requests in a minute — `details.retry_after_s` (wait, then retry; per replica) · `422` exceeded `MAX_TOOL_ROUNDS` · `502` LLM provider error after all fallbacks, "LLM configuration error (HTTP 401/402/403/404)" (key rejected / plan expired / model not enabled or wrong id — fix the config, retrying won't help), or a backing service (Memory / Identity) rejected the request (provider/SDK details only in the server log) · `503` MaaS/Memory overloaded, IdP/JWKS unreachable or slow, or more than `MAX_CONCURRENT_REQUESTS` requests at once on the replica (`Retry-After`) — client retries with backoff · `504` exceeded `REQUEST_TIMEOUT_S` · `500` other errors.
 
 `409` and `details.interrupt`:
 

@@ -21,10 +21,18 @@ Rules:
 - Approving may lead to ANOTHER approval request (new interrupt id) — clients keep handling `interrupt` until done.
   Decisions naming tool calls that are not pending (a replayed / double-submitted earlier card) are refused (409),
   never applied to the next card.
+- At most once is NOT guaranteed by this module alone: two replicas can resume the same card at the same moment, and
+  a request can end (timeout, client gone, restart) while an approved tool runs. So:
+  - a side-effect tool passes `idempotency_key(config, tool_call_id)` to the system it changes (Idempotency-Key header,
+    request id, unique constraint): the same approved call always gets the same key, on any replica, in any retry;
+  - a call left unanswered by an ended request is closed with an "Outcome unknown" result (`unfinished_tool_calls`,
+    service._prepare) — the model is told it may have run and must not repeat it, instead of a bare "interrupted"
+    that it used to retry (a 2nd card, approved again, ran the action twice).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from fnmatch import fnmatch
 from typing import Any
@@ -45,6 +53,21 @@ MAX_TOOL_CALL_ID_CHARS = 128
 MAX_REASON_CHARS = 1000
 MAX_EDIT_ARGS_CHARS = 16_000
 ALREADY_HANDLED = "This approval request has already been handled"
+OUTCOME_UNKNOWN_PREFIX = "Outcome unknown:"
+
+
+def idempotency_key(config: RunnableConfig, tool_call_id: str) -> str:
+    """Stable key of ONE tool call of one user's session: a retried / double-resumed / other-replica run of the same
+    approved call gets the same key ⇒ pass it to the downstream API so it applies the change once. In a tool:
+
+        @tool
+        async def send_invoice(order_id: str, config: RunnableConfig,
+                               tool_call_id: Annotated[str, InjectedToolCallId]) -> str:
+            key = idempotency_key(config, tool_call_id)  # e.g. headers={"Idempotency-Key": key}
+    """
+    c = config.get("configurable") or {}
+    raw = json.dumps([c.get("actor_id"), c.get("session_id"), tool_call_id])
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def is_rejected_tool_message(m: Any) -> bool:
@@ -237,6 +260,35 @@ def build_tools_node(tools: list):
         return {"messages": out, "hitl_rejected": {}}
 
     return run_tools
+
+
+def unfinished_tool_calls(snapshot: Any) -> list[dict]:
+    """Calls of the last AI message the `tools` node never answered: the graph stopped INSIDE the tools node (request
+    timeout, client gone, replica restart) — `next == ("tools",)`. They may or may not have executed."""
+    if "tools" not in (getattr(snapshot, "next", None) or ()):
+        return []
+    messages = (getattr(snapshot, "values", None) or {}).get("messages", [])
+    ai = last_ai(messages)
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    return [tc for tc in (ai.tool_calls if ai else []) if tc["id"] not in answered]
+
+
+def outcome_unknown_messages(calls: list[dict], rejected: dict[str, str]) -> list[ToolMessage]:
+    """Results closing `unfinished_tool_calls`: rejected calls never ran (their rejection note), the others may have."""
+    note = (
+        f"{OUTCOME_UNKNOWN_PREFIX} the request ended while this call was running, so it may or may not have been "
+        "executed. Do not call it again, or a variant of it, in this turn; tell the user plainly that it may already "
+        "have been done and ask them to check before trying again."
+    )
+    return [
+        ToolMessage(
+            content=rejected.get(tc["id"], note),
+            tool_call_id=tc["id"],
+            name=tc["name"],
+            status="error",
+        )
+        for tc in calls
+    ]
 
 
 def interrupt_payload(interrupts: Any) -> dict | None:

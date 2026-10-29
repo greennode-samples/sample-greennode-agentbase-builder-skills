@@ -5,7 +5,7 @@ description: "Standard for BUILDING an MCP server (Python, uv, FastMCP streamabl
 
 # Build an MCP Server with Authentication / OAuth
 
-Verified template (`assets/mcp_server/`, 46 tests — e2e: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
+Verified template (`assets/mcp_server/`, 47 tests — e2e: real uvicorn server + real MCP client + a real local JWKS endpoint, incl. the local quickstart below). Runs locally out of the box (`.env`: `MCP_APP_ENV=local`, `MCP_AUTH_MODE=none`, listening on 127.0.0.1 only). Fails closed when deployed: with no/incomplete env (and in the Docker image, `MCP_APP_ENV=prod`) `none` is refused and the server does not start.
 
 | File | Role |
 |---|---|
@@ -13,7 +13,8 @@ Verified template (`assets/mcp_server/`, 46 tests — e2e: real uvicorn server +
 | `auth.py` · `settings.py` | Token verification (api_key / jwt) · env `MCP_*` with validation |
 | `store.py` | Per-user data access (SQLite, **local only** — `open_store()` refuses it when deployed; every query filtered by owner) |
 | `backend.py` | Client for the internal system: timeout + clean `ToolError` mapping |
-| `scripts/call_tool.py` · `Makefile` | Call tools from the shell · `make setup/dev/test/lint/tools/call` |
+| `scripts/call_tool.py` · `Makefile` | Call tools from the shell · `make setup/dev/test/lint/tools/call` · `make docker-build docker-smoke` |
+| `scripts/smoke_image.sh` · `.github/workflows/ci.yml` · `.github/dependabot.yml` | The built image must **refuse to start without authentication** and answer **401 without a token** (the same script runs locally and in CI) · CI: `uv lock --check`, ruff, tests, image build + that smoke test · weekly updates of packages, base-image digests and actions |
 | `scripts/set_secret.py` | `make set-secret`: the **user** sets secrets (`MCP_BACKEND_TOKEN`…) in their own terminal with hidden input — same script as the agent template (`/agentbase-build-scaffold`) |
 | `tests/conftest.py` · `test_auth.py` · `test_tools.py` | Harness + fixtures · auth tests · **per-tool tests (copy per new tool)** |
 
@@ -47,8 +48,8 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
 1. **Scaffold** (separate directory, e.g. `src/mcp_servers/<name>/` or a separate repo):
    ```bash
    cp -R <skill-dir>/assets/mcp_server <dest> && cd <dest>
-   sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml settings.py .env.example Makefile   # Linux: sed -i
-   make setup && make test      # uv sync + .env from .env.example · 46 passed
+   sed -i '' 's/__SERVER_NAME__/<name>/g' pyproject.toml uv.lock settings.py .env.example Makefile   # Linux: sed -i
+   make setup && make test      # uv sync + .env from .env.example · 47 passed (the shipped `uv.lock` is the tested dependency set; commit it)
    ```
 2. **Write tools** in `server.py` — **read `references/tool-design.md` first**; copy the closest sample, then delete the samples you don't need (and their tests):
    - Shared data from an internal system ⇒ copy `get_product` + `backend.py` (`MCP_BACKEND_URL`, timeout, error mapping).
@@ -78,7 +79,12 @@ Rule: tools reading/writing **user-private data** must call `current_user()` (fr
    - `jwt`: `MCP_USER_TOKEN_CLAIM` (recommended, see the 2LO rule above).
    - `MCP_RESOURCE_URL` = `https://<runtime endpoint>/mcp` — **jwt mode only**: appears in `WWW-Authenticate` and `/.well-known/oauth-protected-resource` so OAuth clients can discover the authorization server; must be `https://` unless `MCP_APP_ENV=local` (startup error otherwise — the default `http://localhost:8080/mcp` would be advertised). `api_key` mode publishes no protected-resource metadata (there is no authorization server).
    - Per-user data: switch `store.py` to **Postgres before deploying — even with 1 replica**: the Runtime filesystem is wiped on every redeploy and autoscaled replicas don't share it, so `open_store()` refuses SQLite outside `MCP_APP_ENV=local` (`MCP_ALLOW_SQLITE=true` only for a throwaway demo — logs an ERROR, data is lost on redeploy).
-6. **Deploy to Runtime** — `/agentbase-build-deploy` (Docker linux/amd64, port 8080, `/health`; the image sets `MCP_APP_ENV=prod`). Suggested runtime name `<name>-mcp`.
+6. **Deploy to Runtime** — the agent's CI deploy job (`/agentbase-build-deploy`) is written for `src/backend` and its `.env.<env>.example`, so this server is **built and checked in CI, published with `/agentbase-deploy`** (manual path):
+   - **CI first** (`.github/workflows/ci.yml` of the template): `uv lock --check`, ruff, tests, then the image — `scripts/smoke_image.sh` fails the build if the image starts without authentication or answers anything but 401 to a tokenless `POST /mcp`. GitHub only reads `.github/` at a repository **root**: a server in its own repository keeps the folder as is; a server inside the agent's repository moves `ci.yml` / `dependabot.yml` there and sets the `working-directory` and `paths:` its comments name. Locally: `make docker-build docker-smoke`.
+   - **Image:** `make docker-build TAG=<tag>` (linux/amd64, port 8080, `GET /health`; the image sets `MCP_APP_ENV=prod`). Suggested runtime name `<name>-mcp`; one runtime per environment, like the agent.
+   - **Env file for the runtime** (strict `KEY=VALUE`: no quotes, inline comments or `export`; `deploy/env_file.py check <file>` of an agent project validates it): `MCP_AUTH_MODE=api_key|jwt` + its keys (step 5), `MCP_RESOURCE_URL` (jwt), the Postgres settings of your `store.py`, `MCP_BACKEND_URL`; secrets (`MCP_BACKEND_TOKEN`, DSN passwords) through `make set-secret ENV_FILE=…` in the user's own terminal — **never** `MCP_APP_ENV=local`, `MCP_ALLOW_SQLITE=true` or `MCP_AUTH_MODE=none` (the server refuses to start with them, which is the point).
+   - **Publish** with `/agentbase-deploy` (push image, create/update the runtime with that env file), then step 9's checks. A new version keeps the previous network / inbound-auth settings only if you pass them again — the same rule as the agent's runtime (`/agentbase-build-deploy` → *Keep network and security settings*).
+   - **Roll back** by updating the runtime to the previous image tag with the same env file. Nothing is automated here: the deploy is a manual, confirmed step.
 7. **Create a Custom Connector** on the MCP Gateway (Console → MCP Connectors → *Add Custom Connector*, or a target via `/agentbase-gateway`):
    - MCP URL = `https://<runtime endpoint>/mcp`. Connector name `[a-z0-9]{3,50}`, **no dash** (`hrmcp`, not `hr-mcp`): it prefixes the policy actions `<connector>__<tool>`, which accept only letters, digits and `_` (`references/tool-design.md` §1).
    - Outbound auth per the table above; **Header key `Authorization`, prefix `Bearer `**. Inbound forward only with gateway inbound JWT (see the warning above).

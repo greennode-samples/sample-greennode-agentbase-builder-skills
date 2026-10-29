@@ -1,6 +1,7 @@
 # __PROJECT_NAME__ — standard commands. All Python commands run through uv.
 BACKEND := src/backend
 FRONTEND := src/frontend
+WEB := src/web
 IMAGE ?= __PROJECT_NAME__
 # Image tag = AGENT_VERSION baked into the image = Langfuse `release` (git short SHA, or e.g. TAG=1.4.0)
 TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -10,11 +11,12 @@ CONCURRENCY ?= 1
 # A variable given on the make command line only (NAME, LIST… may also exist in the environment, e.g. WSL sets NAME)
 cli = $(if $(filter command line,$(origin $(1))),$($(1)))
 
-.PHONY: setup set-secret check-creds check-env dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev invoke
+.PHONY: setup set-secret check-creds check-env security-scan dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev web-setup web-dev web-test web-docker-build invoke
 
-setup:            ## Install backend deps (+ frontend if present)
+setup:            ## Install backend deps (+ frontend / web app if present)
 	cd $(BACKEND) && uv sync
 	@if [ -d $(FRONTEND) ]; then cd $(FRONTEND) && npm install; fi
+	@if [ -d $(WEB) ]; then cd $(WEB) && npm install; fi
 
 set-secret:       ## YOU run it in your own terminal: hidden prompt → .greennode.json / .env (never echoed): make set-secret [NAME=LLM_API_KEY|iam|langfuse] [ENV_FILE=src/backend/.env.<env>] [LIST=1]
 	@# python3 + stdlib only: works before `make setup`. STDIN=1 reads ONE value from a pipe (secret managers), YES=1 replaces it
@@ -27,14 +29,17 @@ check-env:        ## Lint a deploy env file for the platform's literal KEY=VALUE
 	@case "$(ENV_FILE)" in */.env) echo "Pass a deploy env file: make check-env ENV_FILE=$(BACKEND)/.env.<env> (or .env.<env>.example)" >&2; exit 2;; esac
 	uv run --project $(BACKEND) python deploy/env_file.py check $(ENV_FILE)
 
+security-scan:    ## Security quick scan, offline (prints key names, never values): make security-scan [ENV=prod] [JSON=1]
+	cd $(BACKEND) && uv run python -m scripts.security_scan $(if $(ENV),--env $(ENV)) $(if $(JSON),--json)
+
 dev:              ## Run the agent locally on :8080
 	cd $(BACKEND) && uv run python main.py
 
 test:             ## Unit test offline
 	cd $(BACKEND) && uv run pytest -q
 
-eval:             ## Offline eval on the local dataset (Langfuse Experiment if keys are set): make eval MIN=0.8 CONCURRENCY=1
-	cd $(BACKEND) && uv run python -m evals.run_eval --data $(or $(DATA),evals/datasets/smoke.jsonl) --min-pass-rate $(or $(MIN),0.8) --concurrency $(CONCURRENCY)
+eval:             ## Eval gate: every evals/datasets/*.jsonl must reach MIN (ltm.jsonl with LTM on; live/ by hand): make eval MIN=0.8 DATA=<file>
+	cd $(BACKEND) && uv run python -m evals.run_eval --data $(or $(DATA),evals/datasets) --min-pass-rate $(or $(MIN),0.8) --concurrency $(CONCURRENCY)
 
 eval-push:        ## Sync a JSONL to a Langfuse Dataset (named after the file), then run a gated Dataset Run: make eval-push DATA=evals/datasets/ltm.jsonl MIN=0.8
 	cd $(BACKEND) && uv run python -m evals.run_eval --data $(or $(DATA),evals/datasets/smoke.jsonl) --push --dataset __PROJECT_NAME__-$(basename $(notdir $(or $(DATA),evals/datasets/smoke.jsonl))) --min-pass-rate $(or $(MIN),0.8) --concurrency $(CONCURRENCY)
@@ -67,3 +72,15 @@ fe-setup:         ## Install required Expo packages for src/frontend (needs netw
 
 fe-dev:           ## Run the Expo dev server
 	cd $(FRONTEND) && npx expo start
+
+web-setup:        ## Install the Next.js web app's packages for src/web (needs network; vitest pinned like setup_web.sh)
+	cd $(WEB) && npm install && npm install --save-dev --save-exact vitest@4.1.12
+
+web-dev:          ## Run the Next.js web chat (BFF) on :3000
+	cd $(WEB) && npm run dev
+
+web-test:         ## Type-check + unit tests of src/web (offline)
+	cd $(WEB) && npx tsc --noEmit && npm test
+
+web-docker-build: ## Build the web app image, linux/amd64 (needs src/web/package-lock.json): make web-docker-build TAG=1.0.0
+	docker build --platform linux/amd64 -t $(IMAGE)-web:$(TAG) $(WEB)

@@ -206,11 +206,23 @@ def _is_loopback(host: str | None) -> bool:
         return False
 
 
+# What `inject_args` can fill: the VERIFIED caller (JWT / API-key principal), never a value the model wrote
+INJECTABLE = ("user_id", "tenant_id")
+
+
 def mcp_config_error(cfg: dict[str, Any]) -> str | None:
     """Why this server entry must not be loaded (None = OK). Fails closed: never guess an auth mode."""
     for flag in ("prefix", "policy_all_or_nothing"):
         if flag in cfg and not isinstance(cfg[flag], bool):
             return f'"{flag}" must be true or false (got {cfg[flag]!r})'
+    inject = cfg.get("inject_args")
+    if inject is not None and (
+        not isinstance(inject, dict)
+        or not all(isinstance(k, str) and v in INJECTABLE for k, v in inject.items())
+    ):
+        return (
+            f'"inject_args" must map argument names to one of {list(INJECTABLE)} (got {inject!r})'
+        )
     if cfg.get("transport") == "stdio":
         return None  # local process, no HTTP auth
     auth = cfg.get("auth")
@@ -650,6 +662,41 @@ async def _load_server(
         return server_tools
 
 
+def _inject_args(tool: BaseTool, mapping: dict[str, str], principal: Principal) -> BaseTool:
+    """Copy of `tool` whose arguments in `mapping` ({"owner_id": "user_id", "org": "tenant_id"}) are set from the
+    VERIFIED principal on every call and removed from the schema the model sees.
+
+    An MCP server behind the Gateway (auth `iam`) is called with the AGENT's credential: it cannot tell which end
+    user or tenant a call is for, so it scopes by an argument — and an argument the model writes can be steered by
+    prompt injection (`owner_id` of another user). Here the model neither sees nor sets it: a value it sends anyway
+    is overwritten, and a caller without the value (no tenant claim) fails the call instead of sending nothing.
+    The cached tool list is shared by every user, so the copy is made per request."""
+    original = tool.coroutine
+    if original is None:
+        return tool
+    values = {"user_id": principal.user_id, "tenant_id": principal.tenant_id}
+    schema = tool.args_schema
+    if isinstance(schema, dict):  # MCP tools carry the server's JSON Schema
+        schema = {
+            **schema,
+            "properties": {
+                k: v for k, v in (schema.get("properties") or {}).items() if k not in mapping
+            },
+        }
+        if "required" in schema:
+            schema["required"] = [k for k in schema["required"] if k not in mapping]
+
+    async def injected(*args: Any, **kwargs: Any) -> Any:
+        for param, source in mapping.items():
+            if not (value := values[source]):
+                msg = f"MCP_ERROR: '{tool.name}' needs the caller's {source}, which this request does not carry."
+                return (msg, None) if tool.response_format == "content_and_artifact" else msg
+            kwargs[param] = value  # always overwritten: whatever the model sent is ignored
+        return await original(*args, **kwargs)
+
+    return tool.model_copy(update={"coroutine": injected, "args_schema": schema})
+
+
 async def get_mcp_tools(
     settings: Settings, principal: Principal, errors: dict[str, str] | None = None
 ) -> list[BaseTool]:
@@ -658,4 +705,9 @@ async def get_mcp_tools(
     results = await asyncio.gather(
         *(_load_server(n, c, settings, principal, errors) for n, c in servers.items())
     )
-    return [t for group in results for t in group]
+    tools: list[BaseTool] = []
+    for cfg, group in zip(servers.values(), results, strict=True):
+        if inject := cfg.get("inject_args"):
+            group = [_inject_args(t, inject, principal) for t in group]
+        tools.extend(group)
+    return tools

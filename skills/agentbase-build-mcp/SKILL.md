@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-mcp
-description: "Standard for connecting tools to LangGraph AI agents on GreenNode AgentBase via MCP Governance: local tools, MCP Connectors (GitHub/Slack/M365 catalog or Custom, one connectUrl per connector), MCP Gateway (inbound IAM/JWT, outbound OAuth/API Key/Inbound forward from Identity) and Policy Group (required — without one, everything is 403; principal iam:<sub>/jwt:<sub>, action target__tool). Includes mcp_servers.json, auto-refreshing IAM token, policy-deny guard, tracing. Use when adding a tool, connecting SaaS/internal systems, configuring connector/gateway/policy for an agent, or debugging tools getting 403/denied. Trigger: add tool, MCP, MCP connector, MCP gateway, policy group, denied by policy, connect GitHub/Slack/M365, thêm tool, nối GitHub/Slack/M365. DO NOT use for gateway CRUD (use /agentbase-gateway) or writing detailed policy statements (use /agentbase-policy)."
+description: "Standard for connecting tools to LangGraph AI agents on GreenNode AgentBase via MCP Governance: local tools, MCP Connectors (GitHub/Slack/M365 catalog or Custom, one connectUrl per connector), MCP Gateway (inbound IAM/JWT, outbound OAuth/API Key/Inbound forward from Identity) and Policy Group (required — without one, everything is 403; principal iam:<sub>/jwt:<sub>, action target__tool). Includes mcp_servers.json, auto-refreshing IAM token, policy-deny guard, tracing. Use when adding a tool, connecting SaaS/internal systems, configuring connector/gateway/policy for an agent, or debugging tools getting 403/denied. Also for debugging missing tools or skipped MCP servers. Trigger: add tool, MCP, MCP connector, MCP gateway, policy group, denied by policy, connect GitHub/Slack/M365, thêm tool, nối GitHub/Slack/M365. DO NOT use for gateway CRUD (use /agentbase-gateway) or writing detailed policy statements (use /agentbase-policy)."
 ---
 
 # Tools, MCP Connectors, MCP Gateway & Policy Group
@@ -80,7 +80,7 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 {
   "servers": {
     "tavily": {"transport": "streamable_http", "url": "${MCP_GATEWAY_URL}/tavily", "auth": "iam",
-               "envs": ["dev", "staging", "prod"], "allow_tools": ["tavily_search"]},
+               "envs": ["local", "dev", "staging", "prod"], "allow_tools": ["tavily_search"]},
     "github": {"transport": "streamable_http", "url": "${MCP_GATEWAY_URL}/github", "auth": "user_jwt"},
     "kb":     {"transport": "streamable_http", "url": "${MCP_GATEWAY_URL}/kb", "auth": "iam",
                "prefix": false, "allow_tools": ["search_knowledge"]}
@@ -96,13 +96,16 @@ MCP Gateway  https://gw-<gateway>-<account>.agentbase-gateway.aiplatform.vngclou
 | `allow_tools` | Whitelist of the MCP server's **original** tool names (e.g. `tavily_search`). Empty = all. Keep it **identical to the Policy Group actions** of this connector (`tavily__tavily_search` ⇒ `tavily_search`): the LLM then never sees a tool it is denied |
 | `prefix` | Default `true`: agent-side name `<server>_<tool>`. `false` keeps the MCP tool name — e.g. `search_knowledge` moved from a local tool to an MCP server keeps its name, `HITL_TOOLS` and eval `expected_tools`. A collision with another tool name fails every request (`Duplicate tool names`) — fix the config |
 | `policy_all_or_nothing` | `true` when the Policy Group grants this connector as a whole (`actions: ["*"]` or every tool): the first deny short-circuits all its tools for the turn. Default: per tool (see *Runtime behavior*) |
+| `inject_args` | `{"owner_id": "user_id", "org": "tenant_id"}`: tool arguments set from the **verified caller** on every call and hidden from the model's schema — see *User and tenant identity* below |
 | `envs`, `enabled` | Load per `APP_ENV`, temporarily disable |
 | `transport` | `streamable_http` (default) or `stdio` (local process: `command`, `args`, `env`; no `auth` needed) |
+
+**User and tenant identity.** A server behind the Gateway with `auth: "iam"` is called with the *agent's* credential, so it cannot tell which end user or tenant a call is for. If it scopes data by an argument (`owner_id`, `org`, `account`), a value the **model** wrote can be steered by prompt injection to another user's or tenant's data. Declare those arguments in `inject_args`: the agent overwrites them from the verified principal (`user_id` = the same id memory and HITL use; `tenant_id` = the verified tenant claim, `/agentbase-build-auth`), the model never sees them, and a caller without the value (no tenant claim) gets an error instead of a call. A value the model sends anyway is ignored (`test_inject_args_*`). The server must still only accept those arguments from the IAM-authenticated agent. `user_jwt` servers receive the user's own token instead and identify the user themselves. The cached tool list is the same for every caller (an `iam` server's tools do not depend on the user), so it stays shared; the injection is applied per request on a copy.
 
 `${VAR}` (braces only; `$VAR` stays literal) is expanded **after** parsing the JSON, inside string values only — any value is safe (quotes/backslashes can't break the file or inject keys) and substituted values are not re-expanded. An **unset or empty** variable makes that server a config error: it is skipped with an ERROR log naming the variable (never sent as a literal `${VAR}`/empty key); entries filtered out by `envs`/`enabled: false` are not expanded. `user_jwt` servers need the caller's JWT: in `AUTH_MODE=api_key` (incl. A2A callers using an API key) there is none ⇒ that server is skipped (`tools.collect.output.mcp_errors`); A2A calls authenticated with a user JWT keep it (the verified principal is passed through `/a2a`).
 
 6. **Naming & HITL** — tool name in the agent = `<server>_<tool>` (e.g. `tavily_tavily_search`; the bare `<tool>` with `"prefix": false`); policy action = `<connector>__<tool>` (e.g. `tavily__tavily_search`). Side-effect tools (GitHub create issue, Slack post, M365 send mail…) ⇒ add to `HITL_TOOLS` using the agent-side name (`github_create_issue`) — mandatory on OAuth 3LO connectors (see step 3).
-7. **Verify** — `make dev`, trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
+7. **Verify** — `make dev` (loads only entries whose `envs` include `local`, or have no `envs`; needs `MCP_GATEWAY_URL` in `.env` and your own `iam:<sub>` allowed in the Policy Group), trace `tools.collect` lists all tools, send 1 message needing an ALLOWed tool (succeeds) and 1 for a disallowed tool (agent says it has no permission, **no retry**).
 
 ## Managing connectors after they're connected
 
@@ -144,6 +147,8 @@ Console *AgentBase → MCP Connectors* ([browse-connector-catalog](https://docs.
 | Tool shows in the UI but the agent doesn't see it | Filtered out by `allow_tools`, or 5-minute cache | Check the original name; restart / wait for TTL; *Sync tools* on the connector |
 
 ## Local tool — rules
+
+Adding one end to end (where it goes, `HITL_TOOLS` in every env file, idempotency, tests, eval items, proof): `/agentbase-build` → `references/add-a-tool.md`. Put yours in **`app/tools/custom.py`** (`custom_tools()`; a seed that upgrades never merge into).
 
 - `@tool`, docstring states clearly when to use it; async if I/O; compact output.
 - Never take `user_id` as a parameter. Declare `config: RunnableConfig` (LangChain injects it, the LLM doesn't see it):

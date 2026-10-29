@@ -91,6 +91,9 @@ async def test_feedback_odd_tokens_are_403_not_500(payload):
         {"trace_id": ["trace-1"], "score": 1},
         {"trace_id": "t" * 129, "score": 1},
         {"trace_id": "trace-1", "score": True},
+        {"trace_id": "trace-1", "score": 1, "comment": {"k": "v" * 100}},  # not text
+        {"trace_id": "trace-1", "score": 1, "comment": ["x"]},
+        {"trace_id": "trace-1", "score": 1, "comment": "c" * (service.MAX_COMMENT_CHARS + 1)},
     ],
 )
 async def test_feedback_payload_validated(payload):

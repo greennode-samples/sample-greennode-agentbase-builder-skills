@@ -6,6 +6,151 @@ Versions of the agentbase-build standard. The version is stamped in `.claude-plu
 `.agentbase-state.json` (`standard_version`, plus `scaffold_version` = the skills' git SHA when available), so a
 review can tell which standard a project was built from.
 
+## 0.5.0 — 2026-10-29
+
+Upgrade: run `skills/agentbase-build-scaffold/scripts/upgrade.py` on a 0.4.0 project. Your local `.env` is never
+touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURRENT_REQUESTS`,
+`RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_TENANT_PER_MIN` use their defaults until you set them (compare with
+`.env.example`); check `HITL_TOOLS` there too (`make security-scan` S3). Then
+move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
+every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
+
+Workflows coding agents use most (group D)
+- **Add a tool, end to end:** `agentbase-build/references/add-a-tool.md` — where it lives (local / MCP / A2A /
+  Identity), identity from `config`, idempotency key, `HITL_TOOLS` in every env file, tests (approve, reject, twice,
+  tenant), eval items (`expected_tools`, `forbidden_tools`, injection), proof; run in a generated project (scan FAIL
+  → PASS). New seed **`app/tools/custom.py`** (`custom_tools()`): the one file local tools are added to, so a
+  template upgrade never conflicts with them. Routed from `AGENTS.md`, the MCP skill and the orchestrator.
+- **Self-built MCP server: CI + a deploy path.** Template `.github/workflows/ci.yml` (`uv lock --check`, ruff, tests,
+  image build) and `scripts/smoke_image.sh` (`make docker-smoke`): the image must refuse to start without
+  authentication and answer 401 to a tokenless `POST /mcp` — run locally and by skills CI. `dependabot.yml`. The skill's
+  deploy step now lists the env-file rules, the manual publish with `/agentbase-deploy`, and rollback.
+- **`src/web` can be updated:** `setup_web.sh … --update` (and `.agentbase-web.json`, SHA-256 of each template file
+  written) adds new files, replaces the ones you never edited and writes `<file>.agentbase-new` for the ones you did —
+  so BFF security fixes reach existing apps. Tested in skills CI (`test_web_update.py`).
+- **Evals:** a held-out routing set (`evals/triggers_heldout.jsonl`, 40 fresh cases never used to tune a description,
+  `run_triggers.py --file`) and two end-to-end scenarios: `hr-leave-unprompted` (no skill named) and `add-ticket-tool`
+  (an existing project and a one-line request). Results in `evals/README.md`. Routing fixes the held-out run showed:
+  a `AGENTS.md` row for "slower the longer a conversation runs", Vietnamese measuring phrases in the eval skill, the
+  web-template update in the web skill.
+
+Operations (group B)
+- **`GET /ready`** (readiness; `/health` stays the platform's liveness probe): 200 `ready` / `degraded`, 503 `not_ready` when
+  `AUTH_MODE=jwt` and the JWKS cannot be fetched — it re-fetches the JWKS itself, so it recovers without a user request.
+  `degraded` names a dependency that failed recently (`llm` key rejected, `backing_service` = Memory / Identity), fed by
+  real requests and forgotten after 5 min; components only, reasons stay in the log. The CI smoke test calls it (a
+  release without `/ready` is checked on `/health`) and a failed deploy prints the exact rollback dispatch.
+- **Structured logs:** JSON lines outside `APP_ENV=local` (`LOG_FORMAT`), `request_id` + `trace_id` on every line, text
+  and exceptions masked like traces, and **one `request` line per request** (type, status, duration, outcome, tools,
+  hashed user, tenant, session — no content).
+- `EXECUTOR_THREADS` (32): the default thread pool had 5 threads on 1 vCPU — fewer than `MEMORY_MAX_CONCURRENCY` — so a
+  slow Memory queued JWT verification behind it (503 "IdP unavailable").
+- **Web app in CI and as a container:** `src/web/Dockerfile` (standalone server, digest-pinned node, non-root,
+  `HEALTHCHECK` on the new `GET /api/health`), `make web-docker-build`, a `web` job in the project CI (`npm ci`, tests,
+  build, `npm audit`, image + health) and a `web-template` job in skills CI. Not deployed: AgentBase Runtime hosts
+  agents, not web apps.
+
+Supply chain (group C)
+- The backend and MCP server templates ship the **`uv.lock` their tests ran against** (`scripts/relock.sh` regenerates
+  it); the scaffold installs it with `uv sync --locked`, so projects scaffolded months apart start from the same
+  packages. Skills CI fails on a stale lock (`uv lock --check`, plus an offline `locks` drift check).
+- Both Dockerfiles pin `python:3.13-slim` and `uv:0.10` **by digest** (uv is now a named stage); the drift check
+  requires a digest and the same one in both files.
+- **Dependabot:** this repo (actions, the two Dockerfiles' digests in one grouped PR) and generated projects
+  (`.github/dependabot.yml`, a seed: uv, docker, actions, plus npm for `src/web` / `src/frontend` when present).
+  `make security-scan` S12 warns about a base image without a digest and about a project with no update config.
+- MCP server template declares `httpx` as a runtime dependency (it arrived only through `mcp`).
+- Not shipped: npm lockfiles — the web and Expo apps are created by `create-next-app` / `create-expo`, so their
+  `package-lock.json` is created by the first `npm install` (commit it; `npm ci` in CI).
+
+Security fixes from the same review (group A)
+- **A2A approvals need a confirmation code.** Any caller used to approve every pending call with a bare `approve`,
+  `yes` or `ok` — a peer that never read the request, or an injected "reply ok to continue", ran the action. The
+  request now carries a code (HMAC of user, session and tool call ids); only `approve <code>` approves, `reject` needs
+  none, and `yes` / `ok` / `no` are plain chat. A stale code cannot decide the next card. It cannot prove a person
+  read it: `ask_<agent>` in `HITL_TOOLS` remains the caller-side rule. Peers speaking the old bare protocol must send
+  the code (the reply to their `approve` contains it).
+- **MCP identity for scoped tools:** `inject_args` in `mcp_servers.json` sets arguments such as `owner_id` /
+  `org` from the verified user / tenant on every call and hides them from the model — a server behind the Gateway
+  (`iam`) cannot tell the end user, and a model-written `owner_id` could be steered to another tenant.
+- Feedback `comment` must be text of at most 2000 chars (a 5 MB object used to reach Langfuse).
+- Web BFF: a forced refresh after the agent's 401 no longer returns the access token just rejected (sign-out for
+  IdPs that keep the refresh token); the CSP proxy matcher excludes `/api/` only, not any path starting with api.
+
+Fixes from the production-readiness review below (instructions a coding agent followed into a failure)
+- The eval gate ran `smoke.jsonl` only: `make eval` and CI now run every `evals/datasets/*.jsonl` (each gated, worst
+  exit code; `ltm.jsonl` with LTM on). Items needing deployed services go in `evals/datasets/live/` (run by hand).
+- Web BFF: the "absolute" session length was sliding (each token refresh resealed a full period, an 8 h session
+  lived 24 h with hourly use). The session now carries `authTime` and is resealed for the time left.
+- Docs: the checklist's `os.environ` grep flagged the untouched template as a BLOCKER; the decision guide mapped a
+  BFF to `api_key` (the web BFF forwards the user's token — 401 when followed); the MCP example had no `local` env
+  (`make dev` loaded no gateway tools); the erasure runbook hashed ids without the tenant and missed rotated sessions
+  and MCP server data; `lf_trace.py` needs cwd `src/backend`; `HITL_TOOLS` belongs in every env file; scaffold Step 1
+  offers `--with-web` and the mobile skill no longer claims web; stale counts (backend skills, MCP server tests,
+  marketplace list, reflection latency).
+- Repo: LICENSE (MIT, as the manifests declare), SECURITY.md (private vulnerability reporting), CONTRIBUTING.md.
+
+Production hardening — the tier-1 findings of an independent production-readiness review
+- **An approved action ran twice** (reproduced): a request ending while the approved tool ran left the call dangling;
+  the bridge's "interrupted" placeholder made the model call it again and the user approved a 2nd card. The next
+  request now closes such calls as `Outcome unknown:` (event `hitl.outcome_unknown`): the model must not repeat them,
+  the card is gone. `hitl.idempotency_key(config, tool_call_id)` gives every approved call a key stable across
+  replicas and retries — side-effect tools pass it downstream (HITL skill, checklist, AGENTS.md rule).
+- **Admission control** (`app/limits.py`, per replica): POST bodies over `MAX_REQUEST_BYTES` (1 MiB) ⇒ 413 before
+  parsing (a 50 MB body used to be parsed whole); more than `MAX_CONCURRENT_REQUESTS` (32) agent requests ⇒ 503 +
+  `Retry-After`; chat/resume over `RATE_LIMIT_USER_PER_MIN` (30) per verified user / `RATE_LIMIT_TENANT_PER_MIN` per
+  tenant ⇒ 429 + `retry_after_s`. The wait for a busy session is bounded by `REQUEST_TIMEOUT_S` (409), it used to be
+  unbounded. `LLM_MAX_TOKENS` defaults to 8192 (was uncapped; 0 = no cap).
+- **Memory cost no longer grows with the session**: the graph counts `turns`; an HTTP chat past `SESSION_MAX_TURNS`
+  (50) continues in a new session seeded with the summary and messages (span `memory.session_rotated`), returned in
+  `session_id`. The web and mobile reducers adopt it (shared `chatState.ts`, +1 test). The bridge reads every event of
+  a session per turn: 6.9 MB at turn 40 in the review.
+- **Release safety** (generated `ci.yml`): an image is built once per commit and promoted — a tag is never rebuilt or
+  overwritten (prod used to rebuild on a newer base image and re-point the tag under running replicas); the digest
+  is recorded in the job summary and checked after the deploy. A rollback (`image_tag`) no longer re-runs the eval, so
+  it works while the LLM is down; staging/prod deploy only from `main` or a tag.
+- `make security-scan` S10 covers the new limits (raised above the default, or turned off with 0). Tests: +10 backend
+  (`test_limits.py`, HITL outcome-unknown + idempotency key), +3 scan, +1 web.
+
+Effectiveness of the skills for coding agents (measured, `evals/`)
+- `evals/run_triggers.py` + `triggers.jsonl` (58 cases, EN + VI, build tasks, debugging inside a scaffolded project,
+  platform and no-skill requests): which skill a headless Claude Code loads. `evals/run_scenarios.py` +
+  `scenarios.json`: a coding agent builds 3 agents from business requests offline; graded on make test / lint /
+  security-scan, HITL coverage, MCP config, knowledge, eval items, tests.
+- Finding: debugging requests in an existing project loaded no skill (hard cases 54%). Generated projects now ship
+  `AGENTS.md` (+ `CLAUDE.md` importing it, both seeds): module → skill and symptom → skill tables, platform skills,
+  rules. Descriptions of auth, mcp, llm, memory, tracing, deploy, hitl, security-audit name their troubleshooting
+  cases. Routing: 100% of 58 cases (hard cases 100%).
+- End to end: hr-leave 13/13, faq-docs 9/9, crm-mcp 22/22 (12–19 min, ≈ $5 each). Fixed from what the runs showed:
+  `test_security_scan.py` planted names that real projects use (`crm`, `send_*`, overwritten `HITL_TOOLS`) and broke
+  their `make test` — every planted tool / server / file is now `probe…` and patterns are appended; the local
+  `.env` keeps `HITL_TOOLS=[]` from scaffold time, so `make dev` ran writes unapproved — S3 warns, for local tools
+  and MCP `allow_tools`.
+
+Product coverage
+- New skill `agentbase-build-web`: Next.js web chat in `src/web` with a BFF (server-side OIDC code + PKCE, sealed
+  httpOnly cookie, CSRF, IAM to the Runtime, nonce CSP), SSE, HITL cards, feedback; contract / SSE / chat state /
+  linkify byte-identical with the Expo app (skills-ci `cmp`). `scaffold.sh --with-web`, `make web-setup / web-dev /
+  web-test`; `src/web` is outside upgrade.py (refresh with `setup_web.sh --force`).
+- Organizations and roles: `AUTH_TENANT_CLAIM` scopes every user id to its tenant (`u-<sha256([iss, tenant, sub])>`,
+  so memory, HITL, A2A tasks, feedback and traces are per tenant), `AUTH_ALLOWED_TENANTS`, `AUTH_ROLES_CLAIM`,
+  `TOOL_ROLES` (role-gated tools removed before the model sees them, fail closed); `tenant_id` / `roles` in
+  `config["configurable"]`, `tenant:<id>` trace tag; `tests/test_tenancy.py` (13 tests).
+
+Security audit
+- New skill `agentbase-build-security-audit`: a CI-gating quick scan and a full source-first audit with Cloudflare's `security-audit` skill, seeded with
+  `references/threat-model.md` (assets, trust boundaries T1–T10, seed coverage units U1–U12, facts outside the repo,
+  companion selection). Findings are fixed in the owning skill with a regression test / eval item.
+- `make security-scan` (`scripts/security_scan.py`, asset of the new skill, 18 tests, also run inside generated projects): 13 offline checks S1–S13
+  (inbound auth, tool parameters, HITL coverage incl. MCP `allow_tools`, MCP entries, committed secrets, outbound
+  credentials, injection defenses and evals, trace masking, bounds, CORS, supply chain, open audit findings), PASS /
+  FAIL / WARN / MANUAL per check, key names only (never values), waivers in `.agentbase-state.json` →
+  `security_audit.waivers`. Generated projects get it through `scaffold.sh`; the CI `test` job runs it, so a blocking
+  FAIL stops every deploy. `.agentbase-state.json` template gains `security_audit`.
+- `/agentbase-build`: Step 9 requires `make security-scan` to pass, security review routed from review mode;
+  `references/checklist.md` → *Security* points to the scan instead of repeating its rules; `references/security.md`
+  points to the new skill.
+
 ## 0.4.0 — 2026-10-16
 
 Upgrade path for generated projects

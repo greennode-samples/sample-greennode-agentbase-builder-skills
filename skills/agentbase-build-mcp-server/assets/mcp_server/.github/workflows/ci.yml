@@ -1,0 +1,49 @@
+# CI of this MCP server: lint + tests on every push / PR, then the container image: it must build, REFUSE to start
+# without authentication (fail closed) and answer 401 to a tokenless call once an API key is set (scripts/smoke_image.sh).
+# It does not deploy: publish the image with /agentbase-deploy (agentbase-build-mcp-server → Deploy).
+#
+# Where this file goes: GitHub reads workflows only from `.github/workflows/` at the ROOT of a repository.
+#  - the server has its own repository: keep it here (copy the template's `.github/` with the rest);
+#  - the server lives inside another repository (e.g. src/mcp_servers/<name>/): move this file and dependabot.yml to
+#    that repository's `.github/`, set `working-directory` below to the server's directory, and add
+#    `paths: ["src/mcp_servers/<name>/**"]` under both triggers.
+# Actions are pinned to commit SHAs (the release in a comment); Dependabot (dependabot.yml) keeps them current.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: . # the server's directory in this repository
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: uv lock --check # uv.lock must match pyproject.toml (commit it after `uv add`)
+      - run: uv sync --locked
+      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run pytest -q
+
+  image:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build (linux/amd64, like AgentBase Runtime)
+        run: docker build --platform linux/amd64 -t mcp-ci .
+      - name: Fails closed without authentication; with an API key serves /health and answers 401 without a token
+        run: bash scripts/smoke_image.sh mcp-ci

@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-eval
-description: "Evaluation loop standard for AI agents on GreenNode AgentBase with Langfuse v4: offline eval (Datasets + Experiments, evaluators correctness LLM-judge / expected_tools / must_contain / no_error, pass_rate), regression gate in CI (make eval --min-pass-rate), online eval (score user_feedback, self_eval), improvement loop from low-rated traces → dataset → fix → rerun, and an in-graph self-evaluation loop (judge → retry). Use when measuring agent quality, comparing prompts/models, blocking regressions before deploy, collecting user feedback, or enabling self-evaluation. Trigger: evaluation, eval, loop evaluation, evaluate agent, quality test, dataset, LLM as judge, regression, compare models, self-reflection, đánh giá agent, test chất lượng, so sánh model. DO NOT use for pure code unit tests (use pytest in tests/)."
+description: "Evaluation loop standard for AI agents on GreenNode AgentBase with Langfuse v4: offline eval (Datasets + Experiments, evaluators correctness LLM-judge / expected_tools / must_contain / no_error, pass_rate), regression gate in CI (make eval --min-pass-rate), online eval (score user_feedback, self_eval), improvement loop from low-rated traces → dataset → fix → rerun, and an in-graph self-evaluation loop (judge → retry). Use when measuring agent quality, comparing prompts/models, blocking regressions before deploy, collecting user feedback, or enabling self-evaluation. Trigger: evaluation, eval, loop evaluation, evaluate agent, quality test, dataset, LLM as judge, regression, compare models, self-reflection, đánh giá agent, test chất lượng, so sánh model, đo chất lượng / độ chính xác của agent, trả lời đúng bao nhiêu phần trăm. DO NOT use for pure code unit tests (use pytest in tests/)."
 ---
 
 # Evaluation loop
@@ -27,7 +27,7 @@ description: "Evaluation loop standard for AI agents on GreenNode AgentBase with
   `{"id", "input": {"message"}, "expected_output": "<description of the correct answer>", "metadata": {"expected_tools": [...], "forbidden_tools": [...], "must_contain": [...], "user_id": "<optional>", "tags": [...]}}`
 - `forbidden_tools`: tools that must **not** be called (e.g. an injection message must not call `send_email`; a policy-denied message must not retry the tool; small talk must not call `remember`). An **attempt** fails the item: a call that reached a HITL approval is recorded in `tools_requested` even when it was rejected. The runner always **rejects** a forbidden tool at the approval, even with `--hitl approve`, so it never executes. A forbidden tool that is not in `HITL_TOOLS` runs before it can be stopped; put side-effecting tools in `HITL_TOOLS`. `user_id`: run the item as a fixed user (multi-turn LTM/isolation tests); empty ⇒ random user.
 - `expected_tools: []` checks nothing. Give small-talk items a real check instead: `forbidden_tools: ["remember"]`, `expected_output` naming the language. The shipped `smoke.jsonl` has an English and a Vietnamese greeting; `ltm.jsonl` has negative items (small talk, a one-off request) where `remember` is forbidden.
-- Split datasets by optional feature: `smoke.jsonl` (always runs), `ltm.jsonl` (only when `LTM_ENABLED=true`), `make eval DATA=evals/datasets/ltm.jsonl`.
+- Split datasets by feature: `smoke.jsonl`, one `<feature>.jsonl` per main flow, `ltm.jsonl` (only when `LTM_ENABLED=true`). **The gate (`make eval`, CI) runs every `*.jsonl` directly in `evals/datasets/`**, and each must reach the pass rate — a feature's dataset blocks a regression of that feature (the gate used to run `smoke.jsonl` only). Items that need deployed services (an MCP server limited to deployed envs, a `user_jwt` server, a dev gateway, test accounts in a real system) go in **`evals/datasets/live/`**: not gated, run by hand against dev with `make eval DATA=evals/datasets/live/<file>.jsonl`. One file: `make eval DATA=evals/datasets/ltm.jsonl`.
 - Build from Agent Spec section 8: ≥ 2 items per main flow, with items for tools, memory, HITL, out-of-scope questions (must decline politely), Vietnamese/English if needed.
 - Fixed `id` ⇒ re-pushing doesn't duplicate. `--push` stores it as `<dataset>:<id>`: Langfuse item ids are **global** (unique across all datasets), so the same JSONL can be pushed to several datasets without overwriting each other. Items pushed by an older runner with bare ids are not reused — archive them once in the UI.
 - Sensitive datasets: no real PII.
@@ -62,7 +62,7 @@ CI: the scaffold already ships the gate — job `eval` in `.github/workflows/ci.
 second one; read it there rather than copying it). What it does:
 
 - Runs in-process (`APP_ENV=local`, `AUTH_MODE=none`, `MEMORY_BACKEND=inmemory`): no runtime, no IAM. MCP servers limited to
-  deployed environments and `user_jwt` servers are not loaded ⇒ keep items that need them in a separate dataset.
+  deployed environments and `user_jwt` servers are not loaded ⇒ keep items that need them in `evals/datasets/live/` (not gated).
 - `uv sync --locked`, then **evaluates the config of a real environment**: `deploy/env_file.py export` loads
   `LLM_*` (tiers, fallbacks, routing, token caps), `REFLECTION_*`, `LTM_*`, `APP_TIMEZONE`, `MAX_TOOL_ROUNDS`, `HITL_TOOLS`,
   `CONTEXT_*` from the committed `src/backend/.env.<EVAL_CONFIG_ENV>.example` (repo variable `EVAL_CONFIG_ENV`, default `prod`;
@@ -72,8 +72,8 @@ second one; read it there rather than copying it). What it does:
   chat) — it must be allowed for **every model** that config names (check with `make check-creds` locally).
   `vars.EVAL_LLM_MODEL` (or `vars.LLM_MODEL`) overrides the primary model; otherwise `LLM_MODEL` from the config is used.
 - No key or no model ⇒ the gate is **skipped** with a notice (`gate=skipped`) and the deploy job allows **dev only**.
-  Otherwise `python -m evals.run_eval --data evals/datasets/smoke.jsonl --min-pass-rate ${EVAL_MIN_PASS_RATE:-0.8}
-  --concurrency 1` (MaaS allows 10 requests/min per account) ⇒ `gate=passed` or the job fails.
+  Otherwise `python -m evals.run_eval --data evals/datasets --min-pass-rate ${EVAL_MIN_PASS_RATE:-0.8}
+  --concurrency 1` (every dataset of the directory, each gated; the exit code is the worst) (MaaS allows 10 requests/min per account) ⇒ `gate=passed` or the job fails.
 
 Same gate locally: `make eval MIN=0.8 CONCURRENCY=1`.
 

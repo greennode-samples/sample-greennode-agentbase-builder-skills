@@ -6,8 +6,9 @@ The SDK provides POST /invocations; the handler is async and returns a dict (JSO
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
-import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,17 +19,22 @@ from greennode_agentbase import GreenNodeAgentBaseApp, PingStatus, RequestContex
 from greennode_agentbase.runtime.app import XAccelBufferingMiddleware  # noqa: E402
 from starlette.middleware import Middleware  # noqa: E402
 from starlette.middleware.cors import CORSMiddleware  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+from starlette.routing import Route  # noqa: E402
 
-from app import service  # noqa: E402
+from app import health, service  # noqa: E402
 from app.a2a.client import warn_if_timeouts_unsafe  # noqa: E402
 from app.auth.inbound import prefetch_jwks  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
+from app.limits import RequestLimitsMiddleware  # noqa: E402
+from app.logging_setup import configure_logging  # noqa: E402
 from app.observability import tracing  # noqa: E402
 from app.reflection import drain_background  # noqa: E402
 from app.tools.mcp import log_iam_principal  # noqa: E402
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging(settings)
 warn_if_timeouts_unsafe(settings)  # A2A client: this agent's timeouts vs A2A_TIMEOUT_S
 
 
@@ -43,6 +49,10 @@ def bind_host(s: Settings, dockerenv: Path = Path("/.dockerenv")) -> str:
 
 @contextlib.asynccontextmanager
 async def lifespan(_app):
+    # Blocking calls (Memory bridge, JWKS) must not queue user authentication behind a slow Memory (EXECUTOR_THREADS)
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=settings.executor_threads, thread_name_prefix="agent")
+    )
     tracing.init_tracing(settings)
     await prefetch_jwks(settings)  # the first request doesn't wait for the JWKS download
     # Policy Group principal iam:<sub> in the startup log (never fails startup)
@@ -56,7 +66,15 @@ async def lifespan(_app):
 
 
 # Passing middleware => the SDK drops its default middleware, so XAccelBufferingMiddleware (SSE) must be re-added.
-middleware = [Middleware(XAccelBufferingMiddleware)]
+# Outermost: refuse oversized bodies and overload BEFORE anything parses or queues them (app/limits.py)
+middleware = [
+    Middleware(
+        RequestLimitsMiddleware,
+        max_body_bytes=settings.max_request_bytes,
+        max_concurrent=settings.max_concurrent_requests,
+    ),
+    Middleware(XAccelBufferingMiddleware),
+]
 if settings.cors_allow_origins:
     middleware.append(
         Middleware(
@@ -68,6 +86,18 @@ if settings.cors_allow_origins:
     )
 
 app = GreenNodeAgentBaseApp(lifespan=lifespan, middleware=middleware)
+
+
+async def ready(_request: Request) -> JSONResponse:
+    """Readiness (app/health.py): 200 ready / degraded, 503 when users cannot be authenticated. `/health` stays the
+    platform's liveness probe. Names failing components only — reasons are in the log."""
+    status, failing = await health.readiness(settings, lambda: prefetch_jwks(settings))
+    body = {"status": status, "failing": failing, "version": settings.agent_version}
+    return JSONResponse(body, status_code=503 if status == "not_ready" else 200)
+
+
+# BEFORE the A2A routes below: their Mount("") answers every path that comes after it
+app.router.routes.append(Route("/ready", ready, methods=["GET"]))
 
 if (
     settings.a2a_enabled

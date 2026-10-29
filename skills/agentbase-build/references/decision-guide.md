@@ -1,6 +1,6 @@
 # Decision guide — when to enable which component
 
-Principle: **build minimal by default; every enabled component must have a reason recorded in the Agent Spec.** The template ships code for every component, but optional components are all disabled via env. "Off" means **disabled via env, not removed**: the modules import each other (`app/tools` → `app/a2a`, the graph → `app/reflection` / `app/hitl`, `app/service` → `app/tools.mcp` / `app/hitl`…), so all ten backend skills' assets stay in the project; only `app/identity.py` (+ its test) may be deleted when no tool uses outbound credentials. Every added layer brings latency, cost, attack surface and operational work.
+Principle: **build minimal by default; every enabled component must have a reason recorded in the Agent Spec.** The template ships code for every component, but optional components are all disabled via env. "Off" means **disabled via env, not removed**: the modules import each other (`app/tools` → `app/a2a`, the graph → `app/reflection` / `app/hitl`, `app/service` → `app/tools.mcp` / `app/hitl`…), so the assets of all eleven backend skills (scaffold, llm, memory, tracing, mcp, auth, identity, hitl, eval, a2a, security-audit) stay in the project; only `app/identity.py` (+ its test) may be deleted when no tool uses outbound credentials. Every added layer brings latency, cost, attack surface and operational work.
 
 ## 0. Always present (no decision needed)
 
@@ -39,7 +39,7 @@ Principle: **build minimal by default; every enabled component must have a reaso
 **Enable reflection when all of the following hold**:
 1. Mistakes are costly (financial figures, regulation citations, generated SQL/code that actually runs).
 2. "Correct" is checkable with clear criteria (matches tool output, all fields present, right format).
-3. 1–2 extra LLM calls and roughly 1–3 seconds of extra latency per turn are acceptable.
+3. 1–2 extra LLM calls per turn are acceptable, and the wait in gate mode: one judge call, measured at several seconds and up to `REFLECTION_TIMEOUT_S` (20 s) on long answers, plus a full retry when it fails (`/agentbase-build-eval` — `background` mode adds no wait but never replaces a poor answer).
 4. Measured with `make eval`, reflection noticeably increases `pass_rate` compared to off.
 
 **Do not enable when**: plain chat or small talk; HITL already reviews the output (the reviewer is the check); there is no eval to prove its value. Fast streaming UX: the default `REFLECTION_MODE=auto` judges reasoning-tier turns and long answers **after** the response (score only, no wait, no `reset`); `REFLECTION_MODE=background` does that for every turn (monitoring only, no retry). Keep `REFLECTION_MAX_RETRIES` at 1; 2 is rarely needed.
@@ -98,16 +98,16 @@ Only build the A2A layer when **at least one** of these holds:
 
 **Only expose the server** (`A2A_ENABLED=true`) when there is at least one concrete consumer. **Only add a client** (`a2a_agents.json`) when there is a concrete target agent. The two are independent.
 
-## 6. React Native frontend
+## 6. UI (mobile app / web app)
 
-Include it when end users interact directly via an app/web. Not needed when the agent is called by another service (API, A2A, chat-channel webhook); use `api_key` or a BFF then.
+Include it when end users interact directly via an app/web (`--with-frontend` = mobile app, `--with-web` = Next.js web app with its own BFF, `/agentbase-build-web`). Not needed when the agent is called by another service (API, A2A, chat-channel webhook); use `api_key` then.
 
 ## 7. Auth mode
 
 | Caller | Mode |
 |---|---|
-| End-user app | `jwt` (the organization's IdP) |
-| Internal service / BFF / other agent calling via A2A | `api_key` (one key per caller) |
+| End-user app — mobile, or the web template's BFF (it forwards the user's own token) | `jwt` (the organization's IdP) |
+| Internal service / your own BFF that does not forward user tokens / other agent calling via A2A | `api_key` (one key per caller) |
 | Local dev | `none` |
 
 ## 8. Use-case patterns

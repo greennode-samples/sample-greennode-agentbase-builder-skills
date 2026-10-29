@@ -289,3 +289,44 @@ def test_dotenv_is_loaded_by_main_not_at_import(monkeypatch, langfuse, jsonl):
     finally:
         monkeypatch.undo()
         importlib.reload(run_eval)
+
+
+# --- the gate runs every feature dataset of a directory (it used to run smoke.jsonl only)
+def test_directory_gates_every_dataset_ltm_only_when_enabled(monkeypatch, langfuse, tmp_path):
+    item = '{"id": "a", "input": {"message": "hi"}}\n'
+    for name in ("smoke", "billing", "ltm"):
+        (tmp_path / f"{name}.jsonl").write_text(item, encoding="utf-8")
+    (tmp_path / "live").mkdir()
+    (tmp_path / "live" / "crm.jsonl").write_text(
+        item, encoding="utf-8"
+    )  # needs deployed services: by hand
+    monkeypatch.setenv("LTM_ENABLED", "false")
+    get_settings.cache_clear()
+    client = langfuse(_Client())
+    shutdowns: list[int] = []
+    monkeypatch.setattr(run_eval.tracing, "shutdown_tracing", lambda: shutdowns.append(1))
+    assert _main(monkeypatch, "--data", str(tmp_path)) == 0
+    runs = [kw["run_name"] for name, kw in client.calls if name == "run_experiment"]
+    assert [r.rsplit("-", 1)[1] for r in runs] == ["billing", "smoke"] and shutdowns == [1]
+
+    monkeypatch.setenv("LTM_ENABLED", "true")
+    get_settings.cache_clear()
+    client = langfuse(_Client())
+    assert _main(monkeypatch, "--data", str(tmp_path)) == 0
+    assert len([1 for name, _ in client.calls if name == "run_experiment"]) == 3
+
+
+def test_directory_fails_when_one_dataset_fails(monkeypatch, langfuse, tmp_path):
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.jsonl").write_text('{"id": "x", "input": {"message": "hi"}}\n')
+    client = _Client()
+    results = iter(
+        [_ok_result(1), SimpleNamespace(item_results=[], run_evaluations=[], format=lambda: "")]
+    )
+    client.run_experiment = lambda **kw: next(results)
+    langfuse(client)
+    assert _main(monkeypatch, "--data", str(tmp_path)) == run_eval.EXIT_GATE_FAILED
+    assert _main(monkeypatch, "--data", str(tmp_path / "missing-dir")) == run_eval.EXIT_CONFIG_ERROR
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _main(monkeypatch, "--data", str(empty)) == run_eval.EXIT_CONFIG_ERROR

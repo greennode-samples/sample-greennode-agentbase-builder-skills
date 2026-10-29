@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     agent_name: str = "__PROJECT_NAME__"
     agent_version: str = "0.1.0"
     log_level: str = "INFO"
+    # auto = JSON lines (one object per line, with request_id / trace_id) outside APP_ENV=local, text locally —
+    # app/logging_setup.py
+    log_format: Literal["auto", "json", "text"] = "auto"
+    # Worker threads of the event loop's default executor: the Memory bridge's blocking calls, JWT / JWKS verification
+    # and asyncio.to_thread share it. Python's default (CPUs + 4: 5 threads on 1 vCPU) is smaller than
+    # MEMORY_MAX_CONCURRENCY, so a slow Memory used to queue user authentication behind it (503 "IdP unavailable")
+    executor_threads: int = Field(default=32, ge=8)
     # IANA time zone of the current date/time given to the model every turn (app/graph/builder.py)
     app_timezone: str = "Asia/Ho_Chi_Minh"
 
@@ -57,7 +64,9 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""  # use the model's `path` field on AIP (not `code`)
     llm_temperature: float = 0.2
-    llm_max_tokens: int | None = None
+    # Output cap of every LLM call without a per-task cap (reasoning tokens count too): bounds the cost and latency of
+    # one answer. 0 ⇒ no cap (the model's own limit — one runaway answer can cost the whole context window).
+    llm_max_tokens: int = Field(default=8192, ge=0)
     # Output cap per task, overrides DEFAULT_TASK_MAX_TOKENS (internal flows are bounded by default; reasoning tokens
     # count too), e.g. {"router": 512, "judge": 0} — 0 ⇒ no per-task cap (LLM_MAX_TOKENS applies)
     llm_task_max_tokens: dict[str, int] = Field(default_factory=dict)
@@ -109,6 +118,11 @@ class Settings(BaseSettings):
     # A fact saved by `remember` / injected by recall is capped at this many characters (long ones are refused / cut)
     ltm_fact_max_chars: int = Field(default=300, ge=50)
 
+    # Turns per stored session before the server rotates it (service.py): a new session_id, seeded with the summary and
+    # recent messages, is returned in `session_id` — clients adopt it. The bridge reads EVERY event of a session each
+    # turn, so without rotation each turn costs more Memory reads than the last. 0 ⇒ never rotate.
+    session_max_turns: int = Field(default=50, ge=0)
+
     # --- Graph: max agent ⇄ tools rounds per turn (exceeded ⇒ "too many steps" error, no infinite loop)
     max_tool_rounds: int = 8
 
@@ -122,6 +136,15 @@ class Settings(BaseSettings):
 
     # --- Time limit for the WHOLE request (/invocations, A2A). Exceeded ⇒ 504 / SSE error 504
     request_timeout_s: float = 180.0
+
+    # --- Request limits, per replica (app/limits.py); 0 ⇒ off. The LLM and Memory quotas are per ACCOUNT, shared by
+    # every user and replica: these keep one caller / one burst from starving everyone else.
+    max_request_bytes: int = Field(default=1_048_576, ge=1024)  # POST body ⇒ 413 above this
+    max_concurrent_requests: int = Field(
+        default=32, ge=0
+    )  # /invocations + /a2a at once ⇒ 503 above
+    rate_limit_user_per_min: int = Field(default=30, ge=0)  # chat/resume per verified user ⇒ 429
+    rate_limit_tenant_per_min: int = Field(default=0, ge=0)  # per tenant (AUTH_TENANT_CLAIM) ⇒ 429
 
     # --- Context compression ---
     context_max_tokens: int = 12_000  # over threshold => summarize older part
@@ -154,6 +177,19 @@ class Settings(BaseSettings):
     # JWT claims passed to tools via config["configurable"]["user_claims"] (allowlist, JSON
     # list) — e.g. ["employee_id","roles","email"]. Tools do NOT read the token directly.
     auth_forward_claims: list[str] = Field(default_factory=list)
+    # --- Organizations (multi-tenant) and roles — /agentbase-build-auth → Multi-tenant and roles ---
+    # Claim holding the caller's tenant / organization (e.g. "org_id", Entra ID "tid"). Set ⇒ every user id is
+    # scoped to its tenant (memory, history, HITL, A2A tasks, feedback, traces): the same person in two tenants is two
+    # users, and a token without the claim is refused (403). Empty = single tenant.
+    auth_tenant_claim: str = ""
+    # Tenants allowed to call this agent (JSON list); empty = every tenant the IdP issues tokens for.
+    auth_allowed_tenants: list[str] = Field(default_factory=list)
+    # Claim with the caller's roles: a list or a space-separated string; dotted path for nested claims
+    # (Keycloak "realm_access.roles"). Tools read them via config["configurable"]["roles"].
+    auth_roles_claim: str = ""
+    # Tools that only some roles may use, JSON {"<tool glob>": ["role", ...]}. A matching tool is removed from the
+    # turn when the caller holds none of its roles — the model never sees it (fail closed: no roles ⇒ no such tool).
+    tool_roles: dict[str, list[str]] = Field(default_factory=dict)
     auth_algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"])
     # api_key: header carrying the key + SHA-256 hex list of valid keys (JSON list, allows rotation)
     auth_api_key_header: str = "X-GreenNode-AgentBase-Custom-Api-Key"
@@ -326,6 +362,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AUTH_ALLOW_NO_AUDIENCE outside local requires AUTH_ALLOWED_CLIENT_IDS (JSON list of the app "
                 "client ids allowed to call this agent; checked against the `azp`/`client_id` claim)."
+            )
+        if self.auth_allowed_tenants and not self.auth_tenant_claim:
+            raise ValueError(
+                "AUTH_ALLOWED_TENANTS requires AUTH_TENANT_CLAIM (the claim holding the tenant id)."
             )
         if self.auth_mode == "api_key" and not self.auth_api_key_sha256:
             raise ValueError(

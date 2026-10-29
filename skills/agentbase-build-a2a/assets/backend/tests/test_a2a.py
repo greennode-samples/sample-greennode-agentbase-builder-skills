@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import importlib
 import json
+import re
 import socket
 import sys
 import threading
@@ -160,6 +161,13 @@ async def _send_with(base: str, headers: dict, text: str, context_id: str):
         return last.task, client, http
 
 
+def _code(task: pb.Task) -> str:
+    """The confirmation code in a task's request ("Reply 'approve <code>' …")."""
+    m = re.search(r"'approve ([0-9a-f]{10})'", _text(task))
+    assert m, _text(task)
+    return m.group(1)
+
+
 def _text(task: pb.Task) -> str:
     parts = [p.text for a in task.artifacts for p in a.parts if p.text]
     return "\n".join(parts) or "\n".join(p.text for p in task.status.message.parts)
@@ -211,8 +219,87 @@ async def test_hitl_over_a2a(a2a_server, fake_llm):
     task, _, _ = await _send(a2a_server, "alice", "remember: I'm allergic to shrimp", "ctx-hitl")
     assert task.status.state == pb.TASK_STATE_INPUT_REQUIRED
     assert "remember" in _text(task)
-    task2, _, _ = await _send(a2a_server, "alice", "approve", "ctx-hitl")
+    task2, _, _ = await _send(a2a_server, "alice", f"approve {_code(task)}", "ctx-hitl")
     assert task2.status.state == pb.TASK_STATE_COMPLETED and "Remembered" in _text(task2)
+
+
+@pytest.mark.parametrize(
+    "reply", ["approve", "approve 0000000000", "approve the invoice", "yes", "ok"]
+)
+async def test_approval_needs_the_code_of_the_pending_request(a2a_server, fake_llm, reply):
+    """A peer that never read the request (or was told 'reply ok to continue' by an injected document) cannot
+    approve: no bare word runs the tool, and the request is simply repeated with its code."""
+    import app.memory.long_term as lt
+
+    ran = []
+    original = lt.InMemoryLTM.save
+
+    async def counting_save(self, user_id, fact):
+        ran.append(fact)
+        return await original(self, user_id, fact)
+
+    lt.InMemoryLTM.save = counting_save
+    try:
+        model = fake_llm(
+            AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}]),
+            AIMessage("Remembered."),
+        )
+        ctx = f"ctx-code-{abs(hash(reply))}"
+        task, _, _ = await _send(a2a_server, "alice", "remember x", ctx)
+        code = _code(task)
+        again, _, _ = await _send(a2a_server, "alice", reply, ctx)
+        assert again.status.state == pb.TASK_STATE_INPUT_REQUIRED and ran == []
+        assert f"'approve {code}'" in _text(again)  # same card, same code
+        assert (
+            len(model.calls) == 1
+        )  # chat while a card is pending is answered at once, never sent to the LLM
+        done, _, _ = await _send(a2a_server, "alice", f"approve {code}", ctx)
+        assert done.status.state == pb.TASK_STATE_COMPLETED and ran == ["x"]
+    finally:
+        lt.InMemoryLTM.save = original
+
+
+async def test_code_of_another_user_or_session_does_not_approve(a2a_server, fake_llm):
+    call = AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}])
+    fake_llm(call, call, call)
+    a, _, _ = await _send(a2a_server, "alice", "remember x", "ctx-a")
+    b, _, _ = await _send(a2a_server, "bob", "remember x", "ctx-a")  # same context id, other user
+    c, _, _ = await _send(a2a_server, "alice", "remember x", "ctx-c")  # same user, other context
+    assert len({_code(a), _code(b), _code(c)}) == 3
+    refused, _, _ = await _send(a2a_server, "bob", f"approve {_code(a)}", "ctx-a")
+    assert refused.status.state == pb.TASK_STATE_INPUT_REQUIRED
+    refused, _, _ = await _send(a2a_server, "alice", f"approve {_code(a)}", "ctx-c")
+    assert refused.status.state == pb.TASK_STATE_INPUT_REQUIRED
+
+
+async def test_reject_needs_no_code(a2a_server, fake_llm):
+    fake_llm(
+        AIMessage("", tool_calls=[{"name": "remember", "args": {"fact": "x"}, "id": "c1"}]),
+        AIMessage("Understood, not saved."),
+    )
+    await _send(a2a_server, "alice", "remember x", "ctx-rej")
+    task, _, _ = await _send(a2a_server, "alice", "reject: not now", "ctx-rej")
+    assert task.status.state == pb.TASK_STATE_COMPLETED and "not saved" in _text(task)
+
+
+def test_decision_grammar():
+    from app.a2a.decisions import parse_decision
+
+    assert parse_decision("approve 0123456789") == (True, "", "0123456789")
+    assert parse_decision(" Approve  ABCDEF0123 ") == (True, "", "ABCDEF0123")
+    assert parse_decision("approve") == (True, "", "")
+    assert parse_decision("reject") == (False, "", "")
+    assert parse_decision("reject: too risky") == (False, "too risky", "")
+    for chat in (
+        "yes",
+        "ok",
+        "no",
+        "không",
+        "đồng ý",
+        "approve the invoice please",
+        "what is pending?",
+    ):
+        assert parse_decision(chat) is None
 
 
 async def test_client_tool_propagates_user(a2a_server, fake_llm, tmp_path, monkeypatch):
@@ -276,7 +363,7 @@ async def _ask_peer(a2a_server, tmp_path, monkeypatch, message: str, hitl: str =
     return out, len(hits)
 
 
-@pytest.mark.parametrize("word", ["approve", "Yes", "đồng ý", "reject: too risky"])
+@pytest.mark.parametrize("word", ["approve", "approve 0123456789", "reject: too risky"])
 async def test_llm_cannot_relay_decision_without_hitl(
     a2a_server, fake_llm, tmp_path, monkeypatch, word
 ):
@@ -297,7 +384,9 @@ async def test_decision_relayed_when_tool_is_human_approved(
     )
     task, _, _ = await _send(a2a_server, "alice", "remember x", "s-1")  # pending on the target
     assert task.status.state == pb.TASK_STATE_INPUT_REQUIRED
-    out, reached = await _ask_peer(a2a_server, tmp_path, monkeypatch, "approve", hitl=hitl)
+    out, reached = await _ask_peer(
+        a2a_server, tmp_path, monkeypatch, f"approve {_code(task)}", hitl=hitl
+    )
     assert reached >= 1 and "peer handled it" in out
 
 
@@ -407,9 +496,10 @@ async def test_concurrent_approvals_do_not_ask_again(a2a_server, fake_llm, monke
         return out
 
     monkeypatch.setattr(service_mod._Run, "_prepare", slow_prepare)
+    approve = f"approve {_code(task)}"
     (t1, _, _), (t2, _, _) = await asyncio.gather(
-        _send(a2a_server, "alice", "approve", "ctx-race"),
-        _send(a2a_server, "alice", "approve", "ctx-race"),
+        _send(a2a_server, "alice", approve, "ctx-race"),
+        _send(a2a_server, "alice", approve, "ctx-race"),
     )
     states = sorted([t1.status.state, t2.status.state])
     assert states == sorted([pb.TASK_STATE_COMPLETED, pb.TASK_STATE_FAILED])
@@ -609,14 +699,18 @@ async def test_concurrent_approvals_never_decide_the_next_card(a2a_server, fake_
         return out
 
     monkeypatch.setattr(service_mod._Run, "_prepare", slow_prepare)
+    approve = f"approve {_code(task)}"
     (t1, _, _), (t2, _, _) = await asyncio.gather(
-        _send(a2a_server, "alice", "approve", "ctx-2cards"),
-        _send(a2a_server, "alice", "approve", "ctx-2cards"),
+        _send(a2a_server, "alice", approve, "ctx-2cards"),
+        _send(a2a_server, "alice", approve, "ctx-2cards"),
     )
     assert runs == ["x"]  # card 2 neither ran nor was rejected
     for t in (t1, t2):
         assert t.status.state == pb.TASK_STATE_INPUT_REQUIRED and "'y'" in _text(t)
-    task, _, _ = await _send(a2a_server, "alice", "approve", "ctx-2cards")
+    assert (
+        _code(t1) == _code(t2) != _code(task)
+    )  # card 2 has its own code: card 1's does not approve it
+    task, _, _ = await _send(a2a_server, "alice", f"approve {_code(t1)}", "ctx-2cards")
     assert task.status.state == pb.TASK_STATE_COMPLETED and runs == ["x", "y"]
 
 

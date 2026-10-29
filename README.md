@@ -20,7 +20,9 @@ This set **complements** [`vngcloud/greennode-agentbase-skills`](https://github.
 | `/agentbase-build-identity` | **Access Control** (Identity): Static/Delegated API key and OAuth2 providers, agent-wide (M2M) and per-user (3LO consent link, non-blocking) credentials in tools, no secrets in schemas/traces |
 | `/agentbase-build-hitl` | **Human-in-the-loop**: `interrupt()` to approve / edit / reject tool calls, resume |
 | `/agentbase-build-eval` | **Evaluation loop**: Langfuse Datasets/Experiments, LLM judge, CI gate, online scores, self-eval loop |
+| `/agentbase-build-web` | **Next.js web chat + BFF**: server-side OIDC code + PKCE (tokens in a sealed httpOnly cookie, CSRF), IAM-protected Runtime support, SSE streaming, HITL approval cards, 👍👎 feedback, strict nonce CSP |
 | `/agentbase-build-frontend` | **Expo React Native**: OIDC PKCE, SSE streaming, HITL approval cards, 👍👎 feedback |
+| `/agentbase-build-security-audit` | **Security audit**: `make security-scan` (offline scan of the standard's security invariants, gates CI deploys), and a full source-first audit with Cloudflare's [security-audit skill](https://github.com/cloudflare/security-audit-skill) seeded with the AgentBase threat model (prompt injection, excessive agency, cross-user leaks, MCP/A2A trust); findings fixed in the owning skill with a regression test |
 | `/agentbase-build-deploy` | Pre-flight, per-environment env files (strict format, `make check-env`), linux/amd64 image, `/agentbase-deploy` or CI (`grn`) keeping network/security settings, verify, rollback, teardown checklist |
 
 ## Repo structure
@@ -110,6 +112,8 @@ The skills follow the open [Agent Skills](https://agentskills.io) format (`skill
 > Install the platform skill set [`vngcloud/greennode-agentbase-skills`](https://github.com/vngcloud/greennode-agentbase-skills) alongside it, using the same method. The `agentbase-build-*` skills call those skills (`/agentbase-deploy`, `/agentbase-gateway`, `/agentbase-identity`…) for platform operations.
 >
 > Also install the official [Langfuse skill](https://github.com/langfuse/skills) (`npx skills add langfuse/skills --skill langfuse`). `agentbase-build-tracing` uses it for up-to-date Langfuse docs, `langfuse-cli` and its playbooks, and keeps the AgentBase-specific rules (names, types, masking, MaaS) itself.
+>
+> For security audits, install Cloudflare's [security-audit skill](https://github.com/cloudflare/security-audit-skill) (`npx skills add https://github.com/cloudflare/security-audit-skill --skill security-audit`). `agentbase-build-security-audit` runs its full workflow with the AgentBase threat model and keeps the quick pre-deploy scan itself.
 
 ### Claude Code
 
@@ -136,7 +140,7 @@ Update: `codex plugin marketplace upgrade`. Remove: `codex plugin remove agentba
 [`skills`](https://github.com/vercel-labs/skills) detects the agents you have installed and links the skills into each agent's folder.
 
 ```bash
-npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --list                       # show the 14 skills
+npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --list                       # show the 16 skills
 npx skills add greennode-samples/sample-greennode-agentbase-builder-skills                              # interactive: choose skills + agents (project scope)
 npx skills add greennode-samples/sample-greennode-agentbase-builder-skills -g -a cursor -a gemini-cli -y   # all skills, user scope, specific agents
 npx skills add greennode-samples/sample-greennode-agentbase-builder-skills --skill agentbase-build-mcp-server -a github-copilot   # a single skill
@@ -191,7 +195,7 @@ Plugin skills may appear namespaced, like `/agentbase-build:agentbase-build` or 
 
 ## Verified
 
-- **Offline**: a freshly scaffolded project passes its full suite — 300+ tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets, outbound credentials via a fake Identity API incl. non-blocking 3LO and per-user isolation, eval gate, compression invariants, tracing masks); MCP server template passes its e2e suite (fail-closed auth incl. JWT audience and JWKS rotation, per-user isolation, atomic idempotency, tools, local quickstart); Python 3.13, ruff clean — re-checked on every push by `.github/workflows/skills-ci.yml`. Frontend: `tsc` + Android bundle (Expo SDK 57).
+- **Offline**: a freshly scaffolded project passes its full suite — 570+ backend tests, 48 web tests (agent, per-user isolation, streaming, compression, JWT/api_key incl. client allowlist and Runtime env guard, HITL, reflection, eval, tier/fallback/adaptive routing, MCP guard and auth validation, A2A e2e incl. no LLM self-approval, check-creds never prints secrets, outbound credentials via a fake Identity API incl. non-blocking 3LO and per-user isolation, eval gate, compression invariants, tracing masks); MCP server template passes its e2e suite (fail-closed auth incl. JWT audience and JWKS rotation, per-user isolation, atomic idempotency, tools, local quickstart); Python 3.13, ruff clean — re-checked on every push by `.github/workflows/skills-ci.yml`. Frontend: `tsc` + Android bundle (Expo SDK 57).
 - **Real GreenNode** (runtime `test-agent`, v1→v6): api_key auth (401), short/long-term memory on AgentBase Memory, per-user isolation (memory, HITL, feedback, A2A tasks), HITL on real memory, MCP Connector via Gateway + Policy (ALLOW/DENY), A2A Agent Card + task isolation, real model tiers + fallback on MaaS (10 models), prompt cache.
 - **Self-hosted [Langfuse](https://github.com/langfuse/langfuse) v4.49**: full trace tree, cost/cache/reasoning/TTFT, prompt versions, scores, dataset + experiment. Traces were used to find and fix a 55s → 11s slowdown (parallel MCP + negative cache, skipping reflection for simple questions, Memory timeouts).
 - **Self-hosted Langfuse v4.58 + real MaaS** (tracing standard aligned with the Langfuse best practices): chat, knowledge search, tool call, HITL interrupt/approve, same-session follow-up, streamed answer with reflection, 403 primary ⇒ fallback, feedback — one `agent` per trace, retriever/evaluator types, `llm.<task>.generate` names with the model as attribute, thinking text (`reasoning_content`) on every generation, masked feedback comment; `lf_trace.py --audit` clean on every trace.
@@ -203,3 +207,12 @@ Plugin skills may appear namespaced, like `/agentbase-build:agentbase-build` or 
 - OAuth2 3LO consent round-trip and delegated keys through `app/identity.py` (tested against the SDK with a fake Identity API).
 - `grn agentbase deploy up` / `runtime update` and the generated CI workflow on GitHub (deploy logic exercised against a mock `grn`; templates rendered and linted offline only).
 - Long-term memory auto-extraction from this template's events (see `agentbase-build-memory`).
+- Session rotation (`SESSION_MAX_TURNS`) on real AgentBase Memory, and the CI's build-once / digest steps (`docker buildx imagetools`) against the AgentBase Container Registry.
+
+## Supply chain
+
+The backend and MCP server templates ship a tested `uv.lock` (installed with `uv sync --locked`) and pin their base images by digest; generated projects get a `.github/dependabot.yml` (uv, docker, GitHub Actions, npm) and `make security-scan` S12 warns when a project has none. Details: `agentbase-build-scaffold` → *Supply chain*.
+
+## License, security, contributing
+
+MIT — see `LICENSE`. Report vulnerabilities privately as described in `SECURITY.md`. How to change a skill and what CI checks: `CONTRIBUTING.md`.
