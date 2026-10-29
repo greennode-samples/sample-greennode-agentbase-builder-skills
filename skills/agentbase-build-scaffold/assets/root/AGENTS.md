@@ -37,6 +37,7 @@ of this project, load the skill that owns it** — also for small fixes and erro
 | Set up or replace the agent's own LLM API key | `agentbase-build-llm` |
 | Wrong / missing model, LLM 401 / 429 / 5xx, cost or latency went up | `agentbase-build-llm`, then `agentbase-build-tracing` |
 | Slow or wrong answers, need to see what happened in a turn | `agentbase-build-tracing` |
+| `/ready` answers 503 or `degraded`, find one request in the logs (`request_id` / `trace_id`), a deploy's smoke test failed | `agentbase-build-deploy` (users cannot log in: `agentbase-build-auth`) |
 | The agent forgot something, context too long, one user sees another user's data | `agentbase-build-memory` (cross-user data: also `agentbase-build-security-audit`) |
 | Approval card missing or a write ran without approval, 409 on resume, an approved action ran twice or shows "Outcome unknown" | `agentbase-build-hitl` |
 | The agent answers 429 / 413 / 503 "busy", a limit to raise for a heavy user or tenant | `agentbase-build-scaffold` (then `agentbase-build-deploy` for a gateway quota) |

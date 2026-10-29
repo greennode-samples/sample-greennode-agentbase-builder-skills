@@ -92,6 +92,32 @@ jobs:
           docker exec ci-agent python -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Ho_Chi_Minh')"
           docker rm -f ci-agent
 
+  web-template:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Scaffold a project with the web app, install it (creates package-lock.json)
+        run: |
+          bash skills/agentbase-build-scaffold/scripts/scaffold.sh ci-web build/ci-web --with-web --no-sync
+          make -C build/ci-web web-setup
+      - name: Type-check, unit tests, production build, known vulnerabilities
+        working-directory: build/ci-web
+        run: |
+          make web-test
+          (cd src/web && npm run build && npm audit --omit=dev --audit-level=high)
+      - name: Container image builds and answers /api/health
+        working-directory: build/ci-web
+        run: |
+          make web-docker-build TAG=ci
+          docker run -d --name ci-web -p 127.0.0.1:3000:3000 ci-web-web:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:3000/api/health
+          docker rm -f ci-web
+
   mcp-server-template:
     runs-on: ubuntu-24.04
     steps:

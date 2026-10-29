@@ -53,6 +53,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
+from app import health
 from app.auth.inbound import (
     Principal,
     authenticate_async,
@@ -366,12 +367,15 @@ _MAPPED_ERRORS = (GreenNodeRequestError, GraphRecursionError, openai.APIError, T
 
 
 def _mapped(e: BaseException) -> GreenNodeRequestError:
-    """_map_error + log what the caller won't see (the SDK's / LLM provider's own message)."""
+    """_map_error + log what the caller won't see (the SDK's / LLM provider's own message) + what `GET /ready`
+    reports (app.health): a rejected LLM key or a refused Memory call shows as `degraded`, not only in a user's 502."""
     mapped = _map_error(e)
     if isinstance(e, GreenNodeRequestError) and mapped is not e:
         log.warning("backing service error (HTTP %s): %s", e.status_code, e.message)
+        health.record("backing_service", False, f"HTTP {getattr(e, 'status_code', '?')}")
     elif isinstance(e, openai.APIError):
         log.warning("LLM error %s: %s", getattr(e, "status_code", type(e).__name__), e.message)
+        health.record("llm", False, f"HTTP {getattr(e, 'status_code', None) or type(e).__name__}")
     return mapped
 
 
@@ -575,6 +579,8 @@ class _Run:
         trace: a background self-eval started here lands in the same trace, after the response went out."""
         messages = state.get("messages", [])
         trace_id = tracing.current_trace_id()
+        health.record("llm", True)  # a whole turn ran: the model and the stores answered
+        health.record("backing_service", True)
         if interrupt := interrupt_payload(interrupts):
             if root is not None:
                 # readable in the session view; the raw payload stays in metadata
@@ -602,9 +608,34 @@ class _Run:
             "feedback_token": self._fb(trace_id),
         }
 
+    def _log_request(
+        self, started: float, status: int, *, stream: bool, result: dict | None = None
+    ) -> None:
+        """One structured line per request (message "request"): status, duration, ids — never the message, the answer
+        or a tool argument. The fields a log-based dashboard or alert needs; the full story is the Langfuse trace."""
+        fields: dict[str, Any] = {
+            "type": self.kind,
+            "status": status,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "stream": stream,
+            "session_id": self.session_id,
+            "user": hashlib.sha256(self.principal.user_id.encode()).hexdigest()[:12],
+        }
+        if self.principal.tenant_id:
+            fields["tenant_id"] = self.principal.tenant_id
+        if result:
+            fields.update(
+                outcome=result["status"],
+                trace_id=result.get("trace_id"),
+                tools=len(result.get("tools_used") or []),
+            )
+        log.info("request", extra={"fields": fields})
+
     async def invoke(self) -> dict:
+        started, status, result = time.monotonic(), 500, None
         lock = _session_lock(self.principal.user_id, self.session_id)
         if not await _acquire(lock, self.settings.request_timeout_s):
+            self._log_request(started, 409, stream=False)
             raise _error(_SESSION_BUSY, 409)
         try:
             with self._trace([]) as root:
@@ -618,13 +649,23 @@ class _Run:
                     if mapped is e:
                         raise
                     raise mapped from e
-                return await self._result(root, out, out.get("__interrupt__"))
+                result = await self._result(root, out, out.get("__interrupt__"))
+                status = 200
+                return result
+        except BaseException as e:
+            status = (
+                499 if isinstance(e, asyncio.CancelledError) else getattr(e, "status_code", 500)
+            )
+            raise
         finally:
             lock.release()
+            self._log_request(started, status, stream=False, result=result)
 
     async def stream(self) -> AsyncIterator[dict]:
+        started, status, result = time.monotonic(), 500, None
         lock = _session_lock(self.principal.user_id, self.session_id)
         if not await _acquire(lock, self.settings.request_timeout_s):
+            self._log_request(started, 409, stream=True)
             yield {"event": "error", "message": _SESSION_BUSY, "status": 409}
             return
         it = None
@@ -662,16 +703,21 @@ class _Run:
                     for event in _stream_events(mode, data, streaming, status):
                         yield event
                 result = await self._result(root, final or {}, interrupts)
+                status = 200
                 if result["status"] == "interrupted":
                     yield {"event": "interrupt", **result}
                 else:
                     yield {"event": "done", **result}
         except _MAPPED_ERRORS as e:
             mapped = _mapped(e)
+            status = mapped.status_code
             event = {"event": "error", "message": mapped.message, "status": mapped.status_code}
             if interrupt := (mapped.details or {}).get("interrupt"):
                 event["interrupt"] = interrupt  # same as the non-stream 409's details.interrupt
             yield event
+        except GeneratorExit:  # the client closed the stream (Stop, closed tab)
+            status = 499
+            raise
         except Exception:  # noqa: BLE001 — stream already open, must return the error as an event
             log.exception("stream failed")
             yield {
@@ -684,6 +730,7 @@ class _Run:
                 with contextlib.suppress(Exception):
                     await it.aclose()
             lock.release()
+            self._log_request(started, status, stream=True, result=result)
 
 
 @contextlib.contextmanager

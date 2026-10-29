@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     agent_name: str = "__PROJECT_NAME__"
     agent_version: str = "0.1.0"
     log_level: str = "INFO"
+    # auto = JSON lines (one object per line, with request_id / trace_id) outside APP_ENV=local, text locally —
+    # app/logging_setup.py
+    log_format: Literal["auto", "json", "text"] = "auto"
+    # Worker threads of the event loop's default executor: the Memory bridge's blocking calls, JWT / JWKS verification
+    # and asyncio.to_thread share it. Python's default (CPUs + 4: 5 threads on 1 vCPU) is smaller than
+    # MEMORY_MAX_CONCURRENCY, so a slow Memory used to queue user authentication behind it (503 "IdP unavailable")
+    executor_threads: int = Field(default=32, ge=8)
     # IANA time zone of the current date/time given to the model every turn (app/graph/builder.py)
     app_timezone: str = "Asia/Ho_Chi_Minh"
 

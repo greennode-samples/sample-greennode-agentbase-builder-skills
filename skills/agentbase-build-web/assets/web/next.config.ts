@@ -14,6 +14,9 @@ const security = [
 ];
 
 const nextConfig: NextConfig = {
+  // The Dockerfile builds with NEXT_OUTPUT=standalone (a self-contained server.js + the packages it needs); a normal
+  // `next build` / `next start` is unchanged
+  ...(process.env.NEXT_OUTPUT === 'standalone' ? { output: 'standalone' as const } : {}),
   poweredByHeader: false,
   reactStrictMode: true,
   async headers() {

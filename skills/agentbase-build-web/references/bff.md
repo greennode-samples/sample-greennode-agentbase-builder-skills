@@ -12,6 +12,7 @@ is imported only by them.
 | `GET /api/auth/callback` | Checks `state` (constant time) against the cookie, redeems the code with the verifier, checks the ID token's `iss` / `aud` / `nonce` / `exp`, writes the session cookie → 303 to `/` | Errors redirect to `/?auth_error=<code>` (fixed codes the sign-in screen explains — never text from the URL) |
 | `GET /api/auth/session` | `{authenticated, mode, user: {id, name}, csrfToken}` | Never a token. `BFF_AUTH_MODE=none`: creates a `local-user` session |
 | `POST /api/auth/logout` | CSRF check → session cookie cleared → refresh token revoked (RFC 7009, best effort) → `{redirect}` = `end_session_endpoint` + `id_token_hint` + `post_logout_redirect_uri`, else `/` | The browser navigates there; the IdP session ends, so the next sign-in asks for credentials |
+| `GET /api/health` | `{status: "ok"}` | Liveness for the container platform / Docker `HEALTHCHECK`; no session, no config, no outbound call |
 | `POST /api/invocations` | Session + CSRF check → session id / body validation → fresh access token → forward → stream back | See below |
 
 ### `POST /api/invocations`
@@ -70,7 +71,9 @@ lists nothing), else `client_secret_post`.
 
 ## Deployment
 
-- Any Node.js host (container, VM, Vercel, …): `npm ci && npx next build && npx next start` (Node ≥ 20.9). Set every
+- **AgentBase Runtime does not host this app** (it runs agents: the `/invocations` contract on :8080). Run the web app on any Node.js or container host and point `BFF_AGENT_URL` at the agent's Runtime endpoint.
+- **Container:** `make web-docker-build TAG=<tag>` builds `src/web/Dockerfile` (Next.js `output: standalone`, node image pinned by digest, non-root `node` user, port 3000, `HEALTHCHECK` on `GET /api/health` — liveness only: it reads no config and calls no IdP or agent). `package-lock.json` must exist (`npm ci`); `NEXT_PUBLIC_*` are build-time values (they are inlined into the JavaScript) — pass them as `--build-arg`s in your own Dockerfile edit if they differ per environment; the `BFF_*` are read at start. The project's CI builds the image and checks `/api/health` but does not publish it.
+- Any Node.js host (VM, Vercel, …): `npm ci && npx next build && npx next start` (Node ≥ 20.9). Set every
   `BFF_*` in the host's secret store / environment and `NEXT_PUBLIC_*` at **build** time.
 - Serve over **https** only (`BFF_APP_ORIGIN=https://…`). A reverse proxy in front must not buffer
   `/api/invocations` (nginx: `proxy_buffering off;` or honor `X-Accel-Buffering`) and must not compress

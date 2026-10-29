@@ -40,6 +40,7 @@ import jwt
 from greennode_agentbase import GreenNodeAgentBaseContext, RequestContext
 from greennode_agentbase.exceptions import GreenNodeRequestError
 
+from app import health
 from app.config import Settings
 
 log = logging.getLogger(__name__)
@@ -205,19 +206,24 @@ def verify_jwt(token: str, settings: Settings) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         # The IdP/proxy answered the JWKS URL with non-JSON (maintenance page…): an outage, not a bad token ⇒ 503
         # (a 401 would log every user out). PyJWT doesn't wrap this error.
+        health.record("jwks", False, "JWKS answered with non-JSON")
         raise _idp_unavailable() from e
     except jwt.PyJWKClientError as e:
         # Only "no key for this kid" is the TOKEN's fault. Unreachable / redirected JWKS URL, `[]`, `{"keys": []}`,
         # no signing keys ⇒ the IdP side is broken ⇒ 503.
         if str(e).startswith("Unable to find a signing key that matches"):
+            health.record("jwks", True)  # the JWKS itself was fetched fine
             raise _unauthorized("Invalid token: unknown signing key") from e
+        health.record("jwks", False, "JWKS unreachable or unusable")
         raise _idp_unavailable() from e
     except jwt.PyJWKSetError as e:  # JWKS with no usable key
+        health.record("jwks", False, "JWKS has no usable key")
         raise _idp_unavailable() from e
     except jwt.PyJWTError as e:  # malformed token (DecodeError)
         raise _unauthorized(f"Invalid token: {type(e).__name__}") from e
     except (TypeError, ValueError) as e:
         raise _unauthorized("Invalid token: unusable key or token") from e
+    health.record("jwks", True)
     try:
         claims = jwt.decode(
             token,
@@ -319,11 +325,16 @@ async def authenticate_async(context: RequestContext, settings: Settings) -> Pri
 
 async def prefetch_jwks(settings: Settings) -> None:
     """Called at startup so the first request doesn't wait for the JWKS download (not blocking: requests will
-    retry the fetch — but a failure here usually means a wrong AUTH_JWKS_URL, so it is logged as ERROR)."""
+    retry the fetch — but a failure here usually means a wrong AUTH_JWKS_URL, so it is logged as ERROR). Also what
+    `GET /ready` calls to re-check a JWKS that failed (outcome ⇒ app.health)."""
     if settings.auth_mode == "jwt" and settings.auth_jwks_url:
         try:
-            await asyncio.to_thread(_jwks_client(settings.auth_jwks_url).get_jwk_set)
+            await asyncio.wait_for(
+                asyncio.to_thread(_jwks_client(settings.auth_jwks_url).get_jwk_set), AUTH_TIMEOUT_S
+            )
+            health.record("jwks", True)
         except Exception:  # noqa: BLE001
+            health.record("jwks", False, "JWKS prefetch failed")
             log.error(
                 "JWKS prefetch from AUTH_JWKS_URL failed — every jwt request will get 503 until it works "
                 "(the URL must be the final https URL: copy jwks_uri from the IdP's "

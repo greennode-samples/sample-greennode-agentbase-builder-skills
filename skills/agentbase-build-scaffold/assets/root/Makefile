@@ -11,7 +11,7 @@ CONCURRENCY ?= 1
 # A variable given on the make command line only (NAME, LIST… may also exist in the environment, e.g. WSL sets NAME)
 cli = $(if $(filter command line,$(origin $(1))),$($(1)))
 
-.PHONY: setup set-secret check-creds check-env security-scan dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev web-setup web-dev web-test invoke
+.PHONY: setup set-secret check-creds check-env security-scan dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev web-setup web-dev web-test web-docker-build invoke
 
 setup:            ## Install backend deps (+ frontend / web app if present)
 	cd $(BACKEND) && uv sync
@@ -81,3 +81,6 @@ web-dev:          ## Run the Next.js web chat (BFF) on :3000
 
 web-test:         ## Type-check + unit tests of src/web (offline)
 	cd $(WEB) && npx tsc --noEmit && npm test
+
+web-docker-build: ## Build the web app image, linux/amd64 (needs src/web/package-lock.json): make web-docker-build TAG=1.0.0
+	docker build --platform linux/amd64 -t $(IMAGE)-web:$(TAG) $(WEB)

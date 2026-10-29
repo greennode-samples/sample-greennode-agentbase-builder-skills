@@ -15,6 +15,22 @@ touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURR
 move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
 every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
 
+Operations (group B)
+- **`GET /ready`** (readiness; `/health` stays the platform's liveness probe): 200 `ready` / `degraded`, 503 `not_ready` when
+  `AUTH_MODE=jwt` and the JWKS cannot be fetched — it re-fetches the JWKS itself, so it recovers without a user request.
+  `degraded` names a dependency that failed recently (`llm` key rejected, `backing_service` = Memory / Identity), fed by
+  real requests and forgotten after 5 min; components only, reasons stay in the log. The CI smoke test calls it (a
+  release without `/ready` is checked on `/health`) and a failed deploy prints the exact rollback dispatch.
+- **Structured logs:** JSON lines outside `APP_ENV=local` (`LOG_FORMAT`), `request_id` + `trace_id` on every line, text
+  and exceptions masked like traces, and **one `request` line per request** (type, status, duration, outcome, tools,
+  hashed user, tenant, session — no content).
+- `EXECUTOR_THREADS` (32): the default thread pool had 5 threads on 1 vCPU — fewer than `MEMORY_MAX_CONCURRENCY` — so a
+  slow Memory queued JWT verification behind it (503 "IdP unavailable").
+- **Web app in CI and as a container:** `src/web/Dockerfile` (standalone server, digest-pinned node, non-root,
+  `HEALTHCHECK` on the new `GET /api/health`), `make web-docker-build`, a `web` job in the project CI (`npm ci`, tests,
+  build, `npm audit`, image + health) and a `web-template` job in skills CI. Not deployed: AgentBase Runtime hosts
+  agents, not web apps.
+
 Supply chain (group C)
 - The backend and MCP server templates ship the **`uv.lock` their tests ran against** (`scripts/relock.sh` regenerates
   it); the scaffold installs it with `uv sync --locked`, so projects scaffolded months apart start from the same

@@ -13,6 +13,7 @@ EXTERNAL_ENV: dict[str, str] = {
     "LANGFUSE_SAMPLE_RATE": "read by the Langfuse SDK itself (Langfuse() constructor default)",
     "LANGFUSE_DEBUG": "read by the Langfuse SDK itself (troubleshooting, tracing SKILL.md)",
     "LANGFUSE_MEDIA_UPLOAD_ENABLED": "read by the Langfuse SDK itself (masking notes in trace-schema.md)",
+    "NEXT_TELEMETRY_DISABLED": "read by Next.js itself: no anonymous telemetry from the web app's image (its Dockerfile)",
 }
 EXTERNAL_ENV_PATTERNS: dict[str, str] = {
     "LANGFUSE_INIT_*": "headless init of a self-hosted Langfuse server (docker-compose), tracing SKILL.md Step 1b",

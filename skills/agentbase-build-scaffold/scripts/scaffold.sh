@@ -177,6 +177,18 @@ if [[ " ${CREATED[*]-} " == *" $DEPENDABOT "* ]]; then
 YAML
     fi
   done
+  if [[ $WITH_WEB -eq 1 ]]; then
+    cat >> "$DEPENDABOT" <<'YAML'
+  # The node image of src/web/Dockerfile is pinned by digest
+  - package-ecosystem: "docker"
+    directory: "/src/web"
+    schedule:
+      interval: "weekly"
+    groups:
+      web-base-images:
+        patterns: ["*"]
+YAML
+  fi
 fi
 
 # Replace the placeholders — only in files created above that contain them (untouched files keep inode & mtime)

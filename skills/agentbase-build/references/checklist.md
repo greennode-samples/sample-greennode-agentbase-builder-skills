@@ -79,6 +79,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 ## Deploy
 - [B] `make check-env ENV_FILE=src/backend/.env.<env>` (or the `.example` CI uses) passes: strict KEY=VALUE, no quotes / inline comments / `export`, no `GREENNODE_*` (injected / reserved), no `AGENT_VERSION` (= image tag).
 - [B] The deploy env file sets `APP_ENV` (dev/staging/prod) — `local` is refused on the Runtime.
+- [B] `GET <endpoint>/ready` answers 200 (the CI smoke test does this; 503 names `jwks`: the IdP's JWKS cannot be fetched). Logs are JSON lines with `request_id` / `trace_id` and one `request` line per request.
 - After deploy: health OK, the latest version's `imageUrl` is the new tag, 1 real request has a trace in Langfuse with `release` = that tag, clean logs (`/agentbase-monitor`).
 - [B] After every update the new version keeps the previous network mode (VPC: same VPC/subnet/route CIDRs), IP Access Control and Inbound Auth (`/agentbase-build-deploy` Step 4).
 - [B] `.agentbase-state.json` → `environments.<env>` records `runtime_id`, `endpoint`, `image`, `network_mode`, `allowed_cidrs`, `inbound_auth`, `identity`, `memory_id`, `memory_strategy_id`, `llm_key_name`, `mcp_gateway`, `policy_group`, `principal`.

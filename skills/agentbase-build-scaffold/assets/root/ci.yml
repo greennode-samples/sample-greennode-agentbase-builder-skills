@@ -77,6 +77,47 @@ jobs:
       - name: Security quick scan (blocking checks gate every deploy — /agentbase-build-security-audit)
         run: uv run python -m scripts.security_scan
 
+  # The web app (src/web, when the project has one): type-check + unit tests, the production build, known vulnerabilities
+  # of its runtime dependencies and the container image. It is not deployed from here — AgentBase Runtime hosts agents,
+  # not web apps: publish the image where your web app runs (agentbase-build-web, references/bff.md → Deploying).
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: app
+        run: echo "present=$([ -f src/web/package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.app.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/web/package-lock.json
+      - name: Install exactly package-lock.json (fails when it is stale or missing — commit it)
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npm ci --no-fund
+      - name: Type-check and unit tests
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npx tsc --noEmit && npm test
+      - name: Production build
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npm run build
+      - name: Known vulnerabilities in the runtime dependencies (high and critical)
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: npm audit --omit=dev --audit-level=high
+      - name: Container image builds and answers /api/health
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/web
+        run: |
+          docker build --platform linux/amd64 -t web-ci .
+          docker run -d --name web-ci -p 127.0.0.1:3000:3000 web-ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:3000/api/health
+          docker rm -f web-ci
+
   eval:
     needs: test
     # Not for a rollback (image_tag set): that image passed the gate when it was released, and a rollback must work
@@ -293,6 +334,7 @@ jobs:
             RUNTIME_ID=$(jq -er --arg n "$RUNTIME_NAME" '[.[] | select(.name == $n) | .id][0]' <<< "$RUNTIMES")
           else
             PREV=$(latest_version "$RUNTIME_ID")
+            echo "PREV_IMAGE=$(jq -r .image <<< "$PREV")" >> "$GITHUB_ENV" # for the rollback hint below
             problems=$(jq -r '[
                 (select(.mode != "PUBLIC") | "network mode \(.mode) (an update without networkConfig switches it to PUBLIC)"),
                 (select(.allowedCidrs | length > 0) | "IP Access Control (\(.allowedCidrs | length) allowed CIDRs)"),
@@ -327,9 +369,25 @@ jobs:
           echo "Runtime $RUNTIME_ID serves v$(jq -r .version <<< "$NEW") = $IMAGE@$IMAGE_DIGEST (mode $(jq -r .mode <<< "$NEW"), inbound $(jq -r .inbound <<< "$NEW"))"
           grn agentbase deploy status "$RUNTIME_NAME"
 
-      - name: Smoke test
+      # /ready (not /health): 503 when this replica cannot authenticate users (JWKS unreachable). A release from before
+      # /ready existed answers 404 — a rollback to it is checked on /health. The response names failing components only.
+      - name: Smoke test (GET /ready)
         if: vars.AGENT_ENDPOINT != ''
-        run: curl -fsS --retry 5 --retry-delay 10 "$AGENT_ENDPOINT/health"
+        run: |
+          for i in $(seq 1 6); do
+            code=$(curl -sS -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' "$AGENT_ENDPOINT/ready" || true)
+            [ "$code" = 200 ] && break
+            [ "$code" = 404 ] && { curl -fsS "$AGENT_ENDPOINT/health" && exit 0; }
+            sleep 10
+          done
+          cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
+          [ "$code" = 200 ] || { echo "::error::$AGENT_ENDPOINT/ready answered HTTP ${code:-none}"; exit 1; }
+
+      # No automatic rollback: a half-applied rollback is worse than a failed deploy. Say exactly how to do it.
+      - name: How to roll back
+        if: failure() && env.PREV_IMAGE != ''
+        run: |
+          echo "::error::This deploy to $APP_ENV failed. The runtime ran $PREV_IMAGE before. Roll back: run this workflow from that release's tag with deploy_env=$APP_ENV and image_tag=${PREV_IMAGE##*:} (no rebuild, no eval)."
 
       - name: Remove the rendered files
         if: always()
