@@ -26,6 +26,8 @@ import json
 import logging
 import os
 import re
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -158,16 +160,32 @@ def _origin(url: str) -> tuple[str, str, int | None] | None:
         return None
 
 
-async def _pinned_client(url: str, http: httpx.AsyncClient) -> Client:
+# url → (fetched at, the card AFTER the origin check). The card is the target's public description: fetching it on every
+# call doubled the requests of each `ask_<agent>`. Only a card that passed the check is kept, so a cached card can
+# never point credentials elsewhere; the credentials themselves are per call (they ride on the per-call http client).
+_CARDS: OrderedDict[str, tuple[float, pb.AgentCard]] = OrderedDict()
+_CARDS_MAX = 64
+
+
+def reset_card_cache() -> None:
+    """Tests only."""
+    _CARDS.clear()
+
+
+async def _pinned_client(url: str, http: httpx.AsyncClient, card_ttl_s: float = 0.0) -> Client:
     """A2A client whose RPC endpoint is on the CONFIGURED origin. The Agent Card (served by the target) names
     the RPC URL; following it blindly would send our API key / the user's JWT wherever the card points (another
     host, plain http). Only interfaces with the same scheme + host + port as `url` are kept."""
     want = _origin(url)
     if want is None or not want[1]:
         raise PermissionError(f"Invalid A2A agent url {url!r}")
+    cached = _CARDS.get(url)
+    if cached is not None and card_ttl_s > 0 and time.monotonic() - cached[0] < card_ttl_s:
+        return ClientFactory(ClientConfig(streaming=False, httpx_client=http)).create(cached[1])
     card = await A2ACardResolver(http, url).get_agent_card()
     kept = [i for i in card.supported_interfaces if _origin(i.url) == want]
     if not kept:
+        _CARDS.pop(url, None)
         advertised = [i.url for i in card.supported_interfaces]
         raise PermissionError(
             f"Agent card of {url} advertises RPC endpoints on another origin {advertised}: refusing to send "
@@ -177,6 +195,11 @@ async def _pinned_client(url: str, http: httpx.AsyncClient) -> Client:
     pinned.CopyFrom(card)
     del pinned.supported_interfaces[:]
     pinned.supported_interfaces.extend(kept)
+    if card_ttl_s > 0:
+        _CARDS[url] = (time.monotonic(), pinned)
+        _CARDS.move_to_end(url)
+        while len(_CARDS) > _CARDS_MAX:
+            _CARDS.popitem(last=False)
     return ClientFactory(ClientConfig(streaming=False, httpx_client=http)).create(pinned)
 
 
@@ -226,7 +249,7 @@ def build_a2a_tools(settings: Settings, principal: Principal) -> list[BaseTool]:
                 async with httpx.AsyncClient(
                     headers=headers, timeout=settings.a2a_timeout_s
                 ) as http:
-                    client = await _pinned_client(_c["url"], http)
+                    client = await _pinned_client(_c["url"], http, settings.a2a_card_ttl_s)
                     req = pb.SendMessageRequest(
                         message=pb.Message(
                             message_id=os.urandom(8).hex(),

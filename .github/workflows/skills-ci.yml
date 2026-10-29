@@ -39,7 +39,8 @@ jobs:
             skills/agentbase-build-mcp-server/assets/mcp_server/scripts/set_secret.py
       - name: Web (Next.js) and Expo templates share the platform-neutral chat logic byte for byte
         run: |
-          for f in src/api/contract.ts src/api/sse.ts src/chat/chatState.ts src/components/linkify.ts; do
+          for f in src/api/contract.ts src/api/sse.ts src/chat/chatState.ts src/components/linkify.ts \
+                   tests/chatState.test.ts tests/contract.test.ts tests/sse.test.ts tests/linkify.test.ts; do
             cmp "skills/agentbase-build-frontend/assets/frontend/$f" "skills/agentbase-build-web/assets/web/$f"
           done
 
@@ -91,6 +92,33 @@ jobs:
           docker exec ci-agent sh -c 'test "$AGENT_VERSION" = ci && ! command -v uv'
           docker exec ci-agent python -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Ho_Chi_Minh')"
           docker rm -f ci-agent
+      - name: The image has no fixable CRITICAL vulnerability (the deploy job of ci.yml does the same before its push)
+        working-directory: build/ci-agent
+        env:
+          TRIVY_VERSION: 0.76.1
+          TRIVY_DB_REPOSITORY: mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
+        run: |
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl -fsSL -o trivy.tgz "$base/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSL -o trivy.sums "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz$" trivy.sums | awk '{print $1"  trivy.tgz"}' | sha256sum -c -
+          tar -xzf trivy.tgz trivy && sudo mv trivy /usr/local/bin/
+          trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress ci-agent:ci
+
+  frontend-template:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Scaffold a project with the Expo app and install it
+        run: |
+          bash skills/agentbase-build-scaffold/scripts/scaffold.sh ci-mobile build/ci-mobile --with-frontend --no-sync
+          make -C build/ci-mobile fe-setup
+      - name: Type-check and run the shared chat logic's tests inside the Expo app
+        run: make -C build/ci-mobile fe-test
 
   web-template:
     runs-on: ubuntu-24.04

@@ -118,6 +118,29 @@ jobs:
           curl -fsS http://127.0.0.1:3000/api/health
           docker rm -f web-ci
 
+  # The mobile app (src/frontend, when the project has one): type-check + the unit tests of the chat logic it shares with
+  # the web app (identical files — a fix to one is tested in both). The store build and release are yours (EAS).
+  mobile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: app
+        run: echo "present=$([ -f src/frontend/package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.app.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+      - name: Install exactly package-lock.json (fails when it is stale or missing — commit it)
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/frontend
+        run: npm ci --no-fund
+      - name: Type-check and unit tests
+        if: steps.app.outputs.present == 'true'
+        working-directory: src/frontend
+        run: npx tsc --noEmit && npm test
+
   eval:
     needs: test
     # Not for a rollback (image_tag set): that image passed the gate when it was released, and a rollback must work
@@ -240,15 +263,36 @@ jobs:
       # Build once per commit, then promote THAT image: a tag is never rebuilt or overwritten. Rebuilding per
       # environment shipped bits nobody tested to prod (newer base image, re-resolved layers) and re-pointed the tag
       # under running replicas, which pull it again on scale-out.
-      - name: Build and push the image once per commit (linux/amd64)
+      - name: Build the image once per commit (linux/amd64)
         if: inputs.image_tag == ''
         run: |
           if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
             echo "::notice::$IMAGE already exists (built by an earlier deploy of this commit) — promoting it, no rebuild"
+            echo "BUILT=false" >> "$GITHUB_ENV"
           else
             docker build --platform linux/amd64 --build-arg "AGENT_VERSION=$AGENT_VERSION" -t "$IMAGE" src/backend
-            docker push "$IMAGE"
+            echo "BUILT=true" >> "$GITHUB_ENV"
           fi
+
+      # A fixable CRITICAL vulnerability in the OS or Python packages of a NEW image stops the deploy BEFORE the push.
+      # Pinned version + SHA256 check (like grn); unfixed ones are ignored — nothing can be done about them yet. The
+      # base images are pinned by digest, so this is also what tells you a digest is overdue (Dependabot's docker PR).
+      - name: Scan the new image (Trivy, fixable CRITICAL only)
+        if: env.BUILT == 'true'
+        env:
+          TRIVY_VERSION: 0.76.1
+          TRIVY_DB_REPOSITORY: mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
+        run: |
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl -fsSL -o trivy.tgz "$base/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSL -o trivy.sums "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz$" trivy.sums | awk '{print $1"  trivy.tgz"}' | sha256sum -c -
+          tar -xzf trivy.tgz trivy && sudo mv trivy /usr/local/bin/
+          trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress "$IMAGE"
+
+      - name: Push the image
+        if: env.BUILT == 'true'
+        run: docker push "$IMAGE"
 
       - name: Check that the image to redeploy exists (no rebuild)
         if: inputs.image_tag != ''

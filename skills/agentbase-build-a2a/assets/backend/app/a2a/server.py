@@ -22,11 +22,16 @@ Authentication & per-user isolation (same as /invocations):
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from collections import OrderedDict
 
+from a2a.auth.user import User
 from a2a.helpers.proto_helpers import new_task, new_text_message
 from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.context import ServerCallContext
 from a2a.server.events.event_queue_v2 import EventQueue
+from a2a.server.owner_resolver import resolve_user_scope
 from a2a.server.request_handlers import DefaultRequestHandlerV2
 from a2a.server.routes.agent_card_routes import create_agent_card_routes
 from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
@@ -103,6 +108,59 @@ def _verified_principal(context: RequestContext) -> Principal:
     if not isinstance(principal, Principal) or principal.user_id != call.user.user_name:
         raise GreenNodeRequestError("Unauthenticated A2A request", status_code=401)
     return principal
+
+
+# --------------------------------------------------------------------------- task store
+class _Owner(User):
+    """Just enough of a user to address one owner's tasks when evicting."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def is_authenticated(self) -> bool:
+        return True
+
+    @property
+    def user_name(self) -> str:
+        return self._name
+
+
+class BoundedTaskStore(InMemoryTaskStore):
+    """InMemoryTaskStore that cannot grow without bound: at most `max_tasks`, none kept idle past `ttl_s`.
+
+    The SDK's store never forgets, so a long-running replica held every task of every caller forever. A task is
+    "idle" from its last save; the oldest go first. Tasks are per replica — the conversation (checkpoint, pending
+    approval) is in Memory and works on any replica; only `GetTask` / `ListTasks` of an old task needs the replica
+    that ran it. A shared store (a2a-sdk's DatabaseTaskStore) is the answer if callers poll tasks across replicas."""
+
+    def __init__(self, max_tasks: int = 10_000, ttl_s: float = 3600.0):
+        super().__init__()
+        self.max_tasks = max_tasks
+        self.ttl_s = ttl_s
+        self._seen: OrderedDict[tuple[str, str], float] = (
+            OrderedDict()
+        )  # (owner, task id) → last save, oldest first
+
+    async def save(self, task, context: ServerCallContext) -> None:
+        await super().save(task, context)
+        key = (resolve_user_scope(context), task.id)
+        self._seen[key] = time.monotonic()
+        self._seen.move_to_end(key)
+        await self._evict()
+
+    async def delete(self, task_id: str, context: ServerCallContext) -> None:
+        await super().delete(task_id, context)
+        self._seen.pop((resolve_user_scope(context), task_id), None)
+
+    async def _evict(self) -> None:
+        now = time.monotonic()
+        while self._seen:
+            (owner, task_id), at = next(iter(self._seen.items()))
+            if len(self._seen) <= self.max_tasks and now - at < self.ttl_s:
+                return
+            self._seen.popitem(last=False)
+            await super().delete(task_id, ServerCallContext(user=_Owner(owner)))
 
 
 # --------------------------------------------------------------------------- executor
@@ -335,7 +393,9 @@ def build_agent_card(settings: Settings) -> pb.AgentCard:
 def a2a_routes(settings: Settings) -> list[BaseRoute]:
     card = build_agent_card(settings)
     handler = DefaultRequestHandlerV2(
-        agent_executor=AgentBaseExecutor(), task_store=InMemoryTaskStore(), agent_card=card
+        agent_executor=AgentBaseExecutor(),
+        task_store=BoundedTaskStore(settings.a2a_max_tasks, settings.a2a_task_ttl_s),
+        agent_card=card,
     )
     # Sub-app holds only the JSON-RPC route at /a2a, wrapped in AuthenticationMiddleware. Mount("") is
     # placed AFTER /invocations, /health, agent card ⇒ those routes are unaffected.

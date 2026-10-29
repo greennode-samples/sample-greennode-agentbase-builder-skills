@@ -5,11 +5,13 @@ import React from 'react';
 
 import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { ConversationProvider } from './chat/ConversationProvider';
+import { LocaleProvider, useStrings } from './lib/LocaleProvider';
 import { ChatScreen } from './screens/ChatScreen';
 
 function Gate() {
   const auth = useAuth();
-  if (auth.status === 'loading') return <p className="center muted">Loading…</p>;
+  const t = useStrings();
+  if (auth.status === 'loading') return <p className="center muted">{t.loading}</p>;
   if (auth.status === 'signed_out') {
     return (
       <div className="center">
@@ -20,7 +22,7 @@ function Gate() {
           </p>
         )}
         <button type="button" className="primary" onClick={auth.signIn}>
-          Sign in
+          {t.signIn}
         </button>
       </div>
     );
@@ -30,10 +32,12 @@ function Gate() {
 
 export function App() {
   return (
-    <AuthProvider>
-      <ConversationProvider>
-        <Gate />
-      </ConversationProvider>
-    </AuthProvider>
+    <LocaleProvider>
+      <AuthProvider>
+        <ConversationProvider>
+          <Gate />
+        </ConversationProvider>
+      </AuthProvider>
+    </LocaleProvider>
   );
 }

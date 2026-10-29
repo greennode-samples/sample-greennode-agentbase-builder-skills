@@ -15,6 +15,19 @@ touched: the new settings `SESSION_MAX_TURNS`, `MAX_REQUEST_BYTES`, `MAX_CONCURR
 move eval items that need deployed services into `src/backend/evals/datasets/live/` — `make eval` and CI now gate
 every dataset in `evals/datasets/`. Clients must adopt the `session_id` returned by the agent (session rotation).
 
+Known problems fixed (after the group A–D release work)
+- **Checked on a real environment** (see README): session rotation on real Memory and on a deployed runtime, the digest / `imagetools` deploy steps against the
+  Container Registry, `/ready` 200 / `degraded` / 503, the CI smoke step, 413 / 429 / 401, JSON logs, `LLM_MAX_TOKENS=8192` on 12 models. Found and fixed: an INFO line per
+  Memory call (`httpx`) made a turn write ~28 log lines — now silenced.
+- **A2A:** the task store is bounded (`A2A_MAX_TASKS` 10 000, `A2A_TASK_TTL_S` 1 h, oldest first — the SDK's store never
+  forgot); a target's validated Agent Card is cached `A2A_CARD_TTL_S` (300 s) instead of fetched on every call.
+- **Identity:** the agent-wide OAuth2 token is reused `IDENTITY_M2M_CACHE_S` (60 s, capped by the token's own `exp`);
+  per-user credentials are never cached.
+- **Web:** English and Vietnamese (`NEXT_PUBLIC_LOCALE`); the message list is no longer a live region — a screen reader
+  hears the finished answer once, with who said it (`role="log"` + one polite status region).
+- **Mobile:** the Expo app runs the same four test files as the web app for the shared chat logic (`make fe-test`, a
+  `mobile` CI job and a `frontend-template` skills-CI job; the files are compared byte for byte).
+
 Workflows coding agents use most (group D)
 - **Add a tool, end to end:** `agentbase-build/references/add-a-tool.md` — where it lives (local / MCP / A2A /
   Identity), identity from `config`, idempotency key, `HITL_TOOLS` in every env file, tests (approve, reject, twice,

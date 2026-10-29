@@ -203,6 +203,10 @@ class Settings(BaseSettings):
     # asserts it ⇒ whoever holds the key (or reaches a local agent) could use ANY user's connected accounts.
     # true = accept that (a trusted BFF that verified the user, or local testing with a dev identity).
     identity_trust_asserted_user: bool = False
+    # Seconds an agent-wide OAuth2 (M2M) token is reused instead of fetched from Identity on every tool call. Capped by
+    # the token's own `exp` when it is a JWT. Per-user (3LO) credentials are never cached: consent can change any
+    # moment. 0 = fetch every time (a rotated provider secret is picked up at once)
+    identity_m2m_cache_s: float = Field(default=60.0, ge=0)
 
     # --- Human-in-the-loop: globs on tool names that need human approval, JSON list ---
     # e.g. HITL_TOOLS=["gateway_*_delete","gateway_*_create","send_email"]
@@ -244,6 +248,12 @@ class Settings(BaseSettings):
     # Client: one call to another agent. Must be ≥ the TARGET's REQUEST_TIMEOUT_S + margin, and this agent's
     # REQUEST_TIMEOUT_S > A2A_TIMEOUT_S + one LLM call (warned at startup) — skill agentbase-build-a2a
     a2a_timeout_s: float = 120.0
+    # Server: tasks kept in memory per replica (the conversation itself lives in Memory, shared by all replicas).
+    # Oldest are dropped beyond A2A_MAX_TASKS, and any task idle longer than A2A_TASK_TTL_S
+    a2a_max_tasks: int = Field(default=10_000, ge=100)
+    a2a_task_ttl_s: float = Field(default=3600.0, gt=0)
+    # Client: how long a target's validated Agent Card is reused instead of fetched on every call
+    a2a_card_ttl_s: float = Field(default=300.0, ge=0)
 
     # --- Feedback token (prevents posting scores to another user's trace). Empty => derived from
     # GREENNODE_CLIENT_SECRET (runtime-injected, stable across replicas) or LLM_API_KEY.

@@ -746,3 +746,79 @@ def test_client_timeout_rule_is_warned_at_startup(tmp_path, monkeypatch, caplog)
     get_settings.cache_clear()
     warn_if_timeouts_unsafe(get_settings())  # calls no other agent ⇒ nothing to warn about
     assert "A2A client timeouts" not in caplog.text
+
+
+# --------------------------------------------------------------------------- bounded task store, cached Agent Card
+async def test_task_store_forgets_the_oldest_tasks_and_keeps_owners_apart():
+    from a2a.server.context import ServerCallContext
+
+    from app.a2a.server import BoundedTaskStore, _Owner
+
+    store = BoundedTaskStore(max_tasks=3, ttl_s=3600)
+    alice, bob = ServerCallContext(user=_Owner("alice")), ServerCallContext(user=_Owner("bob"))
+    await store.save(pb.Task(id="a1"), alice)
+    await store.save(pb.Task(id="b1"), bob)
+    for n in range(2, 5):
+        await store.save(pb.Task(id=f"a{n}"), alice)
+    assert len(store._seen) == 3
+    assert (
+        await store.get("a1", alice) is None and await store.get("b1", bob) is None
+    )  # the two oldest
+    assert (
+        await store.get("a4", alice) is not None and await store.get("a4", bob) is None
+    )  # owners stay apart
+    await store.save(pb.Task(id="a2"), alice)  # saved again ⇒ now the newest
+    await store.save(pb.Task(id="a5"), alice)
+    assert await store.get("a2", alice) is not None and await store.get("a3", alice) is None
+    await store.delete("a5", alice)
+    assert ("alice", "a5") not in store._seen and await store.get("a5", alice) is None
+
+
+async def test_task_store_drops_tasks_idle_past_the_ttl(monkeypatch):
+    from a2a.server.context import ServerCallContext
+
+    import app.a2a.server as srv
+
+    clock = [1000.0]
+    monkeypatch.setattr(srv.time, "monotonic", lambda: clock[0])
+    store = srv.BoundedTaskStore(max_tasks=100, ttl_s=60)
+    ctx = ServerCallContext(user=srv._Owner("alice"))
+    await store.save(pb.Task(id="old"), ctx)
+    clock[0] += 61
+    await store.save(
+        pb.Task(id="new"), ctx
+    )  # the save is what notices that "old" has been idle too long
+    assert await store.get("old", ctx) is None and await store.get("new", ctx) is not None
+
+
+async def test_agent_card_is_fetched_once_per_ttl_not_on_every_call(
+    a2a_server, fake_llm, tmp_path, monkeypatch
+):
+    import app.a2a.client as client_mod
+    from app.auth.inbound import Principal
+
+    client_mod.reset_card_cache()
+    fetched: list[int] = []
+    original = client_mod.A2ACardResolver.get_agent_card
+
+    async def counting(self, *args, **kwargs):
+        fetched.append(1)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(client_mod.A2ACardResolver, "get_agent_card", counting)
+    _peer_config(tmp_path, monkeypatch, a2a_server)
+    fake_llm(*(AIMessage(f"answer {i}") for i in range(4)))
+    config = {"configurable": {"actor_id": "alice", "session_id": "s-card"}}
+
+    [tool] = client_mod.build_a2a_tools(get_settings(), Principal(user_id="alice"))
+    for message in ("hello", "and again"):
+        assert "answer" in await tool.ainvoke({"message": message}, config=config)
+    assert len(fetched) == 1  # the second call reused the validated card
+
+    monkeypatch.setenv("A2A_CARD_TTL_S", "0")  # 0 ⇒ every call fetches
+    get_settings.cache_clear()
+    [tool] = client_mod.build_a2a_tools(get_settings(), Principal(user_id="alice"))
+    for message in ("one", "two"):
+        await tool.ainvoke({"message": message}, config=config)
+    assert len(fetched) == 3
+    client_mod.reset_card_cache()

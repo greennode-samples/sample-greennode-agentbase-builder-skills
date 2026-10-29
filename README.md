@@ -201,13 +201,18 @@ Plugin skills may appear namespaced, like `/agentbase-build:agentbase-build` or 
 - **Self-hosted Langfuse v4.58 + real MaaS** (tracing standard aligned with the Langfuse best practices): chat, knowledge search, tool call, HITL interrupt/approve, same-session follow-up, streamed answer with reflection, 403 primary ⇒ fallback, feedback — one `agent` per trace, retriever/evaluator types, `llm.<task>.generate` names with the model as attribute, thinking text (`reasoning_content`) on every generation, masked feedback comment; `lf_trace.py --audit` clean on every trace.
 - Per-feature details, platform bugs encountered and open items: `skills/agentbase-build/references/platform-coverage.md`.
 
-## To verify on a real environment
+## Verified on a real environment (2026-10-29, a throwaway runtime, memory store and LLM key — all deleted afterwards)
 
-- Runtime Inbound Auth (IAM / JWT) and IP Access Control end-to-end with this template (documented, not yet exercised; affects Direct vs BFF, see `agentbase-build-auth`).
-- OAuth2 3LO consent round-trip and delegated keys through `app/identity.py` (tested against the SDK with a fake Identity API).
-- `grn agentbase deploy up` / `runtime update` and the generated CI workflow on GitHub (deploy logic exercised against a mock `grn`; templates rendered and linted offline only).
-- Long-term memory auto-extraction from this template's events (see `agentbase-build-memory`).
-- Session rotation (`SESSION_MAX_TURNS`) on real AgentBase Memory, and the CI's build-once / digest steps (`docker buildx imagetools`) against the AgentBase Container Registry.
+- **Memory:** session rotation at `SESSION_MAX_TURNS` on AgentBase Memory — locally with 5 turns and on a deployed runtime with a real model (the third turn returns a new `session_id`, the model still sees the earlier turns, the old session is no longer written). A turn writes **24 events** (3 turns = 72 events in one session): the cost is real and rotation bounds the reads.
+- **Deploy path:** a build with the digest-pinned base images, a push to the AgentBase Container Registry (it accepts the OCI index with its attestation manifest), `docker buildx imagetools inspect` and the digest the CI reads from it, a runtime created `--from-cr` that pulls that image, `AGENT_VERSION` = the tag in `/ready`.
+- **`/ready`:** `ready` on a healthy runtime; `degraded` (`llm`) after a model call refused with HTTP 404; **503 `not_ready` (`jwks`)** with `/health` still 200 when the IdP's JWKS is unreachable. The CI smoke step, verbatim, exits 1 on the 503 and 0 on a healthy runtime.
+- **Limits on the runtime:** 413 over 1 MiB, 429 after `RATE_LIMIT_USER_PER_MIN` with `retry_after_s`, 401 without the API key.
+- **Logs:** JSON lines with `request_id` and one `request` line per request (type, status, duration, outcome, hashed user, session) on the runtime's log stream.
+- **`LLM_MAX_TOKENS=8192`** (the new default) is accepted by all 12 chat models enabled on the account that day.
+
+Still to verify: the real login flow with an IdP (JWKS, OIDC code + PKCE), Runtime Inbound Auth (IAM / JWT) and IP Access Control, OAuth2 3LO consent, the generated CI workflow on GitHub (`grn` deploy, Trivy scan, Dependabot), long-term memory auto-extraction.
+
+Found by that run: the Container Registry API answered **HTTP 502** to every image / artifact delete (a platform problem, not the skills'); and an INFO line per Memory call made a chat turn write ~28 `httpx` lines — silenced in `app/logging_setup.py`.
 
 ## Supply chain
 

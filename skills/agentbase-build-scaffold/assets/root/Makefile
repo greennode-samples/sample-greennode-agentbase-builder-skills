@@ -11,7 +11,7 @@ CONCURRENCY ?= 1
 # A variable given on the make command line only (NAME, LIST… may also exist in the environment, e.g. WSL sets NAME)
 cli = $(if $(filter command line,$(origin $(1))),$($(1)))
 
-.PHONY: setup set-secret check-creds check-env security-scan dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev web-setup web-dev web-test web-docker-build invoke
+.PHONY: setup set-secret check-creds check-env security-scan dev test eval eval-push lint fmt lock docker-build docker-run fe-setup fe-dev fe-test web-setup web-dev web-test web-docker-build invoke
 
 setup:            ## Install backend deps (+ frontend / web app if present)
 	cd $(BACKEND) && uv sync
@@ -68,10 +68,13 @@ invoke:           ## Try the local agent: make invoke MSG="hello"
 	  -d '{"type":"chat","message":"$(or $(MSG),hello)"}' | (cd $(BACKEND) && uv run python -m json.tool)
 
 fe-setup:         ## Install required Expo packages for src/frontend (needs network)
-	cd $(FRONTEND) && npm install && npx expo install expo-auth-session expo-web-browser expo-crypto expo-secure-store expo-constants
+	cd $(FRONTEND) && npm install && npx expo install expo-auth-session expo-web-browser expo-crypto expo-secure-store expo-constants && npm install --save-dev --save-exact vitest@4.1.12
 
 fe-dev:           ## Run the Expo dev server
 	cd $(FRONTEND) && npx expo start
+
+fe-test:          ## Type-check + unit tests of the chat logic shared with the web app (src/frontend, offline)
+	cd $(FRONTEND) && npx tsc --noEmit && npm test
 
 web-setup:        ## Install the Next.js web app's packages for src/web (needs network; vitest pinned like setup_web.sh)
 	cd $(WEB) && npm install && npm install --save-dev --save-exact vitest@4.1.12

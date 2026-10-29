@@ -33,6 +33,11 @@ a failed run leaves `.agentbase-setup-pending` and the next run re-applies the t
 
 **Updating the template files** (BFF security fixes, new components) — `upgrade.py` does not touch `src/web`; `setup_web.sh … --update` does it safely: setup records the SHA-256 of every template file it wrote in `src/web/.agentbase-web.json` (**commit it**); `--update` then adds new files, **replaces the ones you never edited**, and for a file you edited keeps yours and writes the new version to `<file>.agentbase-new` — merge it, delete it, run again (exit 1 while something is left to merge). Dropped template files are listed, never deleted; `package.json`, the lock and your `.env.local` are never touched. An app from before the manifest existed has none: every file that differs is treated as yours. Run `make web-test` afterwards. Test: `.github/scripts/test_web_update.py`.
 
+## Language and accessibility
+
+- **English and Vietnamese** (`NEXT_PUBLIC_LOCALE=auto|en|vi`, `auto` = the browser's languages; `<html lang>` follows). All text is in `src/web/src/lib/i18n.ts`; the words of the shared chat logic (`src/web/src/chat/chatState.ts`, identical in the Expo app) are translated in place by `applyChatText`. To add a language: one dictionary in `i18n.ts` (a test fails when a language misses a key). The Expo app is still English only.
+- **Screen readers:** the message list is `role="log"` with `aria-live="off"` — an answer streams token by token and announcing every change is unusable. One polite `role="status"` region says the **finished** answer once (first 600 characters) or that an approval is needed (`src/web/src/components/announce.ts`); each message is read with who said it ("You:" / "Agent:"). Checked in a browser: `lang`, roles and Vietnamese text. Not checked with a real screen reader.
+
 ## Step 2 — Configure `.env.local`
 
 | Variable | Value |

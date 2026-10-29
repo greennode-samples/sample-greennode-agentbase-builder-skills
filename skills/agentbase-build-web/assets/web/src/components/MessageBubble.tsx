@@ -5,6 +5,7 @@
 import React from 'react';
 
 import type { UiMessage } from '../chat/chatState';
+import { useStrings } from '../lib/LocaleProvider';
 import { linkify } from './linkify';
 
 type Props = { message: UiMessage; onFeedback?: (score: -1 | 1) => void };
@@ -12,11 +13,17 @@ type Props = { message: UiMessage; onFeedback?: (score: -1 | 1) => void };
 const SAFE_URL = /^https:\/\/[^\s<>"'`]+$/i; // defense in depth: linkify already returns https URLs only
 
 export function MessageBubble({ message: m, onFeedback }: Props) {
+  const t = useStrings();
   const canRate = m.role === 'assistant' && !m.pending && !!m.traceId && !!m.feedbackToken;
   return (
     <div className={`bubble ${m.role}`}>
-      {!!m.tools?.length && <div className="tools small">🔧 {m.tools.join(', ')}</div>}
+      {!!m.tools?.length && (
+        <div className="tools small" aria-label={t.toolsUsed}>
+          🔧 {m.tools.join(', ')}
+        </div>
+      )}
       <div className="text">
+        <span className="sr-only">{m.role === 'user' ? t.you : t.agent}: </span>
         {linkify(m.text).map((p, i) =>
           p.url && SAFE_URL.test(p.url) ? (
             <a key={i} href={p.url} target="_blank" rel="noopener noreferrer nofollow">
@@ -28,7 +35,7 @@ export function MessageBubble({ message: m, onFeedback }: Props) {
         )}
       </div>
       {m.pending && !!m.status && (
-        <div className="status small" aria-live="polite">
+        <div className="status small">
           {m.status}
         </div>
       )}
@@ -38,7 +45,7 @@ export function MessageBubble({ message: m, onFeedback }: Props) {
             <button
               key={score}
               type="button"
-              aria-label={score === 1 ? 'Good answer' : 'Bad answer'}
+              aria-label={score === 1 ? t.goodAnswer : t.badAnswer}
               aria-pressed={m.feedback === score}
               className={`icon ${m.feedback === score ? 'selected' : ''}`}
               onClick={() => onFeedback?.(score)}

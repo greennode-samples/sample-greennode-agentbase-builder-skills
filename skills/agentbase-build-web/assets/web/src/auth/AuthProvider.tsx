@@ -4,6 +4,8 @@
 // POST /api/auth/logout followed by a navigation to the IdP's end-session URL.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
+import { useStrings } from '../lib/LocaleProvider';
+
 export type AuthStatus = 'loading' | 'signed_in' | 'signed_out';
 type Auth = {
   status: AuthStatus;
@@ -21,17 +23,12 @@ type Auth = {
 
 const AuthContext = createContext<Auth | null>(null);
 
-// Codes set by /api/auth/callback (never free text from the URL)
-const AUTH_ERRORS: Record<string, string> = {
-  idp_error: 'The sign-in provider refused the request (check the redirect URI registered at the IdP).',
-  idp_unavailable: 'The sign-in provider is unreachable — try again.',
-  state: 'The sign-in took too long or was started in another tab — try again.',
-  login_failed: 'Sign-in failed — try again.',
-};
+// Codes set by /api/auth/callback (never free text from the URL): the texts are in src/lib/i18n.ts
 
 type SessionInfo = { authenticated: boolean; user?: { id: string; name: string | null }; csrfToken?: string };
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const t = useStrings();
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [info, setInfo] = useState<SessionInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +37,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const url = new URL(window.location.href);
     const code = url.searchParams.get('auth_error');
     if (code) {
-      setError(AUTH_ERRORS[code] ?? AUTH_ERRORS.login_failed);
+      setError(t.authErrors[code] ?? t.authErrors.login_failed ?? '');
       url.searchParams.delete('auth_error');
       window.history.replaceState(null, '', url.pathname + url.search);
     }
@@ -57,7 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        setError(`The app server is unreachable or misconfigured (${e instanceof Error ? e.message : String(e)}) — see its log.`);
+        setError(t.serverUnreachable(e instanceof Error ? e.message : String(e)));
         setStatus('signed_out');
       });
     return () => {
