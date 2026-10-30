@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-web
-description: "Next.js web chat (App Router, TypeScript) for AI agents on GreenNode AgentBase in src/web: BFF route handlers (OIDC code + PKCE, tokens in an encrypted httpOnly cookie, CSRF, IAM for the Runtime), SSE streaming, HITL approval cards, 👍👎 feedback, strict CSP. Also for updating the web template files to a newer version of these skills (setup_web.sh --update). Trigger: web app, web UI, Next.js, browser chat, giao diện web. DO NOT use for the mobile app (/agentbase-build-frontend) or the backend."
+description: "Use when the user wants a browser-based chat UI or web app (Next.js) for their agent, with login / SSO, or to update the web template to a newer version of these skills: load it before coding. Next.js App Router in src/web: BFF route handlers (OIDC PKCE, encrypted httpOnly cookie, CSRF), SSE streaming, approval cards, feedback, strict CSP, setup_web.sh --update. Trigger: web app, web UI, web chat UI, Next.js, browser chat, SSO login, giao diện web, web chat. DO NOT use for the mobile app (/agentbase-build-frontend) or the backend."
 ---
 
 # Next.js Web Chat (BFF)

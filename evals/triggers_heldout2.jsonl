@@ -1,0 +1,32 @@
+{"id": "h2-tracing-q", "prompt": "Why is each turn of my agent so expensive? I want to see token usage per step.", "expect": ["agentbase-build-tracing"]}
+{"id": "h2-tracing-vi", "prompt": "Mình muốn xem agent mất bao lâu ở mỗi bước, bật Langfuse giúp mình.", "expect": ["agentbase-build-tracing"]}
+{"id": "h2-hitl-q", "prompt": "Can the agent ask me for a yes or no before it wires money?", "expect": ["agentbase-build-hitl"]}
+{"id": "h2-hitl-vi", "prompt": "Agent xoá dữ liệu mà không hỏi ai cả, làm sao bắt nó chờ người duyệt?", "expect": ["agentbase-build-hitl"], "in_project": true}
+{"id": "h2-ident-q", "prompt": "Where do I keep the Twilio auth token that one of my tools needs?", "expect": ["agentbase-build-identity"]}
+{"id": "h2-ident-vi", "prompt": "Mỗi user phải tự kết nối Google Drive của họ để agent đọc file, làm thế nào?", "expect": ["agentbase-build-identity"]}
+{"id": "h2-sec-q", "prompt": "Is my agent safe to launch? Look for holes before we go live.", "expect": ["agentbase-build-security-audit"]}
+{"id": "h2-sec-vi", "prompt": "Rà xem agent có dính prompt injection không trước khi lên prod.", "expect": ["agentbase-build-security-audit"]}
+{"id": "h2-mcpserver-q", "prompt": "I need to expose our inventory database to agents as MCP tools, behind a bearer token.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "h2-mcpserver-vi", "prompt": "Làm một server MCP cho hệ thống ERP của công ty, dùng OAuth.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "h2-mcp-q", "prompt": "Hook my agent up to Slack so it can post messages to a channel.", "expect": ["agentbase-build-mcp"]}
+{"id": "h2-mcp-vi", "prompt": "Tool của agent bị 403 denied by policy, sửa sao?", "expect": ["agentbase-build-mcp"], "in_project": true}
+{"id": "h2-memory-q", "prompt": "My agent forgets what the user told it yesterday.", "expect": ["agentbase-build-memory"]}
+{"id": "h2-memory-vi", "prompt": "Hội thoại dài quá thì agent chậm và tốn token, xử lý sao?", "expect": ["agentbase-build-memory"]}
+{"id": "h2-auth-q", "prompt": "Put Microsoft Entra ID login in front of the agent API.", "expect": ["agentbase-build-auth"]}
+{"id": "h2-auth-vi", "prompt": "Request không có token vẫn gọi được /invocations, vá lỗi này giúp mình.", "expect": ["agentbase-build-auth"], "in_project": true}
+{"id": "h2-eval-q", "prompt": "How do I know my last prompt change did not make the answers worse?", "expect": ["agentbase-build-eval"]}
+{"id": "h2-eval-vi", "prompt": "Tạo bộ câu hỏi mẫu để chấm điểm agent mỗi lần deploy.", "expect": ["agentbase-build-eval"]}
+{"id": "h2-llm-q", "prompt": "Which model should the router use and which one the final answer?", "expect": ["agentbase-build-llm"]}
+{"id": "h2-llm-vi", "prompt": "Key LLM của agent bị 401, lấy lại ở đâu?", "expect": ["agentbase-build-llm"], "in_project": true}
+{"id": "h2-deploy-q", "prompt": "Ship the agent to staging.", "expect": ["agentbase-build-deploy", "agentbase-deploy"], "in_project": true}
+{"id": "h2-deploy-vi", "prompt": "Rollback bản vừa deploy đi, nó lỗi health check.", "expect": ["agentbase-build-deploy", "agentbase-deploy"], "in_project": true}
+{"id": "h2-web-q", "prompt": "Make a website where employees chat with the agent after signing in with Google.", "expect": ["agentbase-build-web"]}
+{"id": "h2-frontend-q", "prompt": "I want an iPhone app for talking to the agent.", "expect": ["agentbase-build-frontend"]}
+{"id": "h2-a2a-q", "prompt": "Our billing agent has to ask the shipping agent that another team runs.", "expect": ["agentbase-build-a2a"]}
+{"id": "h2-scaffold-q", "prompt": "Create the folder layout for a new agent called refund-bot.", "expect": ["agentbase-build-scaffold", "agentbase-build"]}
+{"id": "h2-build-q", "prompt": "I want a chatbot that helps our sales team draft quotes.", "expect": ["agentbase-build"]}
+{"id": "h2-build-vi", "prompt": "Làm giúp mình trợ lý trả lời thắc mắc về bảo hiểm cho khách hàng.", "expect": ["agentbase-build"]}
+{"id": "h2-neg-logs", "prompt": "Show me the last 100 log lines of my deployed runtime.", "expect": ["agentbase-monitor"]}
+{"id": "h2-neg-llmkey", "prompt": "Create a new API key on the AI platform for my account.", "expect": ["agentbase-llm"]}
+{"id": "h2-neg-teardown", "prompt": "Delete everything I created for the demo agent.", "expect": ["agentbase-teardown"]}
+{"id": "h2-neg-none", "prompt": "What does a Python list comprehension with a condition look like?", "expect": ["none"]}

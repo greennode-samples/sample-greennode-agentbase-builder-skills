@@ -14,6 +14,7 @@ them and how hard they push the model to use one. Treat a score here as the floo
 tell the skills apart", and confirm with the real agent when it matters.
 
     export LLM_API_KEY=...                                   # never pass a key on the command line
+    python3 evals/run_triggers_api.py --api-key-file ~/.maas-key --list-models   # which models can this key call?
     python3 evals/run_triggers_api.py --model deepseek-v3 --runs 2
     python3 evals/run_triggers_api.py --model glm-4.6 --model gpt-oss-120b --file evals/triggers_heldout.jsonl
     python3 evals/run_triggers_api.py --base-url https://api.openai.com/v1 --api-key-env OPENAI_API_KEY --model gpt-5
@@ -157,9 +158,11 @@ def pick(reply: dict | str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", action="append", required=True, help="repeatable: one run per model")
+    ap.add_argument("--model", action="append", default=[], help="repeatable: one run per model")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL)
     ap.add_argument("--api-key-env", default="LLM_API_KEY", help="name of the env var holding the key")
+    ap.add_argument("--api-key-file", type=Path, help="file whose first line is the key (instead of the env var)")
+    ap.add_argument("--list-models", action="store_true", help="print the model ids the endpoint offers and exit")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--only", help="comma-separated case ids")
@@ -168,9 +171,21 @@ def main() -> int:
     ap.add_argument("--skills-dir", type=Path, action="append", default=[], help="more user-level skill dirs")
     args = ap.parse_args()
 
-    key = os.environ.get(args.api_key_env, "")
+    if args.api_key_file:
+        key = args.api_key_file.expanduser().read_text(encoding="utf-8").splitlines()[0].strip()
+    else:
+        key = os.environ.get(args.api_key_env, "")
     if not key:
-        print(f"error: set {args.api_key_env} in the environment", file=sys.stderr)
+        print(f"error: set {args.api_key_env} in the environment or pass --api-key-file", file=sys.stderr)
+        return 2
+    if args.list_models:
+        req = urllib.request.Request(f"{args.base_url.rstrip('/')}/models", headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            for m in sorted(x.get("id", "") for x in json.load(resp).get("data", [])):
+                print(m)
+        return 0
+    if not args.model:
+        print("error: pass at least one --model (or --list-models)", file=sys.stderr)
         return 2
     cases = [json.loads(ln) for ln in args.file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     if args.only:
