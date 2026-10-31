@@ -6,6 +6,16 @@ Versions of the agentbase-build standard. The version is stamped in `.claude-plu
 `.agentbase-state.json` (`standard_version`, plus `scaffold_version` = the skills' git SHA when available), so a
 review can tell which standard a project was built from.
 
+## Unreleased
+
+- **Skill descriptions** of all `agentbase-build-*` skills now open with what the user asks or wants (and say to load the skill
+  before answering, even a short question); `Trigger:` and `DO NOT use` clauses are kept. Haiku 5.5 routing 79% → 95% on the
+  tuning set, Sonnet 5.5 unchanged (98%). The orchestrator says it replaces `/agentbase-wizard` even when that is installed
+  and excludes single-component requests; the web skill answers "website" and "web page".
+- **Routing eval for non-Claude models:** `evals/run_triggers_api.py` (GPT, DeepSeek, GLM, Gemma, Kimi, MiniMax, Qwen through
+  any OpenAI-compatible API, simulated skill listing) and a second held-out set; results per model in `evals/README.md`.
+  Known weak spot: small models skip skills for a bare question that does not name AgentBase (Haiku 5.5 64% on held-out2).
+
 ## 0.5.0 — 2026-10-29
 
 Upgrade: run `skills/agentbase-build-scaffold/scripts/upgrade.py` on a 0.4.0 project. Your local `.env` is never

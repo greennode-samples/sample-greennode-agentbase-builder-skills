@@ -209,6 +209,7 @@ Plugin skills may appear namespaced, like `/agentbase-build:agentbase-build` or 
 - **Limits on the runtime:** 413 over 1 MiB, 429 after `RATE_LIMIT_USER_PER_MIN` with `retry_after_s`, 401 without the API key.
 - **Logs:** JSON lines with `request_id` and one `request` line per request (type, status, duration, outcome, hashed user, session) on the runtime's log stream.
 - **`LLM_MAX_TOKENS=8192`** (the new default) is accepted by all 12 chat models enabled on the account that day.
+- **Routing across models** (does the agent load the right skill?): Claude Sonnet 5.5 98% / 92%, Haiku 5.5 95% / 64% (tuning / fresh held-out set), and 95–100% on nine other models (DeepSeek, GLM, GPT-5.4 nano, Gemma, Kimi, MiniMax, Qwen) when only these skills are listed — simulated, not run through each vendor's own agent. Small models can skip skills for a bare question that does not mention AgentBase; the platform wizard can win plain build requests. Details and the method: [evals/README.md](evals/README.md).
 
 Still to verify: the real login flow with an IdP (JWKS, OIDC code + PKCE), Runtime Inbound Auth (IAM / JWT) and IP Access Control, OAuth2 3LO consent, the generated CI workflow on GitHub (`grn` deploy, Trivy scan, Dependabot), long-term memory auto-extraction.
 

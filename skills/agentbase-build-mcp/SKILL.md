@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-mcp
-description: "Use when the user wants an agent to use tools: add a tool, connect GitHub / Slack / M365 or an internal system through MCP, configure a connector, gateway or policy group, stop the model passing someone else's id to a tool, or debug tools that are missing or denied (403): load it before answering or coding. Local tools, MCP Connectors, MCP Gateway, Policy Group (required, else 403), mcp_servers.json, inject_args, tracing. Trigger: add tool, MCP, MCP connector, MCP gateway, policy group, denied by policy, connect GitHub/Slack/M365, thêm tool, nối GitHub/Slack/M365. DO NOT use for gateway CRUD (use /agentbase-gateway) or writing detailed policy statements (use /agentbase-policy)."
+description: "Use when the user wants an agent to use tools: add a tool, connect GitHub / Slack / M365 (e.g. post messages to Slack) or an internal system through MCP, configure a connector, gateway or policy group, stop the model passing someone else's id to a tool, or debug tools that are missing or denied (403): load it before answering or coding. Local tools, MCP Connectors, MCP Gateway, Policy Group (required, else 403), mcp_servers.json, inject_args, tracing. Trigger: add tool, MCP, MCP connector, MCP gateway, policy group, denied by policy, connect GitHub/Slack/M365, thêm tool, nối GitHub/Slack/M365. DO NOT use for gateway CRUD (use /agentbase-gateway) or writing detailed policy statements (use /agentbase-policy)."
 ---
 
 # Tools, MCP Connectors, MCP Gateway & Policy Group

@@ -1,6 +1,6 @@
 ---
 name: agentbase-build-web
-description: "Use when the user wants a browser-based chat UI or web app (Next.js) for their agent, with login / SSO, or to update the web template to a newer version of these skills: load it before coding. Next.js App Router in src/web: BFF route handlers (OIDC PKCE, encrypted httpOnly cookie, CSRF), SSE streaming, approval cards, feedback, strict CSP, setup_web.sh --update. Trigger: web app, web UI, web chat UI, Next.js, browser chat, SSO login, giao diện web, web chat. DO NOT use for the mobile app (/agentbase-build-frontend) or the backend."
+description: "Use when the user wants a website, web page or browser-based chat UI (Next.js) for their agent, e.g. employees chatting with it after signing in with Google or company SSO, or to update the web template to a newer version of these skills: load it before coding. Next.js App Router in src/web: BFF route handlers (OIDC PKCE, encrypted httpOnly cookie, CSRF), SSE streaming, approval cards, feedback, strict CSP, setup_web.sh --update. Trigger: website, web page, web app, web UI, web chat UI, Next.js, browser chat, SSO login, giao diện web, web chat. DO NOT use for the mobile app (/agentbase-build-frontend) or the backend."
 ---
 
 # Next.js Web Chat (BFF)
