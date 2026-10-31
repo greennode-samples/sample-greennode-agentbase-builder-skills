@@ -38,6 +38,23 @@ The scaffold commits one **non-secret** config file per environment: `src/backen
 
 ## Step 3 — Build the image
 
+**First find out what the user can build with** — do not assume Docker. Run the read-only detector (it changes nothing, logs in nowhere and prints no secret):
+
+```bash
+bash <this-skill>/scripts/detect_build_env.sh <project-dir>
+```
+
+It reports the container engine that is installed *and answering* (Docker Desktop, Rancher Desktop, OrbStack, Colima, Podman, nerdctl, Finch, buildah), whether it can build `linux/amd64`, the git host and CI config (GitHub Actions, GitLab CI, Jenkins, Bitbucket, Azure), and whether `gh` / `glab` are signed in, then lists the ways to build and push. **Show that list and let the user choose** (a running engine → build locally; GitHub → the CI path below; nothing → install an engine or use CI).
+
+| What the user has | Build and push |
+|---|---|
+| Docker, or Rancher Desktop in dockerd mode, OrbStack, Colima, Docker Desktop | The commands below; login with `cr.sh credentials docker-login` |
+| Rancher Desktop in containerd mode (`nerdctl`), Podman, Finch | `<engine> build --platform linux/amd64 --build-arg AGENT_VERSION=<tag> -t <image>:<tag> src/backend`, then `<engine> login`, `<engine> push`. The Makefile targets call `docker`, so these are run by hand. `cr.sh credentials docker-login` only logs `docker` in: the user takes the secret from the Console (or `cr.sh credentials reset`) and enters it into the engine's own prompt, never into chat |
+| GitHub | CI path (*CI/CD* below): no local engine needed |
+| GitLab, Jenkins, Bitbucket, Azure | No template is shipped. The job needs an engine (or kaniko / buildah), `--platform linux/amd64`, and the registry user / secret as masked CI variables. Same Dockerfile and the same image name / tag rules |
+
+"Rancher" can also mean the Rancher Kubernetes manager, which does not build images: ask what builds the image there. The nerdctl, Podman, Finch and GitLab rows are the documented commands of those tools and have **not been run against the AgentBase registry** by this repo; only the Docker path has.
+
 ```bash
 make docker-build IMAGE=<registry>/<repo>/<project> TAG=<tag>        # AGENT_VERSION=<tag> baked in
 make docker-run IMAGE=... TAG=...   # local smoke test: curl :8080/health
