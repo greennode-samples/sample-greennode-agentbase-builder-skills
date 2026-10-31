@@ -104,6 +104,14 @@ What this showed:
   AgentBase.", score 86%. Inside a generated project `AGENTS.md` carries that context (in-project cases pass), so the
   weak spot is a bare question in an empty directory on a small model. Name AgentBase in the request, or work in a generated
   project.
+- **Wording does not fix it (tried, reverted).** A third set, `triggers_heldout3.jsonl` (36 cases, half inside a generated
+  project, half bare), scored 75% on Haiku 5.5 as written (2 runs per case). Two description changes were measured on it and
+  gave nothing, so they were not kept: adding "Assume it is a GreenNode AgentBase agent even if the user does not say so" to
+  15 descriptions (76%), and adding "a general or how-to question included" to the load clause (76%). Every miss is the same
+  shape: a bare English question about "my agent" in an empty directory (memory, tracing, human approval, MCP, web chat page)
+  that Haiku answers itself; the cases inside a project, and the Vietnamese ones that name a concrete tool or endpoint, pass.
+  The remaining lever is the request or the project, not the description. Because that set drove those experiments it is
+  now training data; a fresh set is needed before another description change is judged.
 - **Where it still misses:** `h2-eval-q` and `h2-llm-q` ("how do I know my last prompt change didn't make answers worse?",
   "which model for the router?") → no skill, on Sonnet too; `agentbase-build-mcp` vs `agentbase-build-mcp-server` on GPT-5.4
   nano; `claude-api` takes prompt-quality requests on Claude.

@@ -15,6 +15,8 @@ review can tell which standard a project was built from.
 - **Routing eval for non-Claude models:** `evals/run_triggers_api.py` (GPT, DeepSeek, GLM, Gemma, Kimi, MiniMax, Qwen through
   any OpenAI-compatible API, simulated skill listing) and a second held-out set; results per model in `evals/README.md`.
   Known weak spot: small models skip skills for a bare question that does not name AgentBase (Haiku 5.5 64% on held-out2).
+- `evals/triggers_heldout3.jsonl` (36 cases) and a recorded negative result: two description rewordings did not raise Haiku 5.5
+  on bare questions (75% → 76%), so descriptions are unchanged; see `evals/README.md`.
 
 ## 0.5.0 — 2026-10-29
 
