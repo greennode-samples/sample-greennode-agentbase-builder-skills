@@ -8,6 +8,7 @@ a description / SKILL.md change, or a release), not on every push.
 | Eval | Question | Cost | Command |
 |---|---|---|---|
 | Routing (`triggers.jsonl` + the held-out `triggers_heldout.jsonl`, `run_triggers.py`) | Does the agent load the right skill for a request — English and Vietnamese, build tasks, debugging in an existing project, and requests that belong to the platform `agentbase-*` skills or to no skill? | ~1 model turn per case | `python3 evals/run_triggers.py --runs 2` |
+| Routing on other models (`run_triggers_api.py`, same cases + `triggers_heldout2.jsonl`) | The same question for GPT, DeepSeek, GLM, Gemma, Kimi, MiniMax, Qwen… — any model behind an OpenAI-compatible API | ~1 model call per case, simulated (no agent) | `python3 evals/run_triggers_api.py --api-key-file ~/.maas-key --model z-ai/glm-5.2 --runs 2` |
 | End to end (`scenarios.json`, `run_scenarios.py`) | From a business request, does the agent produce a project that passes `make test`, `make lint`, `make security-scan` and the scenario's checks (tools, HITL coverage, MCP config, knowledge, eval items, tests)? | a full coding session per scenario | `python3 evals/run_scenarios.py --only hr-leave --keep` |
 
 Grading is objective (skill names, exit codes, files), never an LLM's opinion. Results go to `evals/results/`
@@ -56,6 +57,56 @@ platform-question negative stays 3/3); an `AGENTS.md` row for "gets slower the
 longer a conversation runs"; Vietnamese measuring phrases in the eval skill; the web-template update in the web skill.
 Not fixable here: the wizard and `claude-api` are other people's skills — say "use agentbase-build" (README) when both are
 installed.
+
+## Other models: does it work beyond Claude?
+
+`run_triggers_api.py` runs the same cases against any OpenAI-compatible endpoint (default: GreenNode MaaS). It does **not**
+run an agent: it puts the skills' `name: description` list (this repo's plus the user-level skills you have installed,
+like the platform's `agentbase-*` set and its wizard), the project's `AGENTS.md` for in-project cases and one `Skill`
+tool into a chat call, and records the first skill the model picks. It measures what the wording can fix. It does not
+measure how Codex, Gemini CLI, Cursor or OpenCode load skills — they list and push them differently — so confirm with the
+real agent before claiming support for it. `--no-competitors` lists only this repo's skills; `--list-models` shows what a key
+can call. Keys come from a file or an env var, never the command line.
+
+`triggers_heldout2.jsonl` (32 cases, short questions and requests, EN + VI, written after the 0.5.0 descriptions were
+rewritten) is the second held-out set. Two of its cases (`h2-web-q`, `h2-mcp-q`) led to description changes, so they are
+now training cases.
+
+| Model (how it was run) | `triggers.jsonl` (58 × 2) | `triggers_heldout2.jsonl` (32 × 2) | Only this repo's skills listed, own-skill cases (tuning / held-out2) |
+|---|---|---|---|
+| Claude Sonnet 5.5 (Claude Code) | 98% | 92% | — |
+| Claude Haiku 5.5 (Claude Code) | 95% (was 79%) | **64%** | — |
+| DeepSeek V4 Flash (simulated) | 98% | 100% | 99% / 100% |
+| DeepSeek V4 Pro | 98% | 89% | 100% / 100% |
+| GLM 5.2 | 100% | 100% | 100% / 100% |
+| GLM 5.3 Flash | 97% | 98% | 98% / 100% |
+| GPT-5.4 nano | 89% | 88% | 97% / 95% |
+| Gemma 4 31B (the only Google model on MaaS; no Gemini) | 100% | 100% | 100% / 100% |
+| Kimi K2.6 | 99% | 98% | 100% / 100% |
+| MiniMax M3 | 98% | 97% | 97% / 97% |
+| Qwen 3.8 Flash | 98% | 100% | 98% / 100% |
+
+Dated 2026-10-30/31, 2 runs per case, with the 10 user-level platform skills installed (26 skills listed). The first run on
+held-out2, before the web / mcp fixes, was 83–98% (Kimi and MiniMax were rate limited, HTTP 429, and scored low until rerun
+with fewer parallel calls).
+
+What this showed:
+
+- **Descriptions that open with the user's words work across families.** Rewriting all 16 skill descriptions to start with
+  what a person asks ("Use when the user wants … even for a short question, load it before answering") took Haiku 5.5 from 79%
+  to 95% on the tuning set and left Sonnet where it was (97% → 98%). With only this repo's skills listed, the nine non-Claude
+  models score 95–100%.
+- **The platform wizard is the main conflict.** `agentbase-wizard` says it is mandatory for any build request; when it is
+  installed, plain "build me a chatbot" requests go to it for GPT-5.4 nano, DeepSeek V4 and Kimi at times, whatever our
+  description says. Not fixable here (it is another skill): in that case say "use agentbase-build" (README).
+- **Small models skip skills for context-free questions.** On held-out2, Haiku answers "can the agent ask me before it wires
+  money?" itself instead of loading a skill (64%). The same prompts with one added sentence, "I'm building an agent on GreenNode
+  AgentBase.", score 86%. Inside a generated project `AGENTS.md` carries that context (in-project cases pass), so the
+  weak spot is a bare question in an empty directory on a small model. Name AgentBase in the request, or work in a generated
+  project.
+- **Where it still misses:** `h2-eval-q` and `h2-llm-q` ("how do I know my last prompt change didn't make answers worse?",
+  "which model for the router?") → no skill, on Sonnet too; `agentbase-build-mcp` vs `agentbase-build-mcp-server` on GPT-5.4
+  nano; `claude-api` takes prompt-quality requests on Claude.
 
 ## Baseline (2026-10-28, the default model of that day — not recorded, hence the `environment` field now)
 
