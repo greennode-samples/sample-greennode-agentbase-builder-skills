@@ -1,0 +1,40 @@
+{"id": "h4-tracing-q", "prompt": "Our agent's answers got slower this week. Where is the time going per request?", "expect": ["agentbase-build-tracing"]}
+{"id": "h4-tracing-vi", "prompt": "Mỗi câu trả lời của agent tốn bao nhiêu token, xem ở đâu?", "expect": ["agentbase-build-tracing"]}
+{"id": "h4-hitl-q", "prompt": "I want a manager to sign off before the agent issues a refund.", "expect": ["agentbase-build-hitl"]}
+{"id": "h4-hitl-vi", "prompt": "Agent tự gửi mail cho khách, làm sao để nó hỏi mình duyệt trước?", "expect": ["agentbase-build-hitl"]}
+{"id": "h4-ident-q", "prompt": "Where should the agent keep the Salesforce OAuth token for each user?", "expect": ["agentbase-build-identity"]}
+{"id": "h4-ident-vi", "prompt": "Tool của agent cần key của Stripe, cất key ở đâu cho an toàn?", "expect": ["agentbase-build-identity"]}
+{"id": "h4-sec-q", "prompt": "Can someone trick my agent into leaking the system prompt? Audit it.", "expect": ["agentbase-build-security-audit"]}
+{"id": "h4-sec-vi", "prompt": "Kiểm tra bảo mật agent trước khi mở cho khách hàng dùng.", "expect": ["agentbase-build-security-audit"]}
+{"id": "h4-mcpserver-q", "prompt": "Turn our shipping-rates API into an MCP server my agents can call.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "h4-mcpserver-vi", "prompt": "Tôi cần viết server MCP bọc API kho hàng, bảo vệ bằng OAuth.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "h4-mcp-q", "prompt": "Let the agent read and create Notion pages through MCP.", "expect": ["agentbase-build-mcp"]}
+{"id": "h4-mcp-vi", "prompt": "Agent gọi tool báo denied by policy, sửa thế nào?", "expect": ["agentbase-build-mcp"]}
+{"id": "h4-memory-q", "prompt": "The agent should recall what a customer asked last month.", "expect": ["agentbase-build-memory"]}
+{"id": "h4-memory-vi", "prompt": "Chat dài thì agent quên đoạn đầu, khắc phục sao?", "expect": ["agentbase-build-memory"]}
+{"id": "h4-auth-q", "prompt": "Require a login before anyone can call the agent's endpoint.", "expect": ["agentbase-build-auth"]}
+{"id": "h4-auth-vi", "prompt": "Chặn người lạ gọi agent, chỉ cho nhân viên đăng nhập bằng Azure AD.", "expect": ["agentbase-build-auth"]}
+{"id": "h4-eval-q", "prompt": "I need a way to score the agent's answers automatically after every change.", "expect": ["agentbase-build-eval"]}
+{"id": "h4-eval-vi", "prompt": "Làm bộ test chất lượng câu trả lời cho agent, chạy trước khi release.", "expect": ["agentbase-build-eval"]}
+{"id": "h4-llm-q", "prompt": "Use a bigger model for hard questions and a small one for greetings in my agent.", "expect": ["agentbase-build-llm"]}
+{"id": "h4-llm-vi", "prompt": "Agent báo LLM 429 liên tục, chuyển sang model dự phòng thế nào?", "expect": ["agentbase-build-llm"]}
+{"id": "h4-deploy-q", "prompt": "Release the agent to production and roll back if the health check fails.", "expect": ["agentbase-build-deploy", "agentbase-deploy"]}
+{"id": "h4-deploy-vi", "prompt": "Đưa agent lên môi trường staging giúp mình.", "expect": ["agentbase-build-deploy", "agentbase-deploy"]}
+{"id": "h4-web-q", "prompt": "Give the agent a chat website for our customers.", "expect": ["agentbase-build-web"]}
+{"id": "h4-frontend-q", "prompt": "Make a phone app so field staff can talk to the agent.", "expect": ["agentbase-build-frontend"]}
+{"id": "h4-a2a-q", "prompt": "My agent should delegate shipping questions to the logistics team's agent.", "expect": ["agentbase-build-a2a"]}
+{"id": "h4-scaffold-q", "prompt": "Set up the project structure for a new agent called invoice-bot.", "expect": ["agentbase-build-scaffold", "agentbase-build"]}
+{"id": "h4-build-q", "prompt": "I want an assistant that answers questions about our product catalog.", "expect": ["agentbase-build"]}
+{"id": "h4-build-vi", "prompt": "Làm giúp mình agent tư vấn gói bảo hiểm cho khách.", "expect": ["agentbase-build"]}
+{"id": "h4-neg-logs", "prompt": "Show the recent logs of my deployed agent, something is failing.", "expect": ["agentbase-monitor"]}
+{"id": "h4-neg-models", "prompt": "List the models I can call with my platform API key.", "expect": ["agentbase-llm"]}
+{"id": "h4-neg-teardown", "prompt": "Wipe every resource I created for the test agent.", "expect": ["agentbase-teardown"]}
+{"id": "h4-neg-none", "prompt": "How do I reverse a linked list in Java?", "expect": ["none"]}
+{"id": "h4-other-crewai", "prompt": "Add long-term memory to my CrewAI agent.", "expect": ["none"]}
+{"id": "h4-other-aws", "prompt": "Deploy my LangChain agent to AWS Lambda.", "expect": ["none"]}
+{"id": "h4-other-openai", "prompt": "My OpenAI Assistants API agent loses context between runs, why?", "expect": ["none"]}
+{"id": "h4-other-concept", "prompt": "Explain how a ReAct agent decides which tool to call.", "expect": ["none"]}
+{"id": "h4-other-evals", "prompt": "Which metrics should I use to evaluate a RAG pipeline?", "expect": ["none"]}
+{"id": "h4-other-auth", "prompt": "Add JWT login to my Express.js API.", "expect": ["none"]}
+{"id": "h4-other-mcp", "prompt": "Write an MCP server in TypeScript for my Claude Desktop that reads local markdown files.", "expect": ["none"]}
+{"id": "h4-other-web", "prompt": "Add a dark mode toggle to my React website.", "expect": ["none"]}

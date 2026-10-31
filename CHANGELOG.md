@@ -15,6 +15,10 @@ review can tell which standard a project was built from.
 - **Routing eval for non-Claude models:** `evals/run_triggers_api.py` (GPT, DeepSeek, GLM, Gemma, Kimi, MiniMax, Qwen through
   any OpenAI-compatible API, simulated skill listing) and a second held-out set; results per model in `evals/README.md`.
   Known weak spot: small models skip skills for a bare question that does not name AgentBase (Haiku 5.5 64% on held-out2).
+- **Claude Code only: SessionStart hook** (`hooks/`) tells the model that "my agent" means a GreenNode AgentBase agent unless
+  another framework or platform is named. Haiku 5.5 on bare questions: 66% → 92% (fresh held-out set), 64% → 95% (held-out2),
+  tuning set 95% → 100%. Descriptions are unchanged (two rewordings gave nothing). The last wording tweak (do not claim
+  CrewAI / AWS agents) is not re-measured yet; see `evals/README.md`. New sets: `triggers_heldout3.jsonl`, `triggers_heldout4.jsonl`.
 
 ## 0.5.0 — 2026-10-29
 

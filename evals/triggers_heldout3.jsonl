@@ -1,0 +1,36 @@
+{"id": "h3-tracing-q", "prompt": "Which step of my agent's pipeline is the slowest? I'd like a timeline for one request.", "expect": ["agentbase-build-tracing"]}
+{"id": "h3-tracing-vi", "prompt": "Nhìn trace của một lượt chat để biết tool nào gọi lâu nhất.", "expect": ["agentbase-build-tracing"], "in_project": true}
+{"id": "h3-hitl-q", "prompt": "Before the agent sends an email to a customer, a human on our team should approve it.", "expect": ["agentbase-build-hitl"]}
+{"id": "h3-hitl-vi", "prompt": "Cho agent dừng lại hỏi mình trước khi chạy tool refund.", "expect": ["agentbase-build-hitl"], "in_project": true}
+{"id": "h3-ident-q", "prompt": "My agent needs to call the Jira API on behalf of each employee, how do I store their tokens?", "expect": ["agentbase-build-identity"]}
+{"id": "h3-ident-vi", "prompt": "Chỗ nào để lưu API key của SendGrid cho tool gửi mail?", "expect": ["agentbase-build-identity"], "in_project": true}
+{"id": "h3-sec-q", "prompt": "Review this agent for secrets in the repo, SSRF and unsafe tool inputs.", "expect": ["agentbase-build-security-audit"], "in_project": true}
+{"id": "h3-sec-vi", "prompt": "Lập checklist pen-test cho agent trước khi team bảo mật duyệt.", "expect": ["agentbase-build-security-audit"]}
+{"id": "h3-mcpserver-q", "prompt": "Package our CRM lookup as an MCP server that other agents can connect to.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "h3-mcpserver-vi", "prompt": "Viết MCP server expose 3 hàm tra cứu đơn hàng, có auth bằng API key.", "expect": ["agentbase-build-mcp-server"]}
+{"id": "h3-mcp-q", "prompt": "Connect the agent to our existing GitHub MCP server so it can open issues.", "expect": ["agentbase-build-mcp"]}
+{"id": "h3-mcp-vi", "prompt": "Agent không thấy tool nào từ MCP server, kiểm tra giúp.", "expect": ["agentbase-build-mcp"], "in_project": true}
+{"id": "h3-memory-q", "prompt": "Remember the user's preferred language across sessions.", "expect": ["agentbase-build-memory"], "in_project": true}
+{"id": "h3-memory-vi", "prompt": "Agent nhớ tên khách hàng từ tuần trước được không?", "expect": ["agentbase-build-memory"]}
+{"id": "h3-auth-q", "prompt": "Only logged-in employees from our Keycloak should be able to call the agent.", "expect": ["agentbase-build-auth"]}
+{"id": "h3-auth-vi", "prompt": "Thêm đăng nhập bằng JWT cho endpoint /invocations.", "expect": ["agentbase-build-auth"], "in_project": true}
+{"id": "h3-eval-q", "prompt": "Set up a regression test with 30 sample questions I can run before each release.", "expect": ["agentbase-build-eval"], "in_project": true}
+{"id": "h3-eval-vi", "prompt": "Chấm điểm câu trả lời của agent bằng LLM judge, chạy trong CI.", "expect": ["agentbase-build-eval"]}
+{"id": "h3-llm-q", "prompt": "Swap the model the agent uses to a cheaper one for simple questions.", "expect": ["agentbase-build-llm"], "in_project": true}
+{"id": "h3-llm-vi", "prompt": "Đổi model của agent sang Qwen, cấu hình ở đâu?", "expect": ["agentbase-build-llm"], "in_project": true}
+{"id": "h3-deploy-q", "prompt": "Push the agent image and create the runtime.", "expect": ["agentbase-build-deploy", "agentbase-deploy"], "in_project": true}
+{"id": "h3-deploy-vi", "prompt": "Deploy lên GreenNode giúp mình, sau đó kiểm tra /health.", "expect": ["agentbase-build-deploy", "agentbase-deploy"], "in_project": true}
+{"id": "h3-web-q", "prompt": "Add a browser chat page for the agent that supports streaming and login.", "expect": ["agentbase-build-web"]}
+{"id": "h3-web-vi", "prompt": "Làm trang web cho nhân viên chat với agent.", "expect": ["agentbase-build-web"]}
+{"id": "h3-frontend-q", "prompt": "Build an Android app that talks to the agent.", "expect": ["agentbase-build-frontend"]}
+{"id": "h3-frontend-vi", "prompt": "Cần app mobile Expo cho agent, có đăng nhập.", "expect": ["agentbase-build-frontend"]}
+{"id": "h3-a2a-q", "prompt": "Let our agent be called by another team's agent over A2A.", "expect": ["agentbase-build-a2a"], "in_project": true}
+{"id": "h3-a2a-vi", "prompt": "Cho agent gọi một agent khác qua giao thức A2A.", "expect": ["agentbase-build-a2a"]}
+{"id": "h3-scaffold-q", "prompt": "Start a new agent project with the standard folders and a Dockerfile.", "expect": ["agentbase-build-scaffold", "agentbase-build"]}
+{"id": "h3-scaffold-vi", "prompt": "Khởi tạo dự án agent mới tên support-bot.", "expect": ["agentbase-build-scaffold", "agentbase-build"]}
+{"id": "h3-build-q", "prompt": "Build me an AI agent that answers HR policy questions for employees.", "expect": ["agentbase-build"]}
+{"id": "h3-build-vi", "prompt": "Tôi muốn làm một agent chăm sóc khách hàng trên nền tảng GreenNode.", "expect": ["agentbase-build"]}
+{"id": "h3-neg-logs", "prompt": "Tail the logs of my running agent, it just crashed.", "expect": ["agentbase-monitor"]}
+{"id": "h3-neg-models", "prompt": "Which LLM models can my API key access on the platform?", "expect": ["agentbase-llm"]}
+{"id": "h3-neg-teardown", "prompt": "Remove all the cloud resources of this demo agent.", "expect": ["agentbase-teardown"]}
+{"id": "h3-neg-none", "prompt": "Explain the difference between a thread and a process.", "expect": ["none"]}
