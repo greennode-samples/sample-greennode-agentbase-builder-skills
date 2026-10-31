@@ -110,8 +110,22 @@ What this showed:
   15 descriptions (76%), and adding "a general or how-to question included" to the load clause (76%). Every miss is the same
   shape: a bare English question about "my agent" in an empty directory (memory, tracing, human approval, MCP, web chat page)
   that Haiku answers itself; the cases inside a project, and the Vietnamese ones that name a concrete tool or endpoint, pass.
-  The remaining lever is the request or the project, not the description. Because that set drove those experiments it is
-  now training data; a fresh set is needed before another description change is judged.
+  What does work in Claude Code is context the plugin puts in the session itself: `hooks/hooks.json` (SessionStart) injects
+  `hooks/session-context.txt`, three lines saying that "my agent" means a GreenNode AgentBase agent unless another
+  framework or platform is named, and to load the matching `agentbase-build-*` skill. Haiku 5.5, 2 runs per case:
+
+  | Set | without the hook | with the hook |
+  |---|---|---|
+  | `triggers_heldout3.jsonl` (36; used while trying the hook) | 75% | 92% |
+  | `triggers_heldout4.jsonl` (40, written before the hook was measured; 8 of them name another stack, e.g. CrewAI, Lambda) | 66% | 92% |
+  | `triggers.jsonl` (58, tuning) | 95% | 100% |
+  | `triggers_heldout2.jsonl` (32) | 64% | 95% |
+
+  All 8 other-stack cases stayed `none` on Haiku. Sonnet 5.5 on held-out4 with the hook: 98% — its one miss was "Add long-term
+  memory to my CrewAI agent" → `agentbase-build-memory`, which is why the text now says "unless they name another framework
+  or platform". **That wording change was not re-measured**: Claude Code's weekly limit was reached right after, so the final
+  text has no score yet (rerun held-out4 on Sonnet and Haiku, and the tuning set on Sonnet). Only Claude Code runs the hook;
+  Codex and the other agents do not, so the numbers for those stay as in the table above.
 - **Where it still misses:** `h2-eval-q` and `h2-llm-q` ("how do I know my last prompt change didn't make answers worse?",
   "which model for the router?") → no skill, on Sonnet too; `agentbase-build-mcp` vs `agentbase-build-mcp-server` on GPT-5.4
   nano; `claude-api` takes prompt-quality requests on Claude.
