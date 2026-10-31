@@ -8,6 +8,12 @@ review can tell which standard a project was built from.
 
 ## Unreleased
 
+- **Deploy: find out how the customer can build before building.** `agentbase-build-deploy` Step 3 now starts with
+  `scripts/detect_build_env.sh` (read-only; no login, no secret printed): which engine is installed and answering (Docker
+  Desktop, Rancher Desktop, OrbStack, Colima, Podman, nerdctl, Finch, buildah), `linux/amd64` support, git host and CI config
+  (GitHub Actions, GitLab CI, Jenkins, Bitbucket, Azure), `gh` / `glab` sign-in; it lists the ways to build and push and the
+  user picks. Tested here with Docker Desktop and stubs for a hung daemon, nerdctl and a GitLab remote; the nerdctl, Podman,
+  Finch and GitLab paths are not run against the registry.
 - **Skill descriptions** of all `agentbase-build-*` skills now open with what the user asks or wants (and say to load the skill
   before answering, even a short question); `Trigger:` and `DO NOT use` clauses are kept. Haiku 5.5 routing 79% → 95% on the
   tuning set, Sonnet 5.5 unchanged (98%). The orchestrator says it replaces `/agentbase-wizard` even when that is installed
