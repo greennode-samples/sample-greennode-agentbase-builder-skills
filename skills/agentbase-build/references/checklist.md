@@ -12,6 +12,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Runtime contract
 - [B] `GET /health` → 200; listens on `0.0.0.0:8080`.
+- [B] Stateless: no session state only in process memory — the docs' *Service Contract* ([runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference)) says to use the Memory Service. `MEMORY_BACKEND=inmemory`, the in-memory A2A task store and per-replica caches/limits are acceptable only on one replica or with the per-replica semantics in `platform-coverage.md` → *Known limits*.
 - [B] `make test` green; `make lint` clean.
 - Image built with `--platform linux/amd64`, runs as non-root.
 

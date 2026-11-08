@@ -7,7 +7,7 @@ Source of truth: the docstring at the top of `src/backend/app/service.py`. Contr
 | Header | Required | Notes |
 |---|---|---|
 | `Content-Type: application/json` | ✔ | |
-| `Authorization: Bearer <JWT>` | ✔ when `AUTH_MODE=jwt` | Header name configurable via `AUTH_TOKEN_HEADER` (e.g. when the runtime endpoint uses `Authorization` for IAM ⇒ use `X-GreenNode-AgentBase-Custom-User-Token`) |
+| `Authorization: Bearer <JWT>` | ✔ when `AUTH_MODE=jwt` | Header name configurable via `AUTH_TOKEN_HEADER` (IAM and JWT Inbound Auth strip `Authorization` before the container ⇒ behind them use `X-GreenNode-AgentBase-Custom-User-Token`; `Authorization` only behind *No authorization*) |
 | `X-GreenNode-AgentBase-Session-Id` | ✔ for chat/resume | UUID, 1 conversation = 1 session. Format `^[A-Za-z0-9][A-Za-z0-9-]{0,127}$` (blocks `../`, `/`), invalid ⇒ 400 |
 | `X-GreenNode-AgentBase-Custom-Api-Key: <key>` | ✔ when `AUTH_MODE=api_key` | Only for trusted callers (server/BFF/other agents) |
 | `X-GreenNode-AgentBase-User-Id` | jwt: ✖ · **api_key: ✔** | jwt: if sent it must match `sub` (otherwise ⇒ 403). api_key: required (memory is isolated per user). Format `^[A-Za-z0-9][A-Za-z0-9._@+=-]{0,127}$`, invalid ⇒ 400. A JWT whose `sub` is outside this format ⇒ `user_id = "u-" + sha256(iss|sub)[:40]` |

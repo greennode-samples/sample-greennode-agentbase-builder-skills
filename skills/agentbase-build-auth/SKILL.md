@@ -35,10 +35,11 @@ Role-based access (RBAC): put `roles`/`groups` in `AUTH_FORWARD_CLAIMS` and chec
 
 ## AgentBase Runtime endpoint security
 
-The Runtime has **Security Settings** ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)): **IP Access Control** (allowed source CIDRs) and **Inbound Auth type** — `IAM Permissions` (GreenNode IAM token), `JSON Web Tokens` (Discovery URL or inline JWKS), or `No authorization` (public: anyone with the URL reaches the container — what we observed on runtimes created before this setting, 2026-10).
+The Runtime has **Security Settings** ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)): **IP Access Control** (allowed source CIDRs) and **Inbound Auth type** — `IAM Permissions` (GreenNode IAM token; the **default** for a new Runtime in the Console), `JSON Web Tokens` (Discovery URL or inline JWKS), or `No authorization` (public: anyone with the URL reaches the container — what we observed on runtimes created before this setting, 2026-10).
+- **In `IAM Permissions` and `JSON Web Tokens` mode the platform strips `Authorization` (and `x-agentbase-endpoint-inbound-header-authorization`) before the request reaches the container** — only `No authorization` forwards them ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime), *Header Handling on Incoming Requests*). The agent can read a user token only from another header, so the caller sends it there too, and the agent sets `AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token`. `AUTH_TOKEN_HEADER=Authorization` works only behind `No authorization`; behind IAM/JWT the agent would see no token and answer 401 to every request.
 
 - The agent **still authenticates itself** (`jwt`/`api_key`) whatever the Runtime setting — defense in depth, and `Settings` blocks `AUTH_MODE=none` outside local.
-- Runtime `JWT` with the same IdP as `AUTH_*` ⇒ bad tokens are rejected before the container (cheaper), and pattern **A. Direct** works. It validates the **key source** (discovery/JWKS) only — it **never replaces `AUTH_AUDIENCE` / `AUTH_ALLOWED_CLIENT_IDS`**: a token the same IdP issued to another app passes it, the agent's own checks stop it.
+- Runtime `JWT` with the same IdP as `AUTH_*` ⇒ bad tokens are rejected before the container (cheaper); pattern **A. Direct** then needs the app to send the user JWT **twice** (`Authorization` for the platform, the custom header for the agent) — the Expo template sends one header and the BFF's `jwt` mode sends only `Authorization`, so with a Runtime JWT adapt the client (or use the IAM runtime + BFF). It validates the **key source** (discovery/JWKS) only — it **never replaces `AUTH_AUDIENCE` / `AUTH_ALLOWED_CLIENT_IDS`**: a token the same IdP issued to another app passes it, the agent's own checks stop it.
 - Runtime `IAM Permissions` ⇒ a mobile/web app cannot call it directly ⇒ pattern **B. BFF**.
 - Add IP Access Control for server-to-server callers (BFF, other agents) when their egress IPs are fixed.
 - GreenNode IAM does not publish a JWKS (404) ⇒ IAM tokens cannot be used as the agent's inbound JWTs.
@@ -55,7 +56,7 @@ The Runtime has **Security Settings** ([create-runtime](https://docs.greennode.a
 ## Calling the runtime endpoint: 2 patterns
 
 Read `references/patterns.md`. Summary:
-- **A. Direct (default):** app → runtime endpoint with the user JWT in `Authorization`. Use when the endpoint does not require IAM in `Authorization`.
+- **A. Direct (default):** app → runtime endpoint with the user JWT in `Authorization`, read by the agent (`AUTH_TOKEN_HEADER=Authorization`) only when the Runtime is `No authorization`. Behind a Runtime JWT the app sends the token twice (see *Runtime endpoint security*); behind Runtime IAM use B.
 - **B. BFF:** app → your BFF (verifies JWT) → runtime endpoint with an IAM token; the user JWT goes in a custom header (`AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token`). Use when the endpoint requires IAM, or you need your own rate-limiting/billing. **Never** embed IAM credentials in a mobile app.
 
 Choose the pattern from the Runtime's **Inbound Auth type** (above); verify: `/invocations` **without** a token ⇒ 401 **and with a valid user token ⇒ 200** (a setup that rejects everyone also passes the first check).

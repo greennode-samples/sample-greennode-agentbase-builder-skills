@@ -34,7 +34,7 @@ E2E result with the agent running as `<sub-demo-sa>`: `stock_stock_quote` ⇒ re
 
 ## Common conditions (examples — verify before use)
 
-The two sources disagree here too. The Console docs ([policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups)) show operators such as `ipInRange` and keys such as `request.client_ip` / `request.timestamp.hour`, with `in` taking `"Admin,Editor"`. `/agentbase-policy` (API reference) lists **9 operators** (`equals`, `notEquals`, `in`, `like`, `contains`, `lessThan`, `lessThanOrEqual`, `greaterThan`, `greaterThanOrEqual`), keys **`context.ip`**, **`context.input.<arg>`**, **`principal.<claim>`** only, and `in` takes a **string list**. Check the live catalog `GET https://agentbase.api.vngcloud.vn/policy/api/v1/policies/condition-operators` and read `/agentbase-policy` (`references/policy-statement.md`) before creating; the API answers 400 for an unsupported operator.
+The two sources disagree here too. The Console docs ([policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups), *Supported operators*) list 22 operators in five groups — equality `equals`/`notEquals`; comparison `lessThan`/`lessThanOrEqual`/`greaterThan`/`greaterThanOrEqual`; string `like`/`contains`/`containsAll`/`containsAny`/`startsWith`/`endsWith`; membership `in`/`has`/`hasTag`/`is`/`memberOf`; network `ipInRange`/`isIpv4`/`isIpv6`/`isLoopback`/`isMulticast` — and show keys such as `request.client_ip` / `request.timestamp.hour`, with `in` taking `"Admin,Editor"`. `/agentbase-policy` (API reference) lists **9 operators** (`equals`, `notEquals`, `in`, `like`, `contains`, `lessThan`, `lessThanOrEqual`, `greaterThan`, `greaterThanOrEqual`), keys **`context.ip`**, **`context.input.<arg>`**, **`principal.<claim>`** only, and `in` takes a **string list**. Check the live catalog `GET https://agentbase.api.vngcloud.vn/policy/api/v1/policies/condition-operators` and read `/agentbase-policy` (`references/policy-statement.md`) before creating; the API answers 400 for an unsupported operator.
 
 | Purpose | Condition (statement JSON, API form) | Note |
 |---|---|---|
@@ -42,7 +42,9 @@ The two sources disagree here too. The Console docs ([policy-groups](https://doc
 | By role | `{"in": {"principal.role": ["Admin", "Editor"]}}` | list value, not `"Admin,Editor"` |
 | Specific client IPs | `{"in": {"context.ip": ["203.0.113.10", "203.0.113.11"]}}` | CIDR ranges (`ipInRange`) appear only in the Console docs — verify |
 | Limit a tool argument | `{"lessThan": {"context.input.qty": 100}}` | `tools/call` arguments; a missing argument ⇒ deny |
-| Business hours | Console docs: `request.timestamp.hour`; not in the API key list | verify before relying on it |
+| Business hours | Console docs: `request.timestamp.hour`; not in the API key list | verify before relying on it. The docs' example is two conditions (`greaterThan` 9 **and** `lessThan` 17) |
+
+Multiple conditions in one policy are combined with **AND** (all must be true for the policy to match — [policy-groups](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/policy-groups), *Conditions*). For an OR, write one policy per branch.
 
 ## Governance checklist before prod
 

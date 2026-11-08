@@ -8,6 +8,18 @@ review can tell which standard a project was built from.
 
 ## Unreleased
 
+- **Docs re-read (2026-11): skills corrected where the AgentBase docs say otherwise** (docs-only; no template code changed).
+  Runtime Inbound Auth `IAM Permissions` / `JWT` **strips `Authorization` before the container** (only *No authorization*
+  forwards it) and the Console now defaults a new Runtime to IAM: `agentbase-build-deploy`, `-auth`, `-web`, `-frontend` and
+  `api-contract.md` no longer tell the agent to read the user JWT from `Authorization` behind a Runtime JWT (send it also in
+  `X-GreenNode-AgentBase-Custom-User-Token`; the Expo template and the BFF `jwt` mode still send one header, not run live).
+  `-llm`: a Protect & Govern limit on an API key is shared by all its models, so a fallback model does not bypass it; the
+  Sidecar LLM Proxy is mentioned in the MCP Gateway docs. `-memory`: event pagination `from` ≤ 5000 is now documented; no
+  `{sessionId}` in the namespace template; strategies and expiry are set at store creation. `-mcp`: gateway JWT settings
+  (Discovery URL / JWKS, Principal claim), connector Header key / prefix, default scopes, M365 VNG bundle, Slack needs a
+  Custom provider, 22 policy operators, conditions combine with AND. Also: Outbound IP of a Private Runtime, vCR
+  `backendName` / robot username / expiry, runtime env vars "non-sensitive config only", stateless contract, ephemeral
+  filesystem (vStorage S3), Policy Group deletion detaches from all gateways, and a Built-in Tools row in the decision guide.
 - **Deploy: find out how the customer can build before building.** `agentbase-build-deploy` Step 3 now starts with
   `scripts/detect_build_env.sh` (read-only; no login, no secret printed): which engine is installed and answering (Docker
   Desktop, Rancher Desktop, OrbStack, Colima, Podman, nerdctl, Finch, buildah), `linux/amd64` support, git host and CI config

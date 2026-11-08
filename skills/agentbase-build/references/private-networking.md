@@ -52,6 +52,7 @@ Agent (Runtime, Public or Private) → MCP Gateway (Private, Route CIDRs include
 ```
 
 - DC firewall: allow **only** the AgentBase/VPC source CIDRs to the MCP port. The sample uses the AgentBase VPC range observed for its org; confirm yours with GreenNode.
+- If a firewall, security group or database on your side filters by IP, allow the Runtime's **Outbound IP** (runtime detail page → *Outbound IP*; [private-networking](https://docs.greennode.ai/ai-stack/agent-base/private-networking)) — a Private Runtime's calls originate from it, and without it they are blocked.
 - The MCP server **still authenticates every call** (API key or JWT, fail-closed — `/agentbase-build-mcp-server`). A private network is not authentication.
 - Connector outbound auth = API key / OAuth from Access Control (`/agentbase-build-identity`); the agent never holds it.
 
@@ -60,5 +61,5 @@ Agent (Runtime, Public or Private) → MCP Gateway (Private, Route CIDRs include
 1. VPC visible in the dropdown (otherwise peering is not active yet — refresh, then contact support).
 2. From inside the VPC: the target answers (`curl https://<internal-host>/health`).
 3. Gateway: `tools/list` through the connector returns the tools; `tools/call` is allowed by the Policy Group.
-4. Timeouts only for private targets ⇒ missing **Route CIDRs** or a missing route/ACL on the VPC/DC side.
+4. Timeouts only for private targets ⇒ missing **Route CIDRs**, a missing route/ACL on the VPC/DC side, or a firewall that does not allow the Runtime's **Outbound IP**.
 5. Name resolution fails for internal hosts ⇒ DNS resolution must be enabled in the VPC (MCP Gateway docs); prefer IPs or VPC DNS names that resolve inside the VPC.
