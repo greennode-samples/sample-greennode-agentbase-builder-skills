@@ -8,6 +8,11 @@ review can tell which standard a project was built from.
 
 ## Unreleased
 
+- **Template test:** `test_approval_node_reasks_instead_of_applying_unknown_ids` no longer asserts that a re-asked HITL card
+  keeps its id. langgraph 1.2.20 issues a new interrupt id there (1.2.18 kept it); the documented contract (every card has its
+  own id, the client echoes the one it was given) is unchanged and the test still resumes with the id it receives. This turned the
+  CI `upgrade` job red on 2026-11-09: it re-locks an old project, which picked up langgraph 1.2.20, while the shipped
+  `uv.lock` still pins 1.2.18.
 - **Docs re-read (2026-11): skills corrected where the AgentBase docs say otherwise** (docs-only; no template code changed).
   Runtime Inbound Auth `IAM Permissions` / `JWT` **strips `Authorization` before the container** (only *No authorization*
   forwards it) and the Console now defaults a new Runtime to IAM: `agentbase-build-deploy`, `-auth`, `-web`, `-frontend` and
