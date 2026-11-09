@@ -23,6 +23,13 @@ review can tell which standard a project was built from.
   **not** detach it (the gateway keeps the dangling `policyGroupId`; unbind first with `PATCH` `{"policyGroupId": null}`, `application/merge-patch+json`), and the documented
   policy-group limits (10/20 per group, 20 groups) were not enforced on that account (100 policies accepted, 429 `errors.quota.policy` at 101; 43 groups) — the skills say
   to rely on that error, not a number. A gateway has its own identity `gw-<id>` (removed with it), a runtime `runtime-<id>`.
+  **Second live lab (2026-11-09, one account, one gateway, IAM inbound):** a gateway with **no Policy Group bound let every
+  valid IAM caller's `tools/call` through** (the skills said 403; an earlier 2026-10 run saw 403) — now a security rule: bind
+  a group before callers can reach the gateway; a bound group with zero policies, or a dangling id, denies; a deny arrived
+  as HTTP 200 with an MCP tool error `Request denied by policy.` (no 403 seen); deny wins over allow in any order (the
+  Console docs say first match); bare `iam` / `jwt` principals are rejected by the API with 400 (use `iam:*`, `jwt:*`, `*`);
+  `iam:<client_id>` denies; policy changes apply in seconds, binding via `PATCH` after UPDATING → ACTIVE; targets are called
+  at `<gateway endpoint>/<target name>`. Not tested: JWT-inbound gateways, non-owner callers, conditions, a real Runtime SA.
 - **Deploy: find out how the customer can build before building.** `agentbase-build-deploy` Step 3 now starts with
   `scripts/detect_build_env.sh` (read-only; no login, no secret printed): which engine is installed and answering (Docker
   Desktop, Rancher Desktop, OrbStack, Colima, Podman, nerdctl, Finch, buildah), `linux/amd64` support, git host and CI config
