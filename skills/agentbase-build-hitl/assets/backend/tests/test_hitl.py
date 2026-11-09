@@ -253,6 +253,7 @@ async def test_approval_node_reasks_instead_of_applying_unknown_ids(fake_llm, mo
     _two_cards(fake_llm)
     await service.handle({"message": "remember x then y"}, ctx("hitl-r3"))
     card2 = (await service.handle(_approve("c1"), ctx("hitl-r3")))["interrupt"]
+    assert [tc["id"] for tc in card2["tool_calls"]] == ["c2"]
     check = service.stale_decision_ids
     monkeypatch.setattr(service, "stale_decision_ids", lambda *a: set())
     again = await service.handle(_approve("c1"), ctx("hitl-r3"))
