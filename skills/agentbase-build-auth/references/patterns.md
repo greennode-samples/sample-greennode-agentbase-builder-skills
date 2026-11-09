@@ -8,6 +8,7 @@ Mobile app ──(Authorization: Bearer <user JWT>)──▶ AgentBase Runtime e
 
 - Backend: `AUTH_MODE=jwt`, `AUTH_TOKEN_HEADER=Authorization`.
 - Frontend: `EXPO_PUBLIC_AUTH_TOKEN_HEADER=Authorization`.
+- **Only behind a Runtime with Inbound Auth `No authorization`**: with `JWT` or `IAM Permissions` the platform strips `Authorization` before the container, so the agent would see no token (every request 401). Behind a Runtime JWT the app must send the user JWT in `Authorization` (for the platform) **and** in `X-GreenNode-AgentBase-Custom-User-Token` (for the agent, `AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token`); the Expo template sends one header — that needs a client change. Not run against a live Runtime JWT yet: verify on dev (valid token ⇒ 200).
 - Pros: simple, fewer hops. Cons: no dedicated rate-limit layer.
 - Web (Expo web): set `CORS_ALLOW_ORIGINS='["https://app.example.com"]'`.
 - Verify with **both**: no token ⇒ 401, **a valid user token ⇒ 200** (a misconfiguration that rejects every token also passes the first check).

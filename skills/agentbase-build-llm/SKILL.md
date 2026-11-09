@@ -99,14 +99,14 @@ Two layers, both answer **429**:
 | Layer | Scope | Configure |
 |---|---|---|
 | MaaS account limit | **10 requests/min, 14,400/day per account**, shared by all models and keys ([available-models](https://docs.greennode.ai/ai-stack/model-as-a-service/available-models)) | More only via whitelist request to GreenNode |
-| **Rate Limit** (Protect & Govern) | Requests and/or tokens per period, enforced **independently per API key and per model** it's attached to; rejected as soon as either threshold is hit | Console *Protect & Govern → Rate Limit* (Root/Admin) — [rate-limit](https://docs.greennode.ai/ai-stack/agent-base/protect-govern/rate-limit) |
+| **Rate Limit** (Protect & Govern) | Requests and/or tokens per period, enforced **independently per API key and per model** it's attached to (a key's cap is totalled across all its models, a model's cap across all keys); rejected as soon as either threshold is hit | Console *Protect & Govern → Rate Limit* (Root/Admin) — [rate-limit](https://docs.greennode.ai/ai-stack/agent-base/protect-govern/rate-limit) |
 
 Standard:
 - **One LLM API key per agent per environment** (`/agentbase-llm`), so a rate limit and usage can be attached to exactly that agent; a separate key for eval/CI.
 - Attach a Rate Limit to each agent key (requests/day **and** tokens/day) sized from the expected traffic × calls per turn (router + agent + tool rounds + judge). This caps runaway loops and cost.
 - Budget: track spend in [Usage & Budget](https://docs.greennode.ai/ai-stack/usage-budget); per-trace cost is in Langfuse.
 - On 429:
-  - **A fallback helps for a Protect & Govern limit**: that limit is per key **and per model**, so another model has its own quota.
+  - **A fallback helps only for a model-level Protect & Govern limit.** A limit attached to an API key is totalled across **all models** of that key, and one attached to a model across all keys ([rate-limit](https://docs.greennode.ai/ai-stack/agent-base/protect-govern/rate-limit), *Overview*); both run in parallel. A fallback model under the same key shares the key's cap.
   - **A fallback does not help for the account limit** (10 RPM / 14,400 per day), which is shared by every model.
   - The SDK backoff (0.5–8 s) is much shorter than a per-minute window: after a 429 from a per-minute limit, retries in the same minute usually fail too. More retries don't fix it; fewer calls per turn do. Lower `MAX_TOOL_ROUNDS`, disable adaptive routing / reflection, lower eval `--concurrency`, or raise the limit.
   - A turn that still fails returns a clear error.
@@ -179,7 +179,7 @@ Re-measure on your models before changing defaults — `make check-creds` shows 
 
 The prompt is `[static system prompt, *history, latest user message, per-turn context message, *this turn's tool rounds]`. The static system prompt and the tool schemas stay byte-identical. Everything that changes per turn goes in the **context system message** (`build_context_message` in `app/graph/builder.py`), inserted right after the latest user message and never persisted: current date/time, summary, recalled notes, critique. The cached prefix (system prompt + history + user message) is therefore reused across turns. Don't put timestamps, request ids or per-user data in the system prompt. MaaS returns `prompt_tokens_details.cached_tokens` (measured: 8128/8174 tokens cached on repeat) ⇒ Langfuse records `input_cache_read`.
 
-Keep `LLM_BASE_URL` pointing at MaaS on the Runtime too. An older doc mentioned a sidecar LLM proxy on the Runtime; the current docs don't, so don't route through one unless GreenNode confirms it.
+Keep `LLM_BASE_URL` pointing at MaaS on the Runtime too. The MCP Gateway docs ([mcp-gateway](https://docs.greennode.ai/ai-stack/agent-base/mcp-governance/mcp-gateway), *MCP Gateway vs Sidecar LLM Proxy*) mention a Sidecar LLM Proxy (auto-injected, `localhost:18080`, bypasses Kong so no Policy Group applies) but document no path, auth or model mapping, so don't route through it unless GreenNode confirms it.
 
 ## Troubleshooting
 
@@ -191,7 +191,7 @@ Keep `LLM_BASE_URL` pointing at MaaS on the Runtime too. An older doc mentioned 
 | `ProviderStreamError` / bare `openai.APIError: <message>` (no status), often after some tokens | Provider failed inside the stream (SSE error chunk: engine overloaded or crashed) | Falls back automatically when the tier has fallbacks; without fallbacks it surfaces as an error, so add a fallback |
 | WARNING `LLM tier …: worst case … > REQUEST_TIMEOUT_S` | Timeout × attempts + retry backoff exceed the request budget | Use the §4 time-budget table values |
 | 404 model not found (ERROR log names the env var) | Wrong `path` or model removed (MaaS may also answer 404 for a model not enabled for the key) | Fix the path; with a fallback the request still works but every call fails over first, so fix it |
-| Frequent 429 | Account limit (10 RPM, shared by all models) or a Protect & Govern limit (per key and model) | Account limit: a fallback does NOT help; request a whitelist, turn off adaptive routing/reflection, lower `MAX_TOOL_ROUNDS`, lower eval `--concurrency`. Protect & Govern: a fallback to another model helps, or raise the limit |
+| Frequent 429 | Account limit (10 RPM, shared by all models) or a Protect & Govern limit (key-level or model-level) | Account limit: a fallback does NOT help; request a whitelist, turn off adaptive routing/reflection, lower `MAX_TOOL_ROUNDS`, lower eval `--concurrency`. Protect & Govern: a limit on the API key is shared by every model of that key — a fallback does NOT help, raise it or cut calls; a limit on a model — a fallback to another model helps |
 | 504 although no call failed | Thinking models streaming for minutes (the inactivity timeout never fires) | Budget the turn from Langfuse p95 (§4); non-thinking models for internal flows, output caps |
 | WARNING `… hit its output cap (finish_reason=length)` | A thinking model spent the flow's `max_tokens` (§2) | Non-thinking model for that flow, or raise `LLM_TASK_MAX_TOKENS` |
 | Answer starts with reasoning-like text ("Let me check…", English in a Vietnamese reply) / router or judge returns prose instead of JSON | `LLM_THINKING_BUDGET` cut the thinking and the model kept thinking in the content (§6) | JSON flows: `0` (thinking off); conversation flows: remove the budget (`-1`) or raise it |

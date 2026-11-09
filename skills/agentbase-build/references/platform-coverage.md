@@ -1,6 +1,6 @@
 # GreenNode AgentBase platform coverage ↔ skills
 
-Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 2026-10) and the platform skill set `greennode-agentbase-skills` to the `agentbase-build-*` skills. ✅ run for real · 🧪 tested offline/locally · 📄 guidance only · ⛔ out of scope.
+Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 2026-10; re-read 2026-11) and the platform skill set `greennode-agentbase-skills` to the `agentbase-build-*` skills. ✅ run for real · 🧪 tested offline/locally · 📄 guidance only · ⛔ out of scope.
 
 | AgentBase item | Platform skill (operations) | Build skill (code/architecture) | Status |
 |---|---|---|---|
@@ -15,7 +15,8 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 | Memory (events, records, strategies) | `/agentbase-memory` | `agentbase-build-memory`, `-hitl` | ✅ short/long-term, isolation, HITL on real memory |
 | AI Platform LLM (MaaS, API key, models) | `/agentbase-llm` | `agentbase-build-llm` (tiers, flows, fallback, routing) | ✅ 10 models, real fallback, prompt cache |
 | Protect & Govern — Rate limit | console | `-llm` (Rate Limit per API key / per model, MaaS 10 RPM account limit, one key per agent per env) | 📄 docs |
-| Sidecar LLM Proxy (`localhost:18080`) | — | `-llm` (needs verification) | 📄 not verified |
+| Sidecar LLM Proxy (`localhost:18080`) | — | `-llm` (mentioned in the MCP Gateway docs only; no path/auth/model mapping documented) | 📄 not verified |
+| Built-in Tools (Code Interpreter, Browser: MCP endpoint + per-session sandboxes; whitelist-only, pricing unpublished) | — | `agentbase-build` `references/decision-guide.md` row only; no template or tested recipe | 📄 docs only |
 | Private Networking (VPC Peering) | `/agentbase-deploy`, `/agentbase-gateway` | `agentbase-build` `references/private-networking.md`, `-deploy`, `-mcp`, `-mcp-server`; sample `greennode-samples/sample-onprem-mcp-vpn` | 📄 docs + sample |
 | Team & Permissions / Service Accounts | console / `/agentbase` | `agentbase-build` `references/iam-permissions.md`, `-deploy` (CI SA, reset-service-account, orphaned SAs) | 📄 docs |
 | GreenNode CLI (`grn`) / GreenNode MCP | docs | `-deploy` (`grn agentbase deploy up`, pinned install, manifest rules, network/security gate — grn cannot carry them), scaffold `ci.yml` + `deploy/` | 🧪 mock `grn` + YAML render · ⏳ not run against a live account |
@@ -26,11 +27,11 @@ Maps each item in the AgentBase docs (docs.greennode.ai/ai-stack/agent-base, 202
 
 ## Platform bugs/differences found during real runs (handled in the skills)
 
-1. Runtimes created without Security Settings (Inbound Auth `No authorization`) are public ⇒ the agent must use `jwt`/`api_key`. The platform now offers Inbound Auth IAM/JWT + IP Access Control ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)); the agent still verifies tokens itself.
+1. Runtimes created without Security Settings (Inbound Auth `No authorization`) are public ⇒ the agent must use `jwt`/`api_key`. The platform now offers Inbound Auth IAM/JWT + IP Access Control ([create-runtime](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/create-runtime)); the agent still verifies tokens itself. The Console now defaults a new Runtime to **IAM Permissions** (what `grn` / the API default to is not documented), and in IAM and JWT mode the platform **strips `Authorization`** before the container — the user token must also travel in `X-GreenNode-AgentBase-Custom-User-Token` (`agentbase-build-auth`). Not yet run against a live Runtime JWT; the Expo template and the BFF's `jwt` mode send only `Authorization`.
 2. `greennode-agentbase` 1.0.3: `insert_memory_records_directly` needs a `MemoryRecordInsertDirectlyRequest` (the official sample passes a list ⇒ TypeError); `search` returns `list[dict]`.
 3. `AgentBaseMemoryEvents`: reading state right after an interrupt may miss the `__interrupt__` write, and the bridge inserts a fake ToolMessage ⇒ take the interrupt from the graph output, treat `next=('approval',)` as pending approval.
 4. SDK `IAMCredentials` falls back per field ⇒ mismatched ID/secret pair ⇒ 401 ⇒ `.greennode.json` is the only source locally.
-5. Each MCP Connector has its own `connectUrl` (`<gateway>/<connector>`); the gateway root is unusable; policy principal = `iam:<sub>` (not client_id) — the developer's locally, the runtime service account's on AgentBase; a gateway without a Policy Group ⇒ 403 for everything; a policy deny comes back primarily as **HTTP 403** on `tools/call` ("No policy allows this request"; the MCP adapter raises an `ExceptionGroup[HTTPStatusError]`), sometimes as an MCP error "Request denied by policy." (`ToolException`) ⇒ the LLM retries unless there is a guard (`app/tools/mcp.py` handles both).
+5. Each MCP Connector has its own `connectUrl` (`<gateway>/<connector>`); the gateway root is unusable; policy principal = `iam:<sub>` (not client_id) — the developer's locally, the runtime service account's on AgentBase; a gateway without a Policy Group answered 403 in 2026-10 runs but **allowed every call** in a live lab on 2026-11-09 (one account, one gateway) ⇒ treat it as fail-open and bind a group first; a policy deny came back as **HTTP 403** on `tools/call` ("No policy allows this request"; the MCP adapter raises an `ExceptionGroup[HTTPStatusError]`) in 2026-10 and as **HTTP 200 with an MCP tool error "Request denied by policy."** (`ToolException`) on 2026-11-09 (deny wins over allow; empty or dangling group ⇒ deny; the gateway root is 404, a target is `<gateway endpoint>/<target name>`) ⇒ the LLM retries unless there is a guard (`app/tools/mcp.py` handles both).
 6. GreenNode IAM does not publish JWKS ⇒ IAM tokens cannot be used as inbound JWT.
 7. Memory API: search query ≤ 1000 characters (400 if longer); checkpoint reads sometimes hang ~7 minutes with the SDK's default timeout/retry ⇒ 10s timeout, 3 retries (`MEMORY_MAX_RETRIES`), `REQUEST_TIMEOUT_S`.
 8. MaaS sometimes returns 503 (glm-5.3-flash) ⇒ a fallback model is mandatory for prod.

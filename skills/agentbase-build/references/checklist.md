@@ -12,6 +12,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 
 ## Runtime contract
 - [B] `GET /health` → 200; listens on `0.0.0.0:8080`.
+- [B] Stateless: no session state only in process memory — the docs' *Service Contract* ([runtime-reference](https://docs.greennode.ai/ai-stack/agent-base/agent-runtime/runtime-reference)) says to use the Memory Service. `MEMORY_BACKEND=inmemory`, the in-memory A2A task store and per-replica caches/limits are acceptable only on one replica or with the per-replica semantics in `platform-coverage.md` → *Known limits*.
 - [B] `make test` green; `make lint` clean.
 - Image built with `--platform linux/amd64`, runs as non-root.
 
@@ -29,7 +30,7 @@ Run each item and report `PASS` / `FAIL` / `N/A` with evidence (command + short 
 - [B] Side-effect tools are in `HITL_TOOLS` (or the user confirmed in writing that it is not needed).
 - [B] Each local side-effect tool passes `idempotency_key(config, tool_call_id)` to the system it changes (or that system dedupes on a business key) — HITL alone does not stop a double run across replicas (`/agentbase-build-hitl`).
 - Prod MCP goes through the MCP Gateway, inbound `IAM` or `JWT`; secrets live in Identity (Secret Provider).
-- [B] The Gateway has a **Policy Group** attached (none attached ⇒ every tools/call returns 403); there is an ALLOW policy with the exact action `<connector>__<tool>` for each principal that calls it: the developer's `iam:<sub>` (`make check-creds`, local runs) and **each environment's runtime** `iam:<sub>` (runtime logs `IAM principal …`, logged at startup by `log_iam_principal()` — only when an enabled `auth: "iam"` MCP server is configured — `/agentbase-build` Step 9b). Dev and prod use separate gateways/groups (≤ 10 policies per group).
+- [B] The Gateway has a **Policy Group** attached (none attached ⇒ **fail-open**: every valid IAM caller could call every tool, verified live 2026-11-09 — bind it before callers can reach the gateway; a bound group with no matching ALLOW denies); there is an ALLOW policy with the exact action `<connector>__<tool>` for each principal that calls it: the developer's `iam:<sub>` (`make check-creds`, local runs) and **each environment's runtime** `iam:<sub>` (runtime logs `IAM principal …`, logged at startup by `log_iam_principal()` — only when an enabled `auth: "iam"` MCP server is configured — `/agentbase-build` Step 9b). Dev and prod use separate gateways/groups (few policies per group — documented 10–20, observed 100 accepted on 2026-11-09; check `errors.quota.policy`).
 - [B] `mcp_servers.json` points to **each connector's connectUrl** (`<gateway endpoint>/<connector>`), not the gateway root, and every entry declares `auth` explicitly.
 - [B] `HITL_TOOLS` patterns all match a tool (`tools.collect.output.hitl_unmatched` is empty).
 - MCP servers in a VPC / data center go through a **Private** MCP Gateway (`references/private-networking.md`); they still authenticate every call.

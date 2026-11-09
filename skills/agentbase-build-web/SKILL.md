@@ -45,7 +45,7 @@ a failed run leaves `.agentbase-setup-pending` and the next run re-applies the t
 | `NEXT_PUBLIC_STREAMING`, `NEXT_PUBLIC_IDLE_TIMEOUT_S` | The **only** browser settings (public bundle — never a secret) |
 | `BFF_AGENT_URL` | Runtime endpoint (`/agentbase-deploy`) or `http://127.0.0.1:8080` (`make dev`). Production: https |
 | `BFF_AUTH_MODE` | `jwt` (OIDC sign-in) · `none` = local backend with `AUTH_MODE=none` (refused in production) |
-| `BFF_RUNTIME_AUTH` | Runtime Inbound Auth `jwt` / *No authorization* ⇒ `jwt` (backend `AUTH_TOKEN_HEADER=Authorization`) · *IAM Permissions* ⇒ `iam` (backend `AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token`) + `BFF_IAM_CLIENT_ID` / `BFF_IAM_CLIENT_SECRET` |
+| `BFF_RUNTIME_AUTH` | Runtime Inbound Auth *No authorization* ⇒ `jwt` (backend `AUTH_TOKEN_HEADER=Authorization`; a Runtime `JWT` strips `Authorization` before the container, so `jwt` mode does **not** work behind it — the BFF would have to send the user token in a custom header too) · *IAM Permissions* ⇒ `iam` (backend `AUTH_TOKEN_HEADER=X-GreenNode-AgentBase-Custom-User-Token`) + `BFF_IAM_CLIENT_ID` / `BFF_IAM_CLIENT_SECRET` |
 | `BFF_OIDC_ISSUER` / `CLIENT_ID` / `CLIENT_SECRET` / `SCOPES` / `AUDIENCE` | The IdP client of this app; per-IdP values as in `/agentbase-build-frontend` (Auth0 `AUDIENCE`, Cognito without `offline_access`). Confidential client recommended |
 | `BFF_APP_ORIGIN` | Public origin, e.g. `https://chat.example.com` — redirect URI `<origin>/api/auth/callback`, post-logout URI `<origin>/`, CSRF Origin check |
 | `BFF_SESSION_SECRET` | ≥ 32 random chars (`openssl rand -base64 48`) — encrypts the session cookie. The user sets it, never in chat |

@@ -7,7 +7,7 @@ Principle: **build minimal by default; every enabled component must have a reaso
 | Component | Reason |
 |---|---|
 | Runtime contract, `service.py`, standard graph | Common skeleton |
-| Inbound auth (`jwt` / `api_key`) | The Runtime's own Inbound Auth (IAM / JWT / None) is optional and may be None ⇒ the agent always verifies callers itself |
+| Inbound auth (`jwt` / `api_key`) | The Runtime's own Inbound Auth (IAM — the Console default — / JWT / None) may be None ⇒ the agent always verifies callers itself; behind IAM/JWT the platform strips `Authorization`, so the agent reads the user token from `X-GreenNode-AgentBase-Custom-User-Token` |
 | Short-term memory (checkpointer) | Multi-turn conversations; HITL also needs a checkpointer |
 | Compression | Insurance for long conversations; costs nothing until the threshold is exceeded |
 | Langfuse tracing (can be sampled) | An agent cannot be debugged without traces |
@@ -79,6 +79,7 @@ Details and measurements: `/agentbase-build-llm`.
 | Pure logic, used only by this agent, no secrets needed | Local tool |
 | SaaS available in the connector catalog (GitHub, Slack, M365) | MCP Connector (no code) |
 | Internal system, shared by many agents, needs policy/audit | **Build an MCP server** (`/agentbase-build-mcp-server`) + Custom Connector |
+| Agent must run model-written code or drive a browser | **Built-in Tools** (Code Interpreter, Browser: per-session sandboxes behind an MCP endpoint, [built-in-tools](https://docs.greennode.ai/ai-stack/agent-base/built-in-tools)) — whitelist-only rollout (contact support), pricing not published; the sandbox has outbound public internet, and sessions do not expire. Never exec model-written code in the agent's own container. This repo has no template or tested recipe for it (`platform-coverage.md`) |
 | Needs per-user data in the target system | MCP server using OAuth 3LO or inbound JWT forwarding so `current_user()` comes from the token |
 | Internal document lookup (RAG), POC / ≤ a few dozen files | Local `search_knowledge`: drop `.md/.txt` into `app/knowledge/` (auto-registered when files exist) |
 | Prod RAG: many documents, semantic search, frequent updates | MCP server with a vector store, **keep the tool name `search_knowledge`** (set `"prefix": false` on that server in `mcp_servers.json` — MCP tools are otherwise exposed as `<server>_<tool>`; a name collision fails `collect_tools`) and the `[Source: …]` format |

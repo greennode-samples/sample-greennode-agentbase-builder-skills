@@ -8,6 +8,28 @@ review can tell which standard a project was built from.
 
 ## Unreleased
 
+- **Docs re-read (2026-11): skills corrected where the AgentBase docs say otherwise** (docs-only; no template code changed).
+  Runtime Inbound Auth `IAM Permissions` / `JWT` **strips `Authorization` before the container** (only *No authorization*
+  forwards it) and the Console now defaults a new Runtime to IAM: `agentbase-build-deploy`, `-auth`, `-web`, `-frontend` and
+  `api-contract.md` no longer tell the agent to read the user JWT from `Authorization` behind a Runtime JWT (send it also in
+  `X-GreenNode-AgentBase-Custom-User-Token`; the Expo template and the BFF `jwt` mode still send one header, not run live).
+  `-llm`: a Protect & Govern limit on an API key is shared by all its models, so a fallback model does not bypass it; the
+  Sidecar LLM Proxy is mentioned in the MCP Gateway docs. `-memory`: event pagination `from` ≤ 5000 is now documented; no
+  `{sessionId}` in the namespace template; strategies and expiry are set at store creation. `-mcp`: gateway JWT settings
+  (Discovery URL / JWKS, Principal claim), connector Header key / prefix, default scopes, M365 VNG bundle, Slack needs a
+  Custom provider, 22 policy operators, conditions combine with AND. Also: Outbound IP of a Private Runtime, vCR
+  `backendName` / robot username / expiry, runtime env vars "non-sensitive config only", stateless contract, ephemeral
+  filesystem (vStorage S3), a Built-in Tools row in the decision guide. **Verified live (2026-11-09, temporary resources):** deleting a Policy Group does
+  **not** detach it (the gateway keeps the dangling `policyGroupId`; unbind first with `PATCH` `{"policyGroupId": null}`, `application/merge-patch+json`), and the documented
+  policy-group limits (10/20 per group, 20 groups) were not enforced on that account (100 policies accepted, 429 `errors.quota.policy` at 101; 43 groups) — the skills say
+  to rely on that error, not a number. A gateway has its own identity `gw-<id>` (removed with it), a runtime `runtime-<id>`.
+  **Second live lab (2026-11-09, one account, one gateway, IAM inbound):** a gateway with **no Policy Group bound let every
+  valid IAM caller's `tools/call` through** (the skills said 403; an earlier 2026-10 run saw 403) — now a security rule: bind
+  a group before callers can reach the gateway; a bound group with zero policies, or a dangling id, denies; a deny arrived
+  as HTTP 200 with an MCP tool error `Request denied by policy.` (no 403 seen); deny wins over allow in any order (the
+  Console docs say first match); bare `iam` / `jwt` principals are rejected by the API with 400 (use `iam:*`, `jwt:*`, `*`);
+  `iam:<client_id>` denies; policy changes apply in seconds, binding via `PATCH` after UPDATING → ACTIVE; targets are called
+  at `<gateway endpoint>/<target name>`. Not tested: JWT-inbound gateways, non-owner callers, conditions, a real Runtime SA.
 - **Deploy: find out how the customer can build before building.** `agentbase-build-deploy` Step 3 now starts with
   `scripts/detect_build_env.sh` (read-only; no login, no secret printed): which engine is installed and answering (Docker
   Desktop, Rancher Desktop, OrbStack, Colima, Podman, nerdctl, Finch, buildah), `linux/amd64` support, git host and CI config
