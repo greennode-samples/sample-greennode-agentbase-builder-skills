@@ -253,10 +253,14 @@ async def test_approval_node_reasks_instead_of_applying_unknown_ids(fake_llm, mo
     _two_cards(fake_llm)
     await service.handle({"message": "remember x then y"}, ctx("hitl-r3"))
     card2 = (await service.handle(_approve("c1"), ctx("hitl-r3")))["interrupt"]
+    assert [tc["id"] for tc in card2["tool_calls"]] == ["c2"]
     check = service.stale_decision_ids
     monkeypatch.setattr(service, "stale_decision_ids", lambda *a: set())
     again = await service.handle(_approve("c1"), ctx("hitl-r3"))
-    assert again["status"] == "interrupted" and again["interrupt"]["id"] == card2["id"]
+    assert again["status"] == "interrupted"
+    # the re-asked card keeps its id (langgraph <= 1.2.18) or gets a new one (>= 1.2.20): the contract is only that the
+    # client echoes the id it was given, which the last resume below does
+    assert isinstance(again["interrupt"]["id"], str) and again["interrupt"]["id"]
     assert [tc["id"] for tc in again["interrupt"]["tool_calls"]] == ["c2"]
     monkeypatch.setattr(service, "stale_decision_ids", check)
     done = await service.handle(_approve("c2", again["interrupt"]["id"]), ctx("hitl-r3"))
