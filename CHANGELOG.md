@@ -19,7 +19,10 @@ review can tell which standard a project was built from.
   (Discovery URL / JWKS, Principal claim), connector Header key / prefix, default scopes, M365 VNG bundle, Slack needs a
   Custom provider, 22 policy operators, conditions combine with AND. Also: Outbound IP of a Private Runtime, vCR
   `backendName` / robot username / expiry, runtime env vars "non-sensitive config only", stateless contract, ephemeral
-  filesystem (vStorage S3), Policy Group deletion detaches from all gateways, and a Built-in Tools row in the decision guide.
+  filesystem (vStorage S3), a Built-in Tools row in the decision guide. **Verified live (2026-11-09, temporary resources):** deleting a Policy Group does
+  **not** detach it (the gateway keeps the dangling `policyGroupId`; unbind first with `PATCH` `{"policyGroupId": null}`, `application/merge-patch+json`), and the documented
+  policy-group limits (10/20 per group, 20 groups) were not enforced on that account (100 policies accepted, 429 `errors.quota.policy` at 101; 43 groups) — the skills say
+  to rely on that error, not a number. A gateway has its own identity `gw-<id>` (removed with it), a runtime `runtime-<id>`.
 - **Deploy: find out how the customer can build before building.** `agentbase-build-deploy` Step 3 now starts with
   `scripts/detect_build_env.sh` (read-only; no login, no secret printed): which engine is installed and answering (Docker
   Desktop, Rancher Desktop, OrbStack, Colima, Podman, nerdctl, Finch, buildah), `linux/amd64` support, git host and CI config

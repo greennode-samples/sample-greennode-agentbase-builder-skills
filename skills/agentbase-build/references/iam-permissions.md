@@ -18,7 +18,7 @@ Only the three `*FullAccess` managed policies are documented for AgentBase. For 
 ## Teams
 
 - **One developer service account per person** — never a shared one: audit logs and revocation stay per person (someone leaves ⇒ revoke one account), and the Memory API's limit of 10 concurrent requests applies **per account**, so a shared account makes developers (and eval runs) throttle each other.
-- **Separate dev and prod MCP Gateways**, each with its own Policy Group (one group per gateway; plan for 10 policies per group — `/agentbase-policy` — although the MCP docs mention 20): dev policies can then allow developer principals without touching prod.
+- **Separate dev and prod MCP Gateways**, each with its own Policy Group (one group per gateway; keep policies per group few — `/agentbase-policy` says 10, the MCP docs 20, one account accepted 100 on 2026-11-09; check `errors.quota.policy`): dev policies can then allow developer principals without touching prod.
 - Per environment: its own memory store, LLM API key (Rate Limit), runtime (its own `auto-sa-…` principal) and GitHub Environment secrets.
 
 ## Team roles (summary of the matrix)

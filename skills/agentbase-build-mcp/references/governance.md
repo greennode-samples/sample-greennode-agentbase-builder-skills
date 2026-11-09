@@ -6,7 +6,7 @@
 |---|---|
 | Gateway | 1 gateway / environment / domain group (e.g. `search-gw-prod`, `corp-gw-prod`). Never share a gateway between dev & prod |
 | Connector | 1 connector / upstream (`tavily`, `github`, `hrmcp`). Short, stable names matching `[a-z0-9]{3,50}` — the name appears in `connectUrl` **and** in policy actions `<connector>__<tool>`, which accept only letters, digits and `_`; gateway target names allow `[a-z0-9-]` ⇒ a dash (`hr-mcp`) makes per-tool actions impossible (verify once on the real API) |
-| Policy Group | 1 group / gateway; each agent (principal) gets 1 ALLOW policy listing exactly the actions it needs (least privilege). **Plan for ≤ 10 policies per group** (`/agentbase-policy` limit; the Console docs say 20) ⇒ more agents ⇒ more gateways, or group agents that need the same actions |
+| Policy Group | 1 group / gateway; each agent (principal) gets 1 ALLOW policy listing exactly the actions it needs (least privilege). **Keep policies per group few** (review effort, not a hard limit: `/agentbase-policy` says 10, the Console docs say 20; live 2026-11-09 one account accepted 100 per group and answered 429 `errors.quota.policy` at the 101st — quotas differ per account, so rely on that error, not on a number) ⇒ more agents ⇒ more gateways, or group agents that need the same actions |
 | Policy design | Order-independent (the Console docs say first match wins, `/agentbase-policy` says deny wins — see SKILL step 4): ALLOW lists only; no catch-all DENY (no match is already DENY); a carve-out DENY goes first |
 | Principal | Agent on Runtime: `iam:<sub>` of the runtime service account. User via JWT: `jwt:<sub>` or a `principal.<claim>` condition. Match-all (official *Principal and Wildcard Rules*): bare `iam` = every IAM identity, bare `jwt` / `jwt:*` = every JWT user, *All* = everyone; `iam:*` is not in the official table (prefer `iam`), `jwt:abc*` is a literal id |
 | Connector outbound auth | Prefer API Key / OAuth from a Secret Provider. **Inbound forward** re-sends the agent's gateway credential to the MCP server: never on an IAM-inbound gateway (that is the agent's platform IAM token); on a JWT-inbound gateway only towards your own server validating the same IdP |
@@ -54,7 +54,7 @@ Multiple conditions in one policy are combined with **AND** (all must be true fo
 - [ ] Each prod agent has its own principal (dedicated runtime service account) and only the actions it needs.
 - [ ] Side-effect tools are both restricted by Policy and go through `HITL_TOOLS`; on OAuth **3LO** connectors (consent of whoever clicked *Authorize*, shared by the project) every side-effect tool is in `HITL_TOOLS` and the OAuth scopes are minimal.
 - [ ] Connector names match `[a-z0-9]{3,50}`; each `allow_tools` list equals the Policy actions of that connector for this agent.
-- [ ] Policies give the same result under first-match and deny-wins (ALLOW lists, no catch-all DENY, carve-out DENY first); ≤ 10 per group.
+- [ ] Policies give the same result under first-match and deny-wins (ALLOW lists, no catch-all DENY, carve-out DENY first); few per group (documented 10–20, see above).
 - [ ] Upstream secrets live in Identity (Managed/Custom provider), rotated periodically.
 - [ ] Traces show `mcp.policy_denied` = 0 on the main flow (if > 0 ⇒ missing policy or the prompt calls the wrong tool).
 - [ ] Inbound NONE only in labs.
