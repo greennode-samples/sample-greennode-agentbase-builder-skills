@@ -3,8 +3,8 @@
 # Two stages: uv and its cache stay in the builder; the runtime image only gets Python, the venv and the code.
 # Base images are pinned by digest (the tag stays for readability): a build never changes under you. Dependabot's
 # docker ecosystem proposes the new digests; both Dockerfiles of these skills move together (check_skills.py).
-FROM ghcr.io/astral-sh/uv:0.13@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
-FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb AS builder
+FROM ghcr.io/astral-sh/uv:0.13@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85 AS uv
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 COPY --from=uv /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
@@ -14,7 +14,7 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY . .
 RUN uv sync --locked --no-dev
 
-FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 # /app stays owned by root (read-only for the server user) — no `chown -R` layer. The throwaway SQLite demo
 # (MCP_ALLOW_SQLITE=true) therefore writes to /tmp; production uses Postgres (store.py).
 ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" MCP_APP_ENV=prod MCP_DB_PATH=/tmp/mcp.db
